@@ -1806,6 +1806,14 @@ thiserror = "1"
 workspace = true
 ```
 
+> **MSRV note (Rust 1.83):** cargo 1.83 has no MSRV-aware resolution, so `zip = "2"`
+> resolves its transitive `indexmap`/`hashbrown` to versions that require Rust 1.85
+> (edition2024) and fail to build. Pin the transitive down and **commit `Cargo.lock`**:
+> temporarily add `indexmap = "=2.7.1"`, run `cargo build -p kasane-adapters` to
+> generate the lock, remove the temporary line, rebuild, and commit the resulting
+> `Cargo.lock` (pins `indexmap 2.7.1` / `hashbrown 0.15.5`). Keep `Cargo.toml` to just
+> the four deps above.
+
 - [ ] **Step 2: Write failing tests (detection, guard, EPUB end-to-end)**
 
 `crates/kasane-adapters/src/detect.rs`:
@@ -1901,7 +1909,8 @@ fn zip_has_epub_mimetype(bytes: &[u8]) -> bool {
     let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { return false };
     let Ok(mut f) = z.by_name("mimetype") else { return false };
     let mut s = String::new();
-    f.read_to_string(&mut s).ok();
+    // bound the read: the mimetype string is tiny; never decompress a huge entry here
+    f.take(64).read_to_string(&mut s).ok();
     s.trim() == "application/epub+zip"
 }
 
@@ -2111,26 +2120,27 @@ impl Adapter for EpubAdapter {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| ParseError::Malformed(e.to_string()))?;
 
-        // locate the OPF via META-INF/container.xml
-        let container = read_entry(&mut zip, "META-INF/container.xml")
-            .ok_or(ParseError::Malformed("missing container.xml".into()))?;
+        // locate the OPF via META-INF/container.xml (read_entry Errs on a bomb)
+        let container = read_entry(&mut zip, "META-INF/container.xml")?;
         let opf_path = find_opf_path(&container)
             .ok_or(ParseError::Malformed("no rootfile".into()))?;
+        // sanitize the attacker-controlled rootfile path before using it
+        let opf_path = safe_entry_name(&opf_path)
+            .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
         let opf_dir = opf_path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
 
-        let opf_xml = read_entry(&mut zip, &opf_path)
-            .ok_or(ParseError::Malformed("missing opf".into()))?;
+        let opf_xml = read_entry(&mut zip, &opf_path)?;
         let parsed = opf::parse_opf(&opf_xml, &opf_dir);
 
         let mut nodes = Vec::new();
         let mut next_id = 0u32;
         for href in &parsed.spine_hrefs {
             let Some(name) = safe_entry_name(href) else { continue };
-            if let Some(xml) = read_entry(&mut zip, &name) {
-                for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
-                    nodes.push(Node { block: b,
-                        prov: Provenance { source_pages: None, source_href: Some(name.clone()) } });
-                }
+            // degrade, don't die: skip an entry that is missing or trips the bomb guard
+            let Ok(xml) = read_entry(&mut zip, &name) else { continue };
+            for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
+                nodes.push(Node { block: b,
+                    prov: Provenance { source_pages: None, source_href: Some(name.clone()) } });
             }
         }
 
@@ -2146,13 +2156,23 @@ impl Adapter for EpubAdapter {
     }
 }
 
-fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut f = zip.by_name(name).ok()?;
-    // decompression-bomb guard
-    if !crate::guard::check_expansion(f.compressed_size(), f.size()) { return None; }
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    Some(s)
+fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str)
+    -> Result<String, ParseError> {
+    let f = zip.by_name(name)
+        .map_err(|_| ParseError::Malformed(format!("missing entry: {name}")))?;
+    // Bomb guard: the declared size is attacker-controlled, so use check_expansion as a
+    // cheap first gate AND bound the ACTUAL decompressed read to MAX_TOTAL_BYTES. The zip
+    // crate does not enforce declared vs. real inflate size, so an unbounded read here
+    // would let an entry that lies about its size exhaust memory.
+    if !crate::guard::check_expansion(f.compressed_size(), f.size()) {
+        return Err(ParseError::Bomb);
+    }
+    let cap = crate::guard::MAX_TOTAL_BYTES;
+    let mut buf = Vec::new();
+    f.take(cap + 1).read_to_end(&mut buf)
+        .map_err(|e| ParseError::Malformed(e.to_string()))?;
+    if buf.len() as u64 > cap { return Err(ParseError::Bomb); }
+    String::from_utf8(buf).map_err(|e| ParseError::Malformed(e.to_string()))
 }
 
 fn find_opf_path(container_xml: &str) -> Option<String> {
