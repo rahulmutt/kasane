@@ -1561,7 +1561,9 @@ kasane-core = { path = "../kasane-core" }
 anyhow = "1"
 
 [dev-dependencies]
-tempfile = "3"
+# Pinned: tempfile 3.15+ pulls getrandom 0.4.x (edition2024, needs Rust 1.85);
+# 3.14.0 is the newest that builds on the pinned rust 1.83 (fastrand/rustix chain).
+tempfile = "=3.14.0"
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -1653,7 +1655,13 @@ use std::path::Path;
 
 pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -> Result<()> {
     if out.exists() {
-        let non_empty = out.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false);
+        // Surface a read error (e.g. `out` is a file / permission denied) rather
+        // than silently treating it as empty and bypassing the refusal below.
+        let non_empty = out
+            .read_dir()
+            .with_context(|| format!("inspect output {}", out.display()))?
+            .next()
+            .is_some();
         if non_empty && !force {
             bail!("output directory {} is not empty (use --force)", out.display());
         }
@@ -1680,8 +1688,24 @@ pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -
         }
     }
 
-    if out.exists() { std::fs::remove_dir_all(out).ok(); }
-    std::fs::rename(&tmp, out).context("atomic rename temp -> out")?;
+    // Atomic swap: never destroy existing `out` content before the replacement
+    // is in place. Move the old dir aside, rename tmp onto out, then delete the
+    // backup; if the rename fails, restore the backup. (A bare
+    // remove_dir_all(out) before rename would lose data on a crash in between.)
+    if out.exists() {
+        let backup = parent.join(format!(".{}.kasane-bak", file_stem(out)));
+        if backup.exists() { std::fs::remove_dir_all(&backup).ok(); }
+        std::fs::rename(out, &backup).context("move existing output aside")?;
+        match std::fs::rename(&tmp, out) {
+            Ok(()) => { std::fs::remove_dir_all(&backup).ok(); }
+            Err(e) => {
+                std::fs::rename(&backup, out).ok(); // restore previous content
+                return Err(anyhow::Error::new(e)).context("atomic rename temp -> out");
+            }
+        }
+    } else {
+        std::fs::rename(&tmp, out).context("atomic rename temp -> out")?;
+    }
     Ok(())
 }
 
@@ -2223,7 +2247,9 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 
 [dev-dependencies]
-tempfile = "3"
+# Pinned: tempfile 3.15+ pulls getrandom 0.4.x (edition2024, needs Rust 1.85);
+# 3.14.0 is the newest that builds on the pinned rust 1.83 (fastrand/rustix chain).
+tempfile = "=3.14.0"
 
 [lints]
 workspace = true
