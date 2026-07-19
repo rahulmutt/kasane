@@ -1042,6 +1042,8 @@ use std::collections::HashMap;
 
 pub fn resolve_refs(placed: &mut Placed, anchors: &HashMap<BlockId, String>) {
     let from = placed.path.clone();
+    // a section's own heading text can carry internal links too
+    fix_inlines(&mut placed.node.title, &from, anchors);
     for b in &mut placed.node.body {
         fix_block(b, &from, anchors);
     }
