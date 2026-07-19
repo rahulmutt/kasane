@@ -1,0 +1,15 @@
+[package]
+name = "kasane-adapters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kasane-ir = { path = "../kasane-ir" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.36"
+thiserror = "1"
+
+[lints]
+workspace = true
