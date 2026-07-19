@@ -12,8 +12,9 @@ pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -
     if out.exists() {
         let non_empty = out
             .read_dir()
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false);
+            .with_context(|| format!("inspect output directory {}", out.display()))?
+            .next()
+            .is_some();
         if non_empty && !force {
             bail!(
                 "output directory {} is not empty (use --force)",
@@ -29,6 +30,36 @@ pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -
     }
     std::fs::create_dir_all(&tmp).context("create temp dir")?;
 
+    if let Err(e) = write_tree_contents(tree, assets, &tmp) {
+        std::fs::remove_dir_all(&tmp).ok();
+        return Err(e);
+    }
+
+    if out.exists() {
+        let backup = parent.join(format!(".{}.kasane-bak", file_stem(out)));
+        if backup.exists() {
+            std::fs::remove_dir_all(&backup).ok();
+        }
+        std::fs::rename(out, &backup)
+            .with_context(|| format!("move aside existing {} for atomic swap", out.display()))?;
+        match std::fs::rename(&tmp, out) {
+            Ok(()) => {
+                std::fs::remove_dir_all(&backup).ok();
+            }
+            Err(e) => {
+                // Best-effort restore of the original content so a failed swap
+                // doesn't leave `out` missing.
+                std::fs::rename(&backup, out).ok();
+                return Err(e).context("atomic rename temp -> out");
+            }
+        }
+    } else {
+        std::fs::rename(&tmp, out).context("atomic rename temp -> out")?;
+    }
+    Ok(())
+}
+
+fn write_tree_contents(tree: &SiteTree, assets: &AssetBag, tmp: &Path) -> Result<()> {
     for file in &tree.files {
         let path = tmp.join(&file.path);
         if let Some(p) = path.parent() {
@@ -50,11 +81,6 @@ pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -
             std::fs::write(adir.join(&a.filename), &a.bytes)?;
         }
     }
-
-    if out.exists() {
-        std::fs::remove_dir_all(out).ok();
-    }
-    std::fs::rename(&tmp, out).context("atomic rename temp -> out")?;
     Ok(())
 }
 
@@ -110,5 +136,38 @@ mod tests {
         std::fs::write(out.join("keep.txt"), "x").unwrap();
         let tree = SiteTree { files: vec![] };
         assert!(write_tree(&tree, &AssetBag::default(), &out, false).is_err());
+    }
+
+    #[test]
+    fn overwrites_nonempty_with_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("book");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("old.md"), "stale").unwrap();
+
+        let tree = SiteTree {
+            files: vec![FileNode {
+                path: "index.md".into(),
+                frontmatter: Frontmatter {
+                    title: "Book".into(),
+                    breadcrumb: vec!["Book".into()],
+                    parent: None,
+                    prev: None,
+                    next: None,
+                    children: vec![],
+                    source_pages: None,
+                },
+                blocks: vec![Block::Heading {
+                    level: 1,
+                    id: BlockId(0),
+                    inlines: vec![Inline::Text("Book".into())],
+                }],
+            }],
+        };
+        write_tree(&tree, &AssetBag::default(), &out, true).unwrap();
+
+        let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+        assert!(idx.contains("# Book"));
+        assert!(!out.join("old.md").exists());
     }
 }
