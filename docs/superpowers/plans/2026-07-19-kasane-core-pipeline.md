@@ -2263,7 +2263,9 @@ path = "src/main.rs"
 kasane-adapters = { path = "../kasane-adapters" }
 kasane-core = { path = "../kasane-core" }
 kasane-writer = { path = "../kasane-writer" }
-clap = { version = "4", features = ["derive"] }
+# Pinned: clap 4.6+ requires Rust 1.85 (edition2024); 4.5.48 is the newest that
+# builds on the pinned rust 1.83. (cargo 1.83 has no MSRV-aware resolution.)
+clap = { version = "=4.5.48", features = ["derive"] }
 anyhow = "1"
 
 [dev-dependencies]
