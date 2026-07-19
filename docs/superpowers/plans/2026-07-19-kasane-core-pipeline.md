@@ -2180,11 +2180,24 @@ fn find_opf_path(container_xml: &str) -> Option<String> {
     let idx = container_xml.find("full-path=")?;
     let rest = &container_xml[idx + 10..];
     let q = rest.chars().next()?;
-    let rest = &rest[1..];
+    let rest = &rest[q.len_utf8()..]; // codepoint-safe: q may be multi-byte in attacker input
     let end = rest.find(q)?;
     Some(rest[..end].to_string())
 }
 ```
+
+> **Untrusted-boundary notes (shipped hardening beyond the sketch above):**
+> - `find_opf_path` slices by `q.len_utf8()`, not a hard-coded `1`, because
+>   `container.xml` is attacker-controlled and a multi-byte char after
+>   `full-path=` would otherwise panic (`byte index 1 is not a char boundary`).
+> - `read_entry` takes a `total_read: &mut u64` threaded through every call
+>   (container, opf, each spine item) so `MAX_TOTAL_BYTES` (512 MiB) is a true
+>   **aggregate** cap across the whole archive, not a per-entry budget — else a
+>   many-entry archive could reach ~200× the input size in memory.
+> - EPUB internal `<a href>` links currently pass through as
+>   `RefTarget::External` (unresolved); mapping them to `RefTarget::Internal(BlockId)`
+>   via an href→BlockId map is Plan 2 XHTML-fidelity work, and is listed as a
+>   known limitation in the README.
 
 `crates/kasane-adapters/src/lib.rs` (module head above the test):
 ```rust
