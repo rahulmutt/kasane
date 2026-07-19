@@ -1,0 +1,19 @@
+[package]
+name = "kasane-writer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+kasane-ir = { path = "../kasane-ir" }
+kasane-core = { path = "../kasane-core" }
+anyhow = "1"
+
+[dev-dependencies]
+# Pinned: tempfile 3.15+ pulls getrandom 0.4.x which requires Rust 1.85 (edition2024);
+# 3.14.0 is the newest that builds on the pinned rust 1.83 (uses fastrand/rustix, no ancient rand chain).
+tempfile = "=3.14.0"
+
+[lints]
+workspace = true

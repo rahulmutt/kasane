@@ -600,8 +600,11 @@ git commit -m "feat(core): fold IR into section tree (pass 1)"
   ```
   Effect: over-`max_tokens` leaf bodies gain synthetic child sections named `Part N`
   (split at block boundaries); leaves whose body is under `min_tokens` and have no
-  children are folded into their parent's `body` (heading demoted to a bold lead-in
-  is NOT done here — merge just concatenates body blocks under the parent).
+  children are folded into their parent's `body`, the tiny section's heading demoted
+  to a bold lead-in paragraph (`**Title**`) prepended to its absorbed body. Top-level
+  sections (children of the synthetic root, whose `node.level == 0`) are never merged
+  away — they must survive as output files — so the merge step only runs when
+  `node.level > 0`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -672,9 +675,11 @@ fn balance_node(node: &mut SectionNode, opts: &Options) {
     }
 
     // MERGE: absorb tiny childless children into this node's body
+    // (but preserve top-level sections: don't merge children of the synthetic root)
     let mut kept = Vec::new();
     for child in std::mem::take(&mut node.children) {
-        let small = child.children.is_empty()
+        let small = node.level > 0
+            && child.children.is_empty()
             && est_tokens_blocks(&child.body) < opts.min_tokens;
         if small {
             // demote heading to a bold lead-in para, then append its body
@@ -1037,6 +1042,8 @@ use std::collections::HashMap;
 
 pub fn resolve_refs(placed: &mut Placed, anchors: &HashMap<BlockId, String>) {
     let from = placed.path.clone();
+    // a section's own heading text can carry internal links too
+    fix_inlines(&mut placed.node.title, &from, anchors);
     for b in &mut placed.node.body {
         fix_block(b, &from, anchors);
     }
@@ -1554,7 +1561,9 @@ kasane-core = { path = "../kasane-core" }
 anyhow = "1"
 
 [dev-dependencies]
-tempfile = "3"
+# Pinned: tempfile 3.15+ pulls getrandom 0.4.x (edition2024, needs Rust 1.85);
+# 3.14.0 is the newest that builds on the pinned rust 1.83 (fastrand/rustix chain).
+tempfile = "=3.14.0"
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -1646,7 +1655,13 @@ use std::path::Path;
 
 pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -> Result<()> {
     if out.exists() {
-        let non_empty = out.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false);
+        // Surface a read error (e.g. `out` is a file / permission denied) rather
+        // than silently treating it as empty and bypassing the refusal below.
+        let non_empty = out
+            .read_dir()
+            .with_context(|| format!("inspect output {}", out.display()))?
+            .next()
+            .is_some();
         if non_empty && !force {
             bail!("output directory {} is not empty (use --force)", out.display());
         }
@@ -1673,8 +1688,24 @@ pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -
         }
     }
 
-    if out.exists() { std::fs::remove_dir_all(out).ok(); }
-    std::fs::rename(&tmp, out).context("atomic rename temp -> out")?;
+    // Atomic swap: never destroy existing `out` content before the replacement
+    // is in place. Move the old dir aside, rename tmp onto out, then delete the
+    // backup; if the rename fails, restore the backup. (A bare
+    // remove_dir_all(out) before rename would lose data on a crash in between.)
+    if out.exists() {
+        let backup = parent.join(format!(".{}.kasane-bak", file_stem(out)));
+        if backup.exists() { std::fs::remove_dir_all(&backup).ok(); }
+        std::fs::rename(out, &backup).context("move existing output aside")?;
+        match std::fs::rename(&tmp, out) {
+            Ok(()) => { std::fs::remove_dir_all(&backup).ok(); }
+            Err(e) => {
+                std::fs::rename(&backup, out).ok(); // restore previous content
+                return Err(anyhow::Error::new(e)).context("atomic rename temp -> out");
+            }
+        }
+    } else {
+        std::fs::rename(&tmp, out).context("atomic rename temp -> out")?;
+    }
     Ok(())
 }
 
@@ -1775,6 +1806,14 @@ thiserror = "1"
 workspace = true
 ```
 
+> **MSRV note (Rust 1.83):** cargo 1.83 has no MSRV-aware resolution, so `zip = "2"`
+> resolves its transitive `indexmap`/`hashbrown` to versions that require Rust 1.85
+> (edition2024) and fail to build. Pin the transitive down and **commit `Cargo.lock`**:
+> temporarily add `indexmap = "=2.7.1"`, run `cargo build -p kasane-adapters` to
+> generate the lock, remove the temporary line, rebuild, and commit the resulting
+> `Cargo.lock` (pins `indexmap 2.7.1` / `hashbrown 0.15.5`). Keep `Cargo.toml` to just
+> the four deps above.
+
 - [ ] **Step 2: Write failing tests (detection, guard, EPUB end-to-end)**
 
 `crates/kasane-adapters/src/detect.rs`:
@@ -1870,7 +1909,8 @@ fn zip_has_epub_mimetype(bytes: &[u8]) -> bool {
     let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { return false };
     let Ok(mut f) = z.by_name("mimetype") else { return false };
     let mut s = String::new();
-    f.read_to_string(&mut s).ok();
+    // bound the read: the mimetype string is tiny; never decompress a huge entry here
+    f.take(64).read_to_string(&mut s).ok();
     s.trim() == "application/epub+zip"
 }
 
@@ -2080,26 +2120,27 @@ impl Adapter for EpubAdapter {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| ParseError::Malformed(e.to_string()))?;
 
-        // locate the OPF via META-INF/container.xml
-        let container = read_entry(&mut zip, "META-INF/container.xml")
-            .ok_or(ParseError::Malformed("missing container.xml".into()))?;
+        // locate the OPF via META-INF/container.xml (read_entry Errs on a bomb)
+        let container = read_entry(&mut zip, "META-INF/container.xml")?;
         let opf_path = find_opf_path(&container)
             .ok_or(ParseError::Malformed("no rootfile".into()))?;
+        // sanitize the attacker-controlled rootfile path before using it
+        let opf_path = safe_entry_name(&opf_path)
+            .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
         let opf_dir = opf_path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
 
-        let opf_xml = read_entry(&mut zip, &opf_path)
-            .ok_or(ParseError::Malformed("missing opf".into()))?;
+        let opf_xml = read_entry(&mut zip, &opf_path)?;
         let parsed = opf::parse_opf(&opf_xml, &opf_dir);
 
         let mut nodes = Vec::new();
         let mut next_id = 0u32;
         for href in &parsed.spine_hrefs {
             let Some(name) = safe_entry_name(href) else { continue };
-            if let Some(xml) = read_entry(&mut zip, &name) {
-                for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
-                    nodes.push(Node { block: b,
-                        prov: Provenance { source_pages: None, source_href: Some(name.clone()) } });
-                }
+            // degrade, don't die: skip an entry that is missing or trips the bomb guard
+            let Ok(xml) = read_entry(&mut zip, &name) else { continue };
+            for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
+                nodes.push(Node { block: b,
+                    prov: Provenance { source_pages: None, source_href: Some(name.clone()) } });
             }
         }
 
@@ -2115,13 +2156,23 @@ impl Adapter for EpubAdapter {
     }
 }
 
-fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut f = zip.by_name(name).ok()?;
-    // decompression-bomb guard
-    if !crate::guard::check_expansion(f.compressed_size(), f.size()) { return None; }
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    Some(s)
+fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str)
+    -> Result<String, ParseError> {
+    let f = zip.by_name(name)
+        .map_err(|_| ParseError::Malformed(format!("missing entry: {name}")))?;
+    // Bomb guard: the declared size is attacker-controlled, so use check_expansion as a
+    // cheap first gate AND bound the ACTUAL decompressed read to MAX_TOTAL_BYTES. The zip
+    // crate does not enforce declared vs. real inflate size, so an unbounded read here
+    // would let an entry that lies about its size exhaust memory.
+    if !crate::guard::check_expansion(f.compressed_size(), f.size()) {
+        return Err(ParseError::Bomb);
+    }
+    let cap = crate::guard::MAX_TOTAL_BYTES;
+    let mut buf = Vec::new();
+    f.take(cap + 1).read_to_end(&mut buf)
+        .map_err(|e| ParseError::Malformed(e.to_string()))?;
+    if buf.len() as u64 > cap { return Err(ParseError::Bomb); }
+    String::from_utf8(buf).map_err(|e| ParseError::Malformed(e.to_string()))
 }
 
 fn find_opf_path(container_xml: &str) -> Option<String> {
@@ -2129,11 +2180,24 @@ fn find_opf_path(container_xml: &str) -> Option<String> {
     let idx = container_xml.find("full-path=")?;
     let rest = &container_xml[idx + 10..];
     let q = rest.chars().next()?;
-    let rest = &rest[1..];
+    let rest = &rest[q.len_utf8()..]; // codepoint-safe: q may be multi-byte in attacker input
     let end = rest.find(q)?;
     Some(rest[..end].to_string())
 }
 ```
+
+> **Untrusted-boundary notes (shipped hardening beyond the sketch above):**
+> - `find_opf_path` slices by `q.len_utf8()`, not a hard-coded `1`, because
+>   `container.xml` is attacker-controlled and a multi-byte char after
+>   `full-path=` would otherwise panic (`byte index 1 is not a char boundary`).
+> - `read_entry` takes a `total_read: &mut u64` threaded through every call
+>   (container, opf, each spine item) so `MAX_TOTAL_BYTES` (512 MiB) is a true
+>   **aggregate** cap across the whole archive, not a per-entry budget — else a
+>   many-entry archive could reach ~200× the input size in memory.
+> - EPUB internal `<a href>` links currently pass through as
+>   `RefTarget::External` (unresolved); mapping them to `RefTarget::Internal(BlockId)`
+>   via an href→BlockId map is Plan 2 XHTML-fidelity work, and is listed as a
+>   known limitation in the README.
 
 `crates/kasane-adapters/src/lib.rs` (module head above the test):
 ```rust
@@ -2212,11 +2276,15 @@ path = "src/main.rs"
 kasane-adapters = { path = "../kasane-adapters" }
 kasane-core = { path = "../kasane-core" }
 kasane-writer = { path = "../kasane-writer" }
-clap = { version = "4", features = ["derive"] }
+# Pinned: clap 4.6+ requires Rust 1.85 (edition2024); 4.5.48 is the newest that
+# builds on the pinned rust 1.83. (cargo 1.83 has no MSRV-aware resolution.)
+clap = { version = "=4.5.48", features = ["derive"] }
 anyhow = "1"
 
 [dev-dependencies]
-tempfile = "3"
+# Pinned: tempfile 3.15+ pulls getrandom 0.4.x (edition2024, needs Rust 1.85);
+# 3.14.0 is the newest that builds on the pinned rust 1.83 (fastrand/rustix chain).
+tempfile = "=3.14.0"
 
 [lints]
 workspace = true

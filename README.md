@@ -1,2 +1,25 @@
 # kasane
-A document processor that produces progessively disclosed, AI agent friendly Markdown output
+
+Convert documents and ebooks (EPUB today; PDF, DJVU, MOBI, AZW3, PPTX coming)
+into an AI-agent-friendly, progressively-disclosed Markdown file tree.
+
+## Quick start
+    mise install
+    just build
+    just run book.epub -o out/book
+    # open out/book/index.md and drill into linked sections
+
+## Development
+    just test    # run all tests
+    just lint    # fmt check + clippy -D warnings
+
+See AGENTS.md for the codebase map.
+
+## Known limitations (this build)
+
+- Internal in-document EPUB links (`#frag` and `file.xhtml#frag`) are passed
+  through unresolved as external references, not yet turned into working
+  cross-file links. Resolving them to real block targets is deferred to
+  Plan 2's XHTML-fidelity task.
+- EPUB tables, math, figures, footnotes, and lists are not yet parsed
+  (Plan 2).
