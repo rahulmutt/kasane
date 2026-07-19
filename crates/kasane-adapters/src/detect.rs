@@ -48,11 +48,12 @@ fn zip_has_epub_mimetype(bytes: &[u8]) -> bool {
     let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return false;
     };
-    let Ok(mut f) = z.by_name("mimetype") else {
+    let Ok(f) = z.by_name("mimetype") else {
         return false;
     };
     let mut s = String::new();
-    f.read_to_string(&mut s).ok();
+    // bound the read: the mimetype string is tiny; never decompress a huge entry here
+    f.take(64).read_to_string(&mut s).ok();
     s.trim() == "application/epub+zip"
 }
 
