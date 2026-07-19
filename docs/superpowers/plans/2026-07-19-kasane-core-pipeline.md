@@ -600,8 +600,11 @@ git commit -m "feat(core): fold IR into section tree (pass 1)"
   ```
   Effect: over-`max_tokens` leaf bodies gain synthetic child sections named `Part N`
   (split at block boundaries); leaves whose body is under `min_tokens` and have no
-  children are folded into their parent's `body` (heading demoted to a bold lead-in
-  is NOT done here — merge just concatenates body blocks under the parent).
+  children are folded into their parent's `body`, the tiny section's heading demoted
+  to a bold lead-in paragraph (`**Title**`) prepended to its absorbed body. Top-level
+  sections (children of the synthetic root, whose `node.level == 0`) are never merged
+  away — they must survive as output files — so the merge step only runs when
+  `node.level > 0`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -672,9 +675,11 @@ fn balance_node(node: &mut SectionNode, opts: &Options) {
     }
 
     // MERGE: absorb tiny childless children into this node's body
+    // (but preserve top-level sections: don't merge children of the synthetic root)
     let mut kept = Vec::new();
     for child in std::mem::take(&mut node.children) {
-        let small = child.children.is_empty()
+        let small = node.level > 0
+            && child.children.is_empty()
             && est_tokens_blocks(&child.body) < opts.min_tokens;
         if small {
             // demote heading to a bold lead-in para, then append its body
