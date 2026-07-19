@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 pub fn resolve_refs(placed: &mut Placed, anchors: &HashMap<BlockId, String>) {
     let from = placed.path.clone();
+    fix_inlines(&mut placed.node.title, &from, anchors);
     for b in &mut placed.node.body {
         fix_block(b, &from, anchors);
     }
@@ -192,5 +193,52 @@ mod tests {
         } else {
             panic!()
         }
+    }
+
+    #[test]
+    fn resolves_link_in_section_title() {
+        use crate::paths::Placed;
+        use crate::section::SectionNode;
+        use kasane_ir::*;
+        use std::collections::HashMap;
+
+        let mut anchors = HashMap::new();
+        anchors.insert(BlockId(7), "02-methods.md#methods".to_string());
+
+        let title = vec![
+            Inline::Link {
+                target: RefTarget::Internal(BlockId(7)),
+                inlines: vec![Inline::Text("see".into())],
+            },
+            Inline::Link {
+                target: RefTarget::Internal(BlockId(99)), // dangling
+                inlines: vec![Inline::Text("gone".into())],
+            },
+        ];
+        let mut placed = Placed {
+            path: "01-intro/index.md".into(),
+            node: SectionNode {
+                id: None,
+                level: 0,
+                title,
+                body: vec![],
+                children: vec![],
+                pages: None,
+            },
+            children: vec![],
+        };
+        resolve_refs(&mut placed, &anchors);
+
+        match &placed.node.title[0] {
+            Inline::Link {
+                target: RefTarget::External(u),
+                ..
+            } => assert_eq!(u, "../02-methods.md#methods"),
+            _ => panic!("first should be external link"),
+        }
+        assert!(
+            matches!(placed.node.title[1], Inline::Text(_)),
+            "dangling link in title stripped to text"
+        );
     }
 }
