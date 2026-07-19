@@ -1,4 +1,5 @@
 mod balance;
+mod nav;
 mod options;
 mod paths;
 mod refs;
@@ -6,6 +7,7 @@ mod section;
 mod sitetree;
 
 pub use balance::balance;
+pub use nav::structure;
 pub use options::Options;
 pub use paths::{assign_paths, PlaceResult, Placed};
 pub use refs::resolve_refs;
