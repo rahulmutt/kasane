@@ -67,7 +67,10 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                     b"a" => {
                         let x = inline_stack.pop().unwrap_or_default();
                         let target = match link_href.take() {
-                            Some(h) if h.starts_with('#') => RefTarget::External(h), // in-file; refined later
+                            // EPUB internal links (both same-file `#frag` and cross-file
+                            // `file.xhtml#frag` forms) currently pass through unresolved as
+                            // `External`. Mapping them to `RefTarget::Internal(BlockId)` is
+                            // deferred to Plan 2's XHTML-fidelity task.
                             Some(h) => RefTarget::External(h),
                             None => RefTarget::External(String::new()),
                         };
