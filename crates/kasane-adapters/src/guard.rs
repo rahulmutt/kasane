@@ -27,4 +27,22 @@ mod tests {
             Some("OEBPS/ch1.xhtml".to_string())
         );
     }
+
+    #[test]
+    fn check_expansion_ratio_boundary() {
+        assert!(check_expansion(1, 200));
+        assert!(!check_expansion(1, 201));
+    }
+
+    #[test]
+    fn check_expansion_absolute_cap_boundary() {
+        assert!(check_expansion(
+            super::MAX_TOTAL_BYTES / 100,
+            super::MAX_TOTAL_BYTES
+        ));
+        assert!(!check_expansion(
+            super::MAX_TOTAL_BYTES / 100,
+            super::MAX_TOTAL_BYTES + 1
+        ));
+    }
 }

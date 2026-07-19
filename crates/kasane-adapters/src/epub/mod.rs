@@ -14,17 +14,17 @@ impl Adapter for EpubAdapter {
             .map_err(|e| ParseError::Malformed(e.to_string()))?;
 
         // locate the OPF via META-INF/container.xml
-        let container = read_entry(&mut zip, "META-INF/container.xml")
-            .ok_or(ParseError::Malformed("missing container.xml".into()))?;
+        let container = read_entry(&mut zip, "META-INF/container.xml")?;
         let opf_path =
             find_opf_path(&container).ok_or(ParseError::Malformed("no rootfile".into()))?;
+        let opf_path = crate::guard::safe_entry_name(&opf_path)
+            .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
         let opf_dir = opf_path
             .rsplit_once('/')
             .map(|(d, _)| d.to_string())
             .unwrap_or_default();
 
-        let opf_xml =
-            read_entry(&mut zip, &opf_path).ok_or(ParseError::Malformed("missing opf".into()))?;
+        let opf_xml = read_entry(&mut zip, &opf_path)?;
         let parsed = opf::parse_opf(&opf_xml, &opf_dir);
 
         let mut nodes = Vec::new();
@@ -33,16 +33,18 @@ impl Adapter for EpubAdapter {
             let Some(name) = safe_entry_name(href) else {
                 continue;
             };
-            if let Some(xml) = read_entry(&mut zip, &name) {
-                for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
-                    nodes.push(Node {
-                        block: b,
-                        prov: Provenance {
-                            source_pages: None,
-                            source_href: Some(name.clone()),
-                        },
-                    });
-                }
+            let xml = match read_entry(&mut zip, &name) {
+                Ok(x) => x,
+                Err(_) => continue,
+            };
+            for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
+                nodes.push(Node {
+                    block: b,
+                    prov: Provenance {
+                        source_pages: None,
+                        source_href: Some(name.clone()),
+                    },
+                });
             }
         }
 
@@ -64,15 +66,27 @@ impl Adapter for EpubAdapter {
     }
 }
 
-fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut f = zip.by_name(name).ok()?;
-    // decompression-bomb guard
+fn read_entry(
+    zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    name: &str,
+) -> Result<String, ParseError> {
+    let f = zip
+        .by_name(name)
+        .map_err(|_| ParseError::Malformed(format!("missing entry: {name}")))?;
+    // Reject on the declared metadata first (cheap), then bound the ACTUAL read so a
+    // lying/small declared size cannot lead to an unbounded decompression.
     if !crate::guard::check_expansion(f.compressed_size(), f.size()) {
-        return None;
+        return Err(ParseError::Bomb);
     }
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    Some(s)
+    let cap = crate::guard::MAX_TOTAL_BYTES;
+    let mut buf = Vec::new();
+    f.take(cap + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| ParseError::Malformed(e.to_string()))?;
+    if buf.len() as u64 > cap {
+        return Err(ParseError::Bomb);
+    }
+    String::from_utf8(buf).map_err(|e| ParseError::Malformed(e.to_string()))
 }
 
 fn find_opf_path(container_xml: &str) -> Option<String> {

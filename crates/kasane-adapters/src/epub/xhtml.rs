@@ -53,19 +53,19 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
             Ok(Event::End(e)) => {
                 match e.local_name().as_ref() {
                     b"strong" | b"b" => {
-                        let x = inline_stack.pop().unwrap();
+                        let x = inline_stack.pop().unwrap_or_default();
                         if let Some(top) = inline_stack.last_mut() {
                             top.push(Inline::Strong(x));
                         }
                     }
                     b"em" | b"i" => {
-                        let x = inline_stack.pop().unwrap();
+                        let x = inline_stack.pop().unwrap_or_default();
                         if let Some(top) = inline_stack.last_mut() {
                             top.push(Inline::Emph(x));
                         }
                     }
                     b"a" => {
-                        let x = inline_stack.pop().unwrap();
+                        let x = inline_stack.pop().unwrap_or_default();
                         let target = match link_href.take() {
                             Some(h) if h.starts_with('#') => RefTarget::External(h), // in-file; refined later
                             Some(h) => RefTarget::External(h),
