@@ -1,12 +1,14 @@
 [package]
 name = "kasane-core"
-version = "0.1.0"
+description = "Pure structuring engine for kasane: fold, balance, paths, refs, nav"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-kasane-ir = { path = "../kasane-ir" }
+kasane-ir.workspace = true
 
 [lints]
 workspace = true

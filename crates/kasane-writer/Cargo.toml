@@ -1,13 +1,15 @@
 [package]
 name = "kasane-writer"
-version = "0.1.0"
+description = "Renders the kasane IR to GitHub-Flavored Markdown file trees"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-kasane-ir = { path = "../kasane-ir" }
-kasane-core = { path = "../kasane-core" }
+kasane-ir.workspace = true
+kasane-core.workspace = true
 anyhow = "1"
 
 [dev-dependencies]

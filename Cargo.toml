@@ -3,9 +3,21 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
+repository = "https://github.com/rahulmutt/kasane"
+
+# Internal crates are declared once, with both a path (for local builds) and a
+# version (which is what cargo records in the published manifest). Declaring
+# them here rather than per-crate means a release bumps two lines total, not
+# five package versions plus every path dependency that names them.
+[workspace.dependencies]
+kasane-ir = { path = "crates/kasane-ir", version = "0.1.0" }
+kasane-core = { path = "crates/kasane-core", version = "0.1.0" }
+kasane-writer = { path = "crates/kasane-writer", version = "0.1.0" }
+kasane-adapters = { path = "crates/kasane-adapters", version = "0.1.0" }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
