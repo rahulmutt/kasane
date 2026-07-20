@@ -297,6 +297,16 @@ pub fn xhtml_to_blocks(
     // rest of the document -- total silent data loss at exit 0. With this set
     // the `&` is delivered as literal Text and the document survives.
     reader.config_mut().allow_dangling_amp = true;
+    // Same rationale as allow_dangling_amp: quick-xml's default
+    // MismatchedEndTag check raises IllFormedError the moment a closing tag's
+    // name doesn't match the innermost still-open one, and this loop's
+    // `Err(_) => break` would then abandon the rest of the document on a
+    // single bad closing tag anywhere in real-world EPUB content. Disabling
+    // the check delivers the End event as written instead, so a stray/
+    // mismatched close degrades locally -- e.g. via the BlockFrame guards
+    // below (`matches!(frames.last(), Some(BlockFrame::List { .. }))` and
+    // friends) -- rather than truncating everything after it.
+    reader.config_mut().check_end_names = false;
     let mut blocks = vec![];
     let mut buf = Vec::new();
     // inline accumulation stack
@@ -812,7 +822,8 @@ pub fn xhtml_to_blocks(
                         }
                     }
                     b"ul" | b"ol" => {
-                        if let Some(f) = frames.pop() {
+                        if matches!(frames.last(), Some(BlockFrame::List { .. })) {
+                            let f = frames.pop().expect("checked");
                             finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
                     }
@@ -1883,6 +1894,26 @@ mod tests {
             panic!()
         };
         assert_eq!(text_of(&t.header[0]), "x y"); // promoted headerless row; paras space-joined
+    }
+
+    #[test]
+    fn stray_ul_close_inside_table_does_not_pop_the_table_frame() {
+        // Regression: `</ul>`/`</ol>` still used Task 1's untyped
+        // `if let Some(f) = frames.pop()`, so a stray `</ul>` with no
+        // matching `<ul>` popped whatever frame happened to be on top --
+        // here the open <table> -- and finished it prematurely (before its
+        // still-buffered <tr> flushed the cell into `rows`), losing the
+        // table's content entirely.
+        let blocks = parse_blocks("<body><table><tr><td>x</td></ul></tr></table></body>");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "table must survive the stray </ul>, got {blocks:?}"
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!("expected Table, got {:?}", blocks[0]);
+        };
+        assert_eq!(text_of(&t.header[0]), "x");
     }
 
     // ---- Code blocks, inline code, <br> ----
