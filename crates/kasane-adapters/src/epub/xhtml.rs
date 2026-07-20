@@ -141,6 +141,21 @@ fn finish_frame(
     }
 }
 
+// Inline code is a flat string in the IR; nested markup inside <code> keeps
+// its text only.
+fn inlines_text(inls: &[Inline]) -> String {
+    let mut s = String::new();
+    for i in inls {
+        match i {
+            Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => s.push_str(t),
+            Inline::Emph(x) | Inline::Strong(x) => s.push_str(&inlines_text(x)),
+            Inline::Link { inlines, .. } => s.push_str(&inlines_text(inlines)),
+            Inline::FootnoteRef(_) => {}
+        }
+    }
+    s
+}
+
 // Inline-level tags do NOT terminate an implicit paragraph; everything else
 // (including unknown tags) is treated as a block boundary.
 fn is_inline_tag(name: &[u8]) -> bool {
@@ -195,6 +210,11 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     // as a literal `" "` would.
     let mut pending_ws: Option<String> = None;
     let mut prev_was_ref = false;
+    // Verbatim accumulation while inside <pre>: (language, accumulated text).
+    // Text/whitespace inside <pre> is content, not formatting, so it bypasses
+    // the pending_ws/prev_was_ref machinery above entirely -- see the
+    // interception block at the top of the loop below.
+    let mut pre: Option<(Option<String>, String)> = None;
 
     macro_rules! push_text {
         ($t:expr) => {
@@ -224,7 +244,59 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     }
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        let ev = reader.read_event_into(&mut buf);
+        // Interception: while inside <pre>, text is verbatim (no trim, no
+        // pending_ws -- whitespace IS the content), so this bypasses the
+        // main match's whitespace machinery entirely rather than threading
+        // a "verbatim mode" flag through every arm of it.
+        if let Some((lang, text)) = pre.as_mut() {
+            match &ev {
+                Ok(Event::Text(t)) => {
+                    text.push_str(&t.decode().map(|d| d.into_owned()).unwrap_or_default());
+                }
+                Ok(Event::GeneralRef(r)) => {
+                    text.push_str(&crate::xmltext::resolve_general_ref(r));
+                }
+                Ok(Event::Start(e)) if e.local_name().as_ref() == b"code" && lang.is_none() => {
+                    *lang = e
+                        .attributes()
+                        .flatten()
+                        .find(|a| a.key.as_ref() == b"class")
+                        .and_then(|a| {
+                            String::from_utf8_lossy(&a.value)
+                                .split_whitespace()
+                                .find_map(|c| c.strip_prefix("language-").map(str::to_string))
+                        });
+                }
+                Ok(Event::End(e)) if e.local_name().as_ref() == b"pre" => {
+                    let (lang, text) = pre.take().expect("in pre");
+                    let text = text.trim_matches('\n').to_string();
+                    emit_block(
+                        &mut frames,
+                        &mut inline_stack,
+                        &mut blocks,
+                        Block::CodeBlock { lang, text },
+                    );
+                }
+                Ok(Event::Eof) => {
+                    let (lang, text) = pre.take().expect("in pre");
+                    emit_block(
+                        &mut frames,
+                        &mut inline_stack,
+                        &mut blocks,
+                        Block::CodeBlock {
+                            lang,
+                            text: text.trim_matches('\n').to_string(),
+                        },
+                    );
+                    break;
+                }
+                _ => {} // other markup inside <pre> is ignored, its text still arrives as Text events
+            }
+            buf.clear();
+            continue;
+        }
+        match ev {
             Ok(Event::Start(e)) => {
                 // A tag boundary resolves any undecided whitespace fragment
                 // as formatting, not reference-adjacent content.
@@ -269,6 +341,25 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                             .find(|a| a.key.as_ref() == b"href")
                             .map(|a| String::from_utf8_lossy(&a.value).into_owned());
                         inline_stack.push(vec![]);
+                    }
+                    // close_implicit! already ran above: `pre` is not an
+                    // inline tag, so any bare flow-level text preceding it
+                    // was flushed as its own paragraph.
+                    b"pre" => pre = Some((None, String::new())),
+                    b"code" => {
+                        // The generic inline-tag opener above already opens
+                        // an implicit paragraph for flow-level <code> (it is
+                        // listed in is_inline_tag), so only the tag's own
+                        // frame is pushed here -- pushing again here would
+                        // double-open.
+                        inline_stack.push(vec![]);
+                    }
+                    b"br" => {
+                        if let Some(top) = inline_stack.last_mut() {
+                            if !top.is_empty() {
+                                crate::xmltext::push_inline(top, Inline::Text(" ".into()));
+                            }
+                        }
                     }
                     b"ul" | b"ol" => {
                         frames.push(BlockFrame::List {
@@ -428,6 +519,15 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                         };
                         if let Some(top) = inline_stack.last_mut() {
                             top.push(Inline::Link { target, inlines: x });
+                        }
+                    }
+                    b"code" => {
+                        // Inline code is a flat string in the IR; nested
+                        // markup inside <code> (rare, but legal XHTML) keeps
+                        // its text only, via inlines_text.
+                        let x = inline_stack.pop().unwrap_or_default();
+                        if let Some(top) = inline_stack.last_mut() {
+                            top.push(Inline::Code(inlines_text(&x)));
                         }
                     }
                     b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
@@ -1380,5 +1480,52 @@ mod tests {
             panic!()
         };
         assert_eq!(text_of(&t.header[0]), "x y"); // promoted headerless row; paras space-joined
+    }
+
+    // ---- Code blocks, inline code, <br> ----
+
+    #[test]
+    fn pre_becomes_code_block_with_verbatim_whitespace() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><pre><code class=\"language-rust\">fn main() {\n    let x = 1 &amp; 2;\n}</code></pre></body>",
+            &mut id,
+        );
+        let Block::CodeBlock { lang, text } = &blocks[0] else {
+            panic!("expected CodeBlock, got {:?}", blocks[0])
+        };
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert_eq!(text, "fn main() {\n    let x = 1 & 2;\n}");
+    }
+
+    #[test]
+    fn pre_without_code_child_still_works() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><pre>plain  spaced</pre></body>", &mut id);
+        assert!(
+            matches!(&blocks[0], Block::CodeBlock { lang: None, text } if text == "plain  spaced")
+        );
+    }
+
+    #[test]
+    fn inline_code_survives_in_paragraph() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><p>call <code>foo()</code> now</p></body>", &mut id);
+        let Block::Para(inls) = &blocks[0] else {
+            panic!()
+        };
+        assert!(inls
+            .iter()
+            .any(|i| matches!(i, Inline::Code(t) if t == "foo()")));
+    }
+
+    #[test]
+    fn br_becomes_single_space() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><p>line one<br/>line two</p></body>", &mut id);
+        let Block::Para(inls) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(text_of(inls), "line one line two");
     }
 }
