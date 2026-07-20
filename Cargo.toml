@@ -11,8 +11,12 @@ repository = "https://github.com/rahulmutt/kasane"
 
 # Internal crates are declared once, with both a path (for local builds) and a
 # version (which is what cargo records in the published manifest). Declaring
-# them here rather than per-crate means a release bumps two lines total, not
-# five package versions plus every path dependency that names them.
+# them here rather than per-crate means a release bumps FIVE lines total, not
+# five package versions plus every path dependency that names them: the
+# workspace.package version above, plus each of the four entries below.
+# [workspace.dependencies] cannot inherit workspace.package.version, so those
+# four carry a literal. Bump all five together -- cargo will silently accept
+# 0.2.0 crates that depend on kasane-ir 0.1.0.
 [workspace.dependencies]
 kasane-ir = { path = "crates/kasane-ir", version = "0.1.0" }
 kasane-core = { path = "crates/kasane-core", version = "0.1.0" }

@@ -3,9 +3,9 @@ name: audit
 on:
   push:
     branches: [main]
-    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', '.github/workflows/audit.yml']
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', 'mise.toml', '.github/workflows/audit.yml']
   pull_request:
-    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', '.github/workflows/audit.yml']
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', 'mise.toml', '.github/workflows/audit.yml']
   # The important trigger. Advisories are published against dependencies that
   # were already committed, so an audit that only fires on code changes goes
   # stale silently. Mondays 07:00 UTC.

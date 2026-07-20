@@ -10,6 +10,8 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 
 ## Workflows
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
+- Dependabot watches `Cargo.toml`/`Cargo.lock` and GitHub Actions, but **cannot read `mise.toml`**.
+  The Rust toolchain pin and the cargo-deny pin there are manual bumps and get no automated security PRs.
 
 ## Conventions
 - Cross-refs are symbolic (`RefTarget::Internal`) until pass 4 resolves them to relative links.

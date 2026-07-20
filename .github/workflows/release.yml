@@ -34,6 +34,10 @@ jobs:
           tar -czf "kasane-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
             -C target/release kasane
 
+      # Every matrix leg uploads its own tarball to the SAME release. That is
+      # safe only because this pin (v2.6.2) postdates the concurrent-create and
+      # upload-race fixes released in v2.5.2. Dependabot bumps exactly this
+      # line, so do not move the pin BELOW v2.5.2 -- the race returns silently.
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: kasane-${{ github.ref_name }}-${{ matrix.target }}.tar.gz

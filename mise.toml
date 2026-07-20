@@ -1,4 +1,8 @@
 [tools]
+# NOTE: Dependabot cannot read mise.toml. Both pins below -- the Rust
+# toolchain and cargo-deny -- are MANUAL bumps and receive no automated
+# security PRs. Do not assume anything here is being watched for you.
+#
 # `components` is load-bearing, not decoration. Locally mise installs a full
 # Rust distribution that already ships rustfmt and clippy, but in CI
 # jdx/mise-action delegates to rustup, which installs the minimal profile
