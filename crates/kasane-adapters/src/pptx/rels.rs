@@ -32,12 +32,17 @@ fn local_name(key: &[u8]) -> &[u8] {
 /// which prefix the document binds to the relationships namespace, without
 /// accidentally matching an unrelated unprefixed attribute of the same local
 /// name (e.g. `sldId`'s own unprefixed `id` attribute).
+///
+/// `xmlns:` declarations are explicitly excluded: `xmlns:embed="..."` has the
+/// same local name (`embed`) as a real `r:embed` attribute, so a namespace
+/// declaration placed earlier in the tag would otherwise shadow the genuine
+/// attribute and silently drop the reference it carries.
 pub(crate) fn attr_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| {
             let key = a.key.as_ref();
-            key.contains(&b':') && local_name(key) == local
+            key.contains(&b':') && !key.starts_with(b"xmlns:") && local_name(key) == local
         })
         .map(unescape_attr)
 }
@@ -195,6 +200,41 @@ mod tests {
           <p:sldIdLst>
             <p:sldId id="256" rel:id="rId3"/>
             <p:sldId id="257" rel:id="rId2"/>
+          </p:sldIdLst></p:presentation>"#;
+        assert_eq!(parse_slide_order(xml), vec!["rId3", "rId2"]);
+    }
+
+    #[test]
+    fn attr_local_ignores_xmlns_decoy_for_blip_embed() {
+        // A preceding xmlns:embed declaration has local name "embed", same as
+        // the real r:embed attribute. It must not shadow the real one.
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        let xml = r#"<a:blip xmlns:embed="EVIL" r:embed="rId3"/>"#;
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().expand_empty_elements = true;
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf).unwrap() {
+                Event::Start(e) => {
+                    assert_eq!(attr_local(&e, b"embed").as_deref(), Some("rId3"));
+                    break;
+                }
+                Event::Eof => panic!("no start event"),
+                _ => {}
+            }
+            buf.clear();
+        }
+    }
+
+    #[test]
+    fn parses_slide_order_ignoring_xmlns_id_decoy() {
+        // A preceding xmlns:id declaration has local name "id", same as the
+        // real r:id attribute on sldId. It must not shadow the real one.
+        let xml = r#"<p:presentation xmlns:id="x">
+          <p:sldIdLst>
+            <p:sldId id="256" xmlns:id="EVIL" r:id="rId3"/>
+            <p:sldId id="257" r:id="rId2"/>
           </p:sldIdLst></p:presentation>"#;
         assert_eq!(parse_slide_order(xml), vec!["rId3", "rId2"]);
     }

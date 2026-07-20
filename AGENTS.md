@@ -3,7 +3,7 @@
 Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> Markdown tree.
 
 - `crates/kasane-ir`      Intermediate representation types. Depends on nothing.
-- `crates/kasane-adapters` Format detection + parsers (EPUB). Untrusted-input boundary; see `guard.rs`.
+- `crates/kasane-adapters` Format detection + parsers (EPUB, PPTX). Untrusted-input boundary; see `guard.rs` and `ziputil.rs` (every guarded zip read goes through it).
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing.
 - `crates/kasane-cli`     `kasane` binary; wires the pipeline; owns exit codes.

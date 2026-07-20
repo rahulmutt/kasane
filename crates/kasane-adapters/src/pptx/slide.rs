@@ -4,6 +4,10 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 pub(crate) struct Paragraph {
+    // `build_list` recurses once per distinct level as it nests deeper
+    // paragraphs under their ancestors, so this type's width is a hard,
+    // untrusted-input-facing bound on recursion depth (max 256): it caps how
+    // deep an adversarial bullet-level jump can drive the call stack.
     pub level: u8,
     pub inlines: Vec<Inline>,
 }
@@ -58,7 +62,12 @@ fn styled(text: String, fmt: &RunFmt) -> Inline {
     }
 }
 
-pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> Vec<Shape> {
+/// Parses `<p:sld>`/`<p:notes>` body XML into shapes. Returns the shapes
+/// accumulated so far together with a `truncated` flag: `true` when the XML
+/// was malformed and the reader bailed out mid-parse (as opposed to a clean
+/// EOF), so callers can surface that the slide's content may be incomplete
+/// instead of silently dropping the tail.
+pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
     let mut buf = Vec::new();
@@ -221,12 +230,12 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> Vec<Shape> {
                 _ => {}
             },
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(_) => return (shapes, true),
             _ => {}
         }
         buf.clear();
     }
-    shapes
+    (shapes, false)
 }
 
 // Map a body shape's paragraphs to blocks. Extended in Task 5 to build nested lists.
@@ -275,7 +284,7 @@ fn build_list(paras: &[Paragraph], depth: u8, i: &mut usize) -> Block {
 }
 
 pub fn slide_to_blocks(xml: &str, next_id: &mut u32, rels: &SlideRels) -> Vec<Block> {
-    let shapes = parse_shapes(xml, rels);
+    let (shapes, truncated) = parse_shapes(xml, rels);
     let mut out = Vec::new();
 
     // Heading first: the title shape's text, or a "Slide N"-style fallback. The
@@ -309,15 +318,26 @@ pub fn slide_to_blocks(xml: &str, next_id: &mut u32, rels: &SlideRels) -> Vec<Bl
             }),
         }
     }
+    if truncated {
+        out.push(Block::Raw {
+            note: "slide truncated: malformed XML".into(),
+        });
+    }
     out
 }
 
 pub fn notes_to_blocks(xml: &str) -> Vec<Block> {
     let mut out = Vec::new();
-    for s in parse_shapes(xml, &SlideRels::empty()) {
+    let (shapes, truncated) = parse_shapes(xml, &SlideRels::empty());
+    for s in shapes {
         if let Shape::Body(paras) = s {
             body_to_blocks(paras, &mut out);
         }
+    }
+    if truncated {
+        out.push(Block::Raw {
+            note: "notes truncated: malformed XML".into(),
+        });
     }
     out
 }
@@ -500,5 +520,110 @@ mod tests {
         assert_eq!(t.header.len(), 2);
         assert_eq!(t.rows.len(), 1);
         assert!(!t.has_merged);
+    }
+
+    #[test]
+    fn malformed_xml_mid_body_still_emits_heading_and_raw_note() {
+        // A good title followed by a body with a stray, unmatched close tag.
+        // The XML reader bails out mid-parse; the heading must still surface
+        // and the truncation must be signaled via a Block::Raw, not silently
+        // dropped (Fix 2).
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+            <p:txBody><a:p><a:r><a:t>The Title</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+            <p:txBody><a:p><a:r><a:t>body text</a:t></a:r></a:p></a:wrong></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+
+        match &blocks[0] {
+            Block::Heading { level, inlines, .. } => {
+                assert_eq!(*level, 1);
+                assert_eq!(text_of(inlines), "The Title");
+            }
+            _ => panic!("expected heading"),
+        }
+        let has_raw_note = blocks
+            .iter()
+            .any(|b| matches!(b, Block::Raw { note } if note.contains("truncated")));
+        assert!(
+            has_raw_note,
+            "expected a truncation Block::Raw, got {blocks:?}"
+        );
+    }
+
+    // ---- Adversarial-input probes (accepted current behavior, not fixes) ----
+
+    #[test]
+    fn nested_table_emits_spurious_empty_outer_table() {
+        // A <a:tbl> nested inside another <a:tbl> is not valid OOXML, but the
+        // flat state-machine parser doesn't guard against it: the inner tbl's
+        // Start/End resets and consumes the shared `tbl_rows`/`in_tbl` state,
+        // so the outer tbl's own row is lost and its End produces a second,
+        // empty Table shape. This is ACCEPTED v1 behavior (no crash, no data
+        // corruption beyond the dropped outer row) — this test pins it rather
+        // than "fixing" it.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:graphicFrame><a:graphic><a:graphicData><a:tbl>
+            <a:tr><a:tc><a:txBody><a:p><a:r><a:t>outer</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+            <a:tbl>
+              <a:tr><a:tc><a:txBody><a:p><a:r><a:t>inner</a:t></a:r></a:p></a:txBody></a:tc></a:tr>
+            </a:tbl>
+          </a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+
+        let tables: Vec<&kasane_ir::Table> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tables.len(),
+            2,
+            "expected inner table + spurious empty outer table"
+        );
+        assert_eq!(text_of(&tables[0].header[0]), "inner");
+        assert!(
+            tables[1].header.is_empty() && tables[1].rows.is_empty(),
+            "outer close should emit an empty table, got {:?}",
+            tables[1]
+        );
+        // No slide-truncation marker: the XML is well-formed, just semantically odd.
+        assert!(!blocks
+            .iter()
+            .any(|b| matches!(b, Block::Raw { note } if note.contains("truncated"))));
+    }
+
+    #[test]
+    fn deeply_nested_bullet_levels_do_not_overflow_the_stack() {
+        // ~300 paragraphs each one level deeper than the last. `Paragraph.level`
+        // is a u8, so any "lvl" value that doesn't fit in u8 (>255) fails to
+        // parse and falls back to 0, which bounds `build_list`'s recursion
+        // depth to at most 256 regardless of how deep an adversarial document
+        // claims to nest. This must not stack-overflow.
+        let mut body = String::new();
+        for lvl in 0..300u32 {
+            body.push_str(&format!(
+                r#"<a:p><a:pPr lvl="{lvl}"/><a:r><a:t>L{lvl}</a:t></a:r></a:p>"#
+            ));
+        }
+        let xml = format!(
+            r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+              <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+                <p:txBody>{body}</p:txBody></p:sp>
+            </p:spTree></p:cSld></p:sld>"#
+        );
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(&xml, &mut id, &SlideRels::empty());
+        // Reaching this line without a stack overflow is the assertion; also
+        // sanity-check some content made it through.
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::List { .. } | Block::Para(_))));
     }
 }

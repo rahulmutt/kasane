@@ -13,7 +13,7 @@ impl Adapter for EpubAdapter {
             .map_err(|e| ParseError::Malformed(e.to_string()))?;
 
         // Aggregate decompressed-byte accumulator: MAX_TOTAL_BYTES is an absolute cap on the
-        // whole archive, not a per-entry budget, so every read_entry call shares this counter.
+        // whole archive, not a per-entry budget, so every read_entry_string call shares this counter.
         let mut total_read: u64 = 0;
 
         // locate the OPF via META-INF/container.xml
