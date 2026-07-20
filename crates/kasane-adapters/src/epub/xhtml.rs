@@ -37,6 +37,27 @@ fn finish_frame(f: BlockFrame, frames: &mut [BlockFrame], out: &mut Vec<Block>) 
     }
 }
 
+// Inline-level tags do NOT terminate an implicit paragraph; everything else
+// (including unknown tags) is treated as a block boundary.
+fn is_inline_tag(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"strong"
+            | b"b"
+            | b"em"
+            | b"i"
+            | b"a"
+            | b"code"
+            | b"span"
+            | b"sub"
+            | b"sup"
+            | b"small"
+            | b"u"
+            | b"s"
+            | b"br"
+    )
+}
+
 // Returns blocks; `next_id` is a running BlockId counter for headings.
 pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     let mut reader = Reader::from_str(xml);
@@ -54,6 +75,8 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     let mut frames: Vec<BlockFrame> = vec![];
     let mut cur_block: Option<u8> = None; // heading level, or 0 for para
     let mut link_href: Option<String> = None;
+    let mut in_body = false;
+    let mut implicit_para = false;
     // A whitespace-only Text fragment is ambiguous until we see what comes
     // next: quick-xml 0.41 splits text at every reference, so `a &lt; &gt; b`
     // puts a lone `" "` fragment between the two GeneralRef events. That
@@ -77,6 +100,20 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
         };
     }
 
+    // Closes an open implicit paragraph (bare flow-level text) at any block
+    // boundary, emitting what it collected. See spec §2 "flatten, never drop".
+    macro_rules! close_implicit {
+        () => {
+            if implicit_para {
+                implicit_para = false;
+                let inls = inline_stack.pop().unwrap_or_default();
+                if !inls.is_empty() {
+                    emit_block(&mut frames, &mut blocks, Block::Para(inls));
+                }
+            }
+        };
+    }
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
@@ -84,6 +121,12 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 // as formatting, not reference-adjacent content.
                 pending_ws = None;
                 prev_was_ref = false;
+                if !is_inline_tag(e.local_name().as_ref()) {
+                    close_implicit!();
+                }
+                if e.local_name().as_ref() == b"body" {
+                    in_body = true;
+                }
                 match e.local_name().as_ref() {
                     b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                         cur_block = Some(e.local_name().as_ref()[1] - b'0');
@@ -140,6 +183,10 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                     }
                 } else {
                     pending_ws = None;
+                    if inline_stack.is_empty() && in_body && cur_block.is_none() {
+                        inline_stack.push(vec![]);
+                        implicit_para = true;
+                    }
                     if !inline_stack.is_empty() {
                         push_text!(s);
                     }
@@ -172,6 +219,10 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                         push_text!(" ".to_string());
                     }
                 }
+                if inline_stack.is_empty() && in_body && cur_block.is_none() {
+                    inline_stack.push(vec![]);
+                    implicit_para = true;
+                }
                 let s = crate::xmltext::resolve_general_ref(&r);
                 // No trim guard here, unlike Event::Text. That guard drops
                 // the indentation between tags, which is markup, not content. A
@@ -185,6 +236,9 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
             Ok(Event::End(e)) => {
                 pending_ws = None;
                 prev_was_ref = false;
+                if !is_inline_tag(e.local_name().as_ref()) {
+                    close_implicit!();
+                }
                 match e.local_name().as_ref() {
                     b"strong" | b"b" => {
                         let x = inline_stack.pop().unwrap_or_default();
@@ -243,6 +297,14 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 }
             }
             Ok(Event::Eof) => {
+                // The final `implicit_para = false` inside the macro here is a
+                // dead store (the loop breaks right after), unlike its other
+                // call sites where the next iteration reads it back; silence
+                // the false-positive rather than weaken the lint elsewhere.
+                #[allow(unused_assignments)]
+                {
+                    close_implicit!();
+                }
                 while let Some(f) = frames.pop() {
                     finish_frame(f, &mut frames, &mut blocks);
                 }
@@ -906,5 +968,66 @@ mod tests {
             panic!("unclosed list must still be emitted")
         };
         assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "orphan"));
+    }
+
+    // ---- Implicit paragraphs, transparent containers, head/body gating ----
+
+    #[test]
+    fn blockquote_bare_text_becomes_paragraph() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><blockquote>quoted <em>words</em> here</blockquote></body>",
+            &mut id,
+        );
+        assert_eq!(blocks.len(), 1);
+        let Block::Para(inls) = &blocks[0] else {
+            panic!("expected Para")
+        };
+        assert!(matches!(&inls[0], Inline::Text(t) if t == "quoted "));
+        assert!(matches!(&inls[1], Inline::Emph(_)));
+    }
+
+    #[test]
+    fn dl_definition_text_is_flattened_not_dropped() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><dl><dt>term</dt><dd>meaning</dd></dl></body>",
+            &mut id,
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "term"));
+        assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "meaning"));
+    }
+
+    #[test]
+    fn bare_li_text_becomes_item_paragraph() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><ul><li>one</li><li>two</li></ul></body>", &mut id);
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!()
+        };
+        assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "one"));
+        assert!(matches!(&items[1][0], Block::Para(i) if text_of(i) == "two"));
+    }
+
+    #[test]
+    fn head_title_text_stays_out_of_output() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<html><head><title>Skip Me</title></head><body><p>keep</p></body></html>",
+            &mut id,
+        );
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "keep"));
+    }
+
+    #[test]
+    fn implicit_paragraph_splits_at_block_boundary() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><div>before<p>inside</p>after</div></body>", &mut id);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "before"));
+        assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "inside"));
+        assert!(matches!(&blocks[2], Block::Para(i) if text_of(i) == "after"));
     }
 }
