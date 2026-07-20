@@ -23,6 +23,11 @@ enum BlockFrame {
         image: Option<AssetRef>,
         alt: Vec<Inline>,
         caption: Vec<Inline>,
+        // Stray content emitted directly under <figure> outside <figcaption>
+        // (e.g. a rogue <p>). Kept separate from `caption` so the
+        // figcaption End handler's unconditional `*caption = x` cannot
+        // clobber it -- see emit_block's Figure arm and finish_frame.
+        extra: Vec<Inline>,
     },
 }
 
@@ -57,13 +62,16 @@ fn emit_block(
         Some(BlockFrame::Table { .. }) => {}
         // A block emitted directly under <figure> outside of <figcaption>
         // (e.g. a stray <p>) has no structural home either, but its text is
-        // not thrown away -- it flattens into the caption, same as content
-        // inside an open figcaption via the inline_stack branch above.
-        Some(BlockFrame::Figure { caption, .. }) => {
-            if !caption.is_empty() {
-                crate::xmltext::push_inline(caption, Inline::Text(" ".into()));
+        // not thrown away -- it flattens into `extra`, kept separate from
+        // `caption` because the figcaption End handler unconditionally
+        // overwrites `caption` and would otherwise clobber it regardless of
+        // document order. `extra` is merged into the caption in
+        // finish_frame, after that overwrite has already happened.
+        Some(BlockFrame::Figure { extra, .. }) => {
+            if !extra.is_empty() {
+                crate::xmltext::push_inline(extra, Inline::Text(" ".into()));
             }
-            flatten_block_inlines(&b, caption);
+            flatten_block_inlines(&b, extra);
         }
     }
 }
@@ -157,8 +165,15 @@ fn finish_frame(
             image,
             alt,
             caption,
+            extra,
         } => {
-            let caption = if caption.is_empty() { alt } else { caption };
+            let mut caption = if caption.is_empty() { alt } else { caption };
+            if !extra.is_empty() {
+                if !caption.is_empty() {
+                    crate::xmltext::push_inline(&mut caption, Inline::Text(" ".into()));
+                }
+                caption.extend(extra);
+            }
             match image {
                 Some(image) => emit_block(
                     frames,
@@ -456,6 +471,7 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Bloc
                         image: None,
                         alt: vec![],
                         caption: vec![],
+                        extra: vec![],
                     }),
                     b"figcaption" => inline_stack.push(vec![]),
                     b"img" => {
@@ -825,6 +841,51 @@ mod tests {
     fn traversal_img_src_degrades() {
         let blocks = parse("<body><img src=\"../../../etc/passwd\" alt=\"x\"/></body>");
         assert!(matches!(&blocks[0], Block::Para(_)));
+    }
+
+    #[test]
+    fn stray_content_before_figcaption_is_not_clobbered_by_figcaption_overwrite() {
+        // Regression: emit_block used to flatten a stray block (a <p> before
+        // <figcaption>) directly into the frame's `caption` field, but the
+        // figcaption End handler does an unconditional `*caption = x` --
+        // silently dropping the stray content when figcaption is processed
+        // afterward.
+        let blocks = parse(
+            "<body><figure><p>Photo by Jane</p><img src=\"a.png\" alt=\"x\"/>\
+             <figcaption>The cat</figcaption></figure></body>",
+        );
+        let Block::Figure { caption, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        let text = text_of(caption);
+        assert!(
+            text.contains("The cat"),
+            "caption missing figcaption text: {text:?}"
+        );
+        assert!(
+            text.contains("Photo by Jane"),
+            "caption missing stray content: {text:?}"
+        );
+    }
+
+    #[test]
+    fn stray_content_after_figcaption_is_preserved() {
+        let blocks = parse(
+            "<body><figure><img src=\"a.png\" alt=\"x\"/>\
+             <figcaption>The cat</figcaption><p>after</p></figure></body>",
+        );
+        let Block::Figure { caption, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        let text = text_of(caption);
+        assert!(
+            text.contains("The cat"),
+            "caption missing figcaption text: {text:?}"
+        );
+        assert!(
+            text.contains("after"),
+            "caption missing stray content: {text:?}"
+        );
     }
 
     #[test]
