@@ -412,10 +412,12 @@ mod tests {
 
     #[test]
     fn unescapes_run_text_entities() {
-        // Exercises the decode() + quick_xml::escape::unescape chain that
-        // replaced t.unescape() in the 0.41 migration: an entity in <a:t>
-        // must come out decoded, not literal. Existing tests only cover
-        // plain runs, never the unescape half.
+        // `x &amp; y` puts the reference between two Text fragments, so under
+        // quick-xml 0.41 -- which splits text at every reference -- this
+        // exercises resolve_general_ref's unescape() call, not decode() /
+        // unescape() on Event::Text (Event::Text can never contain a
+        // `&...;` once the reader splits on it). Existing tests only cover
+        // plain runs, never the reference-resolution half.
         let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
           <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
             <p:txBody><a:p><a:r><a:t>x &amp; y</a:t></a:r></a:p></p:txBody></p:sp>

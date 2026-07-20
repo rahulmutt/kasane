@@ -130,9 +130,11 @@ mod tests {
 
     #[test]
     fn unescapes_title_text_entities() {
-        // Exercises the decode() + quick_xml::escape::unescape chain that
-        // replaced t.unescape() in the 0.41 migration: an entity in <dc:title>
-        // must come out decoded, not literal.
+        // `A &amp; B` puts the reference between two Text fragments, so under
+        // quick-xml 0.41 -- which splits text at every reference -- this
+        // exercises resolve_general_ref's unescape() call via the accumulator
+        // path, not decode()/unescape() on Event::Text (Event::Text can never
+        // contain a `&...;` once the reader splits on it).
         let xml = r#"<package><metadata>
           <dc:title>A &amp; B</dc:title>
         </metadata></package>"#;

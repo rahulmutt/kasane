@@ -12,6 +12,17 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     let mut inline_stack: Vec<Vec<Inline>> = vec![];
     let mut cur_block: Option<u8> = None; // heading level, or 0 for para
     let mut link_href: Option<String> = None;
+    // A whitespace-only Text fragment is ambiguous until we see what comes
+    // next: quick-xml 0.41 splits text at every reference, so `a &lt; &gt; b`
+    // puts a lone `" "` fragment between the two GeneralRef events. That
+    // space is real content and must survive, but the same-looking `" "`
+    // (or `"\n  "`) between two tags in pretty-printed XHTML is formatting
+    // and must still be dropped. `pending_ws` holds the undecided fragment;
+    // it is kept if a GeneralRef precedes or follows it, and discarded at
+    // any tag boundary. `prev_was_ref` records the immediately-preceding
+    // case.
+    let mut pending_ws: Option<String> = None;
+    let mut prev_was_ref = false;
 
     macro_rules! push_text {
         ($t:expr) => {
@@ -23,50 +34,81 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => match e.local_name().as_ref() {
-                b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
-                    cur_block = Some(e.local_name().as_ref()[1] - b'0');
-                    inline_stack.push(vec![]);
+            Ok(Event::Start(e)) => {
+                // A tag boundary resolves any undecided whitespace fragment
+                // as formatting, not reference-adjacent content.
+                pending_ws = None;
+                prev_was_ref = false;
+                match e.local_name().as_ref() {
+                    b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
+                        cur_block = Some(e.local_name().as_ref()[1] - b'0');
+                        inline_stack.push(vec![]);
+                    }
+                    b"p" => {
+                        cur_block = Some(0);
+                        inline_stack.push(vec![]);
+                    }
+                    b"strong" | b"b" => inline_stack.push(vec![]),
+                    b"em" | b"i" => inline_stack.push(vec![]),
+                    b"a" => {
+                        link_href = e
+                            .attributes()
+                            .flatten()
+                            .find(|a| a.key.as_ref() == b"href")
+                            .map(|a| String::from_utf8_lossy(&a.value).into_owned());
+                        inline_stack.push(vec![]);
+                    }
+                    _ => {}
                 }
-                b"p" => {
-                    cur_block = Some(0);
-                    inline_stack.push(vec![]);
-                }
-                b"strong" | b"b" => inline_stack.push(vec![]),
-                b"em" | b"i" => inline_stack.push(vec![]),
-                b"a" => {
-                    link_href = e
-                        .attributes()
-                        .flatten()
-                        .find(|a| a.key.as_ref() == b"href")
-                        .map(|a| String::from_utf8_lossy(&a.value).into_owned());
-                    inline_stack.push(vec![]);
-                }
-                _ => {}
-            },
+            }
             Ok(Event::Text(t)) => {
                 let s = t
                     .decode()
                     .ok()
                     .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
                     .unwrap_or_default();
-                if !s.trim().is_empty() && !inline_stack.is_empty() {
-                    push_text!(s);
+                if s.trim().is_empty() {
+                    if prev_was_ref {
+                        // Adjacent to the reference that just preceded it:
+                        // real content, not inter-tag formatting.
+                        if !inline_stack.is_empty() {
+                            push_text!(s);
+                        }
+                    } else {
+                        // Undecided: keep it only if a GeneralRef follows.
+                        pending_ws = Some(s);
+                    }
+                } else {
+                    pending_ws = None;
+                    if !inline_stack.is_empty() {
+                        push_text!(s);
+                    }
                 }
+                prev_was_ref = false;
             }
             // quick-xml 0.41 emits entity/character references in text content as
             // their own event instead of folding them into Event::Text.
             Ok(Event::GeneralRef(r)) => {
+                // A pending whitespace-only Text fragment sitting right before
+                // this reference is reference-adjacent content; flush it.
+                if let Some(ws) = pending_ws.take() {
+                    if !inline_stack.is_empty() {
+                        push_text!(ws);
+                    }
+                }
                 let s = crate::xmltext::resolve_general_ref(&r);
-                // No whitespace guard here, unlike Event::Text. That guard drops
+                // No trim guard here, unlike Event::Text. That guard drops
                 // the indentation between tags, which is markup, not content. A
                 // reference is always authored deliberately, so `&#160;` or
                 // `&#32;` is content and must survive.
                 if !s.is_empty() && !inline_stack.is_empty() {
                     push_text!(s);
                 }
+                prev_was_ref = true;
             }
             Ok(Event::End(e)) => {
+                pending_ws = None;
+                prev_was_ref = false;
                 match e.local_name().as_ref() {
                     b"strong" | b"b" => {
                         let x = inline_stack.pop().unwrap_or_default();
@@ -117,7 +159,11 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
-            _ => {}
+            _ => {
+                // Other events (comments, PI, etc.) also break adjacency.
+                pending_ws = None;
+                prev_was_ref = false;
+            }
         }
         buf.clear();
     }
@@ -139,9 +185,11 @@ mod tests {
 
     #[test]
     fn unescapes_paragraph_text_entities() {
-        // Exercises the decode() + quick_xml::escape::unescape chain that
-        // replaced t.unescape() in the 0.41 migration: an entity in <p> text
-        // must come out decoded, not literal.
+        // `&lt;` is the paragraph's entire text run, so under quick-xml 0.41
+        // it arrives as a lone GeneralRef with no adjacent Event::Text --
+        // Event::Text can never contain a `&...;` once the reader splits at
+        // every reference. This exercises resolve_general_ref's own
+        // unescape() call, not decode()/unescape() on Event::Text.
         let xml = "<p>a &lt; b</p>";
         let mut next_id = 0u32;
         let blocks = xhtml_to_blocks(xml, &mut next_id);
@@ -190,5 +238,138 @@ mod tests {
             })
             .expect("a paragraph");
         assert_eq!(text_of(para), "a&nbsp;b");
+    }
+
+    // ---- Finding 1: whitespace adjacent to a reference must survive ----
+
+    #[test]
+    fn space_between_two_references_survives() {
+        // Repro case from review: under 0.41 this is Text("a ") GeneralRef(lt)
+        // Text(" ") GeneralRef(gt) Text(" b"). The middle `" "` sits between
+        // two references and is real content, not inter-tag formatting; the
+        // 0.36-era trim guard used to discard it, dropping a real space.
+        let xml = "<p>a &lt; &gt; b</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "a < > b");
+    }
+
+    #[test]
+    fn space_between_closing_tag_and_reference_survives() {
+        // Repro case from review: the space between `</strong>` and `&amp;`
+        // is a Text(" ") event immediately followed by GeneralRef(amp), not
+        // preceded by one -- the "follows a reference" half of the fix.
+        let xml = "<p><strong>A</strong> &amp; B</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Strong(\"A\") + Text(\" & B\")");
+        match &para[0] {
+            Inline::Strong(x) => assert_eq!(text_of(x), "A"),
+            other => panic!("expected Strong, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Text(t) => assert_eq!(t, " & B"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formatting_whitespace_between_tags_is_still_dropped() {
+        // Guards the original intent of the trim guard: whitespace that is
+        // NOT adjacent to any reference -- ordinary pretty-printed
+        // indentation between tags -- must still be discarded, or every
+        // formatted XHTML document would sprout stray whitespace inlines.
+        let xml = "<p>\n  <strong>A</strong>\n  <em>B</em>\n</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(
+            para.len(),
+            2,
+            "no stray whitespace Text inline between Strong and Emph, got {para:?}"
+        );
+        assert!(matches!(para[0], Inline::Strong(_)));
+        assert!(matches!(para[1], Inline::Emph(_)));
+    }
+
+    // ---- Finding 2: a whitespace-only character reference is content ----
+
+    #[test]
+    fn whitespace_only_character_reference_survives() {
+        // The GeneralRef arm deliberately has no trim guard: &#160; (nbsp)
+        // and &#32; (space) are always authored deliberately and must not be
+        // treated as discardable inter-tag formatting the way a whitespace
+        // Text fragment can be.
+        let mut next_id = 0u32;
+
+        let blocks = xhtml_to_blocks("<p>&#160;</p>", &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph for &#160;");
+        assert_eq!(text_of(para), "\u{a0}");
+
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks("<p>&#32;</p>", &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph for &#32;");
+        assert_eq!(text_of(para), " ");
+    }
+
+    // ---- Finding 3: merging must stop at a formatting boundary ----
+
+    #[test]
+    fn merge_does_not_absorb_a_styled_inline_across_a_reference() {
+        // push_inline only merges adjacent Inline::Text; a Strong pushed just
+        // before a reference must remain its own inline, not be flattened
+        // into the following text. This is the case that would catch an
+        // over-eager merge.
+        let xml = "<p><strong>A</strong>&amp;B</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "Strong must not merge into the text");
+        match &para[0] {
+            Inline::Strong(x) => assert_eq!(text_of(x), "A"),
+            other => panic!("expected Strong, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Text(t) => assert_eq!(t, "&B"),
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 }
