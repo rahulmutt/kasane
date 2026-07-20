@@ -33,8 +33,14 @@ impl Adapter for EpubAdapter {
 
         let mut nodes = Vec::new();
         let mut next_id = 0u32;
+        // 1-based: the writer renders footnote markers as `[^{id.0}]`, so a
+        // NoteId of 0 would render `[^0]`.
+        let mut next_note = 1u32;
         let mut anchor_map: std::collections::HashMap<(String, String), BlockId> =
             std::collections::HashMap::new();
+        let mut footnote_map: std::collections::HashMap<(String, String), NoteId> =
+            std::collections::HashMap::new();
+        let mut noteref_keys: std::collections::HashSet<(String, String)> = Default::default();
         for href in &parsed.spine_hrefs {
             let Some(name) = safe_entry_name(href) else {
                 continue;
@@ -47,12 +53,18 @@ impl Adapter for EpubAdapter {
                 .rsplit_once('/')
                 .map(|(d, _)| d.to_string())
                 .unwrap_or_default();
-            let fp = xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id);
+            let fp = xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id, &mut next_note);
             for (aid, bid) in &fp.anchors {
                 anchor_map.insert((name.clone(), aid.clone()), *bid);
             }
             if let Some(fh) = fp.first_heading {
                 anchor_map.insert((name.clone(), String::new()), fh);
+            }
+            for (fid, nid) in &fp.footnotes {
+                footnote_map.insert((name.clone(), fid.clone()), *nid);
+            }
+            for h in &fp.noteref_hrefs {
+                noteref_keys.insert((name.clone(), h.clone()));
             }
             for b in fp.blocks {
                 nodes.push(Node {
@@ -64,7 +76,8 @@ impl Adapter for EpubAdapter {
                 });
             }
         }
-        fix_links(&mut nodes, &anchor_map);
+        fix_links(&mut nodes, &anchor_map, &footnote_map, &noteref_keys);
+        nodes = relocate_footnotes(nodes);
 
         // Extract every referenced image once; remember which keys failed so their
         // Figures can degrade instead of rendering a broken link.
@@ -175,10 +188,15 @@ fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<Stri
 // plain text with a warning rather than routed through the core's
 // dangling-ref degradation -- see the Step 4 comment in the task brief for
 // why this is an intentional, output-identical deviation from the spec.
-fn fix_links(nodes: &mut [Node], map: &std::collections::HashMap<(String, String), BlockId>) {
+fn fix_links(
+    nodes: &mut [Node],
+    map: &std::collections::HashMap<(String, String), BlockId>,
+    footnote_map: &std::collections::HashMap<(String, String), NoteId>,
+    noteref_keys: &std::collections::HashSet<(String, String)>,
+) {
     for n in nodes {
         let file = n.prov.source_href.clone().unwrap_or_default();
-        fix_block_links(&mut n.block, &file, map);
+        fix_block_links(&mut n.block, &file, map, footnote_map, noteref_keys);
     }
 }
 
@@ -186,29 +204,35 @@ fn fix_block_links(
     b: &mut Block,
     file: &str,
     map: &std::collections::HashMap<(String, String), BlockId>,
+    footnote_map: &std::collections::HashMap<(String, String), NoteId>,
+    noteref_keys: &std::collections::HashSet<(String, String)>,
 ) {
     match b {
-        Block::Para(inls) | Block::Heading { inlines: inls, .. } => fix_inline_vec(inls, file, map),
+        Block::Para(inls) | Block::Heading { inlines: inls, .. } => {
+            fix_inline_vec(inls, file, map, footnote_map, noteref_keys)
+        }
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    fix_block_links(ib, file, map);
+                    fix_block_links(ib, file, map, footnote_map, noteref_keys);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                fix_block_links(ib, file, map);
+                fix_block_links(ib, file, map, footnote_map, noteref_keys);
             }
         }
         Block::Table(t) => {
             for row in std::iter::once(&mut t.header).chain(t.rows.iter_mut()) {
                 for cell in row {
-                    fix_inline_vec(cell, file, map);
+                    fix_inline_vec(cell, file, map, footnote_map, noteref_keys);
                 }
             }
         }
-        Block::Figure { caption, .. } => fix_inline_vec(caption, file, map),
+        Block::Figure { caption, .. } => {
+            fix_inline_vec(caption, file, map, footnote_map, noteref_keys)
+        }
         _ => {}
     }
 }
@@ -217,23 +241,35 @@ fn fix_inline_vec(
     inls: &mut Vec<Inline>,
     file: &str,
     map: &std::collections::HashMap<(String, String), BlockId>,
+    footnote_map: &std::collections::HashMap<(String, String), NoteId>,
+    noteref_keys: &std::collections::HashSet<(String, String)>,
 ) {
     let old = std::mem::take(inls);
     for i in old {
         match i {
             Inline::Emph(mut x) => {
-                fix_inline_vec(&mut x, file, map);
+                fix_inline_vec(&mut x, file, map, footnote_map, noteref_keys);
                 inls.push(Inline::Emph(x));
             }
             Inline::Strong(mut x) => {
-                fix_inline_vec(&mut x, file, map);
+                fix_inline_vec(&mut x, file, map, footnote_map, noteref_keys);
                 inls.push(Inline::Strong(x));
             }
             Inline::Link {
                 target: RefTarget::External(h),
                 inlines: mut inner,
             } => {
-                fix_inline_vec(&mut inner, file, map);
+                fix_inline_vec(&mut inner, file, map, footnote_map, noteref_keys);
+                let is_noteref = noteref_keys.contains(&(file.to_string(), h.clone()));
+                if is_noteref {
+                    if let Some(nid) = resolve_footnote(file, &h, footnote_map) {
+                        // The link text (the marker digit) is dropped: FootnoteRef
+                        // renders its own [^n] marker.
+                        inls.push(Inline::FootnoteRef(nid));
+                        continue;
+                    }
+                    // No matching aside: fall through to the ordinary internal-link path.
+                }
                 if h.is_empty() || crate::guard::has_scheme(&h) {
                     inls.push(Inline::Link {
                         target: RefTarget::External(h),
@@ -257,6 +293,23 @@ fn fix_inline_vec(
     }
 }
 
+fn resolve_footnote(
+    file: &str,
+    href: &str,
+    map: &std::collections::HashMap<(String, String), NoteId>,
+) -> Option<NoteId> {
+    let (path, frag) = match href.split_once('#') {
+        Some((p, f)) => (p, f),
+        None => (href, ""),
+    };
+    let target_file = if path.is_empty() {
+        file.to_string()
+    } else {
+        crate::guard::resolve_rel(&crate::guard::parent_dir(file), path)?
+    };
+    map.get(&(target_file, frag.to_string())).copied()
+}
+
 // "ch2.xhtml#s2" / "#frag" / "ch2.xhtml" -> a heading BlockId, if the target
 // file is in the spine. Exact fragment first, then the file's first heading.
 fn resolve_internal(
@@ -276,6 +329,88 @@ fn resolve_internal(
     map.get(&(target_file.clone(), frag.to_string()))
         .or_else(|| map.get(&(target_file, String::new())))
         .copied()
+}
+
+// Move each Footnote node to directly after the node holding its first
+// FootnoteRef, so GFM [^n]/definition pairs land in the same emitted file
+// (spec §4). Unreferenced footnotes stay where they are. Three phases because
+// the common case is ref-before-aside: a single forward walk would reach the
+// ref while the aside is still ahead and unparked.
+fn relocate_footnotes(nodes: Vec<Node>) -> Vec<Node> {
+    use std::collections::{HashMap, HashSet};
+    let mut referenced: HashSet<NoteId> = HashSet::new();
+    for n in &nodes {
+        collect_note_refs(&n.block, &mut referenced);
+    }
+    // Phase 1: pull out every referenced Footnote node (a Footnote block never
+    // contains its own ref, so referenced => movable).
+    let mut parked: HashMap<NoteId, Node> = HashMap::new();
+    let mut rest: Vec<Node> = Vec::with_capacity(nodes.len());
+    for n in nodes {
+        match &n.block {
+            Block::Footnote { id, .. } if referenced.contains(id) => {
+                parked.insert(*id, n);
+            }
+            _ => rest.push(n),
+        }
+    }
+    // Phase 2: append each parked note right after the node with its first ref.
+    let mut out: Vec<Node> = Vec::with_capacity(rest.len() + parked.len());
+    for n in rest {
+        let mut refs_here = HashSet::new();
+        collect_note_refs(&n.block, &mut refs_here);
+        out.push(n);
+        for id in refs_here {
+            if let Some(fnote) = parked.remove(&id) {
+                out.push(fnote);
+            }
+        }
+    }
+    // Phase 3: safety net (e.g. a ref that only appears inside another parked
+    // footnote's body) -- never drop content.
+    out.extend(parked.into_values());
+    out
+}
+
+fn collect_note_refs(b: &Block, out: &mut std::collections::HashSet<NoteId>) {
+    match b {
+        Block::Para(inls) | Block::Heading { inlines: inls, .. } => inline_refs(inls, out),
+        Block::List { items, .. } => {
+            for item in items {
+                for ib in item {
+                    collect_note_refs(ib, out);
+                }
+            }
+        }
+        Block::Footnote { blocks, .. } => {
+            for ib in blocks {
+                collect_note_refs(ib, out);
+            }
+        }
+        Block::Table(t) => {
+            for row in std::iter::once(&t.header).chain(t.rows.iter()) {
+                for cell in row {
+                    inline_refs(cell, out);
+                }
+            }
+        }
+        Block::Figure { caption, .. } => inline_refs(caption, out),
+        _ => {}
+    }
+}
+
+fn inline_refs(inls: &[Inline], out: &mut std::collections::HashSet<NoteId>) {
+    for i in inls {
+        match i {
+            Inline::FootnoteRef(n) => {
+                out.insert(*n);
+            }
+            Inline::Emph(x) | Inline::Strong(x) | Inline::Link { inlines: x, .. } => {
+                inline_refs(x, out)
+            }
+            _ => {}
+        }
+    }
 }
 
 fn find_opf_path(container_xml: &str) -> Option<String> {
@@ -486,5 +621,66 @@ mod tests {
         assert!(
             matches!(first_link_target(&doc), Some(RefTarget::External(u)) if u == "https://example.com")
         );
+    }
+
+    // ---- EPUB3 semantic footnotes ----
+
+    #[test]
+    fn noteref_pairs_with_aside_and_relocates_definition() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p>claim<a epub:type=\"noteref\" href=\"#fn1\">1</a></p>\
+             <p>filler paragraph</p>\
+             <aside epub:type=\"footnote\" id=\"fn1\"><p>note body</p></aside></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        // NoteIds are 1-based at the adapter level so rendered markers read [^1].
+        // The para holds a FootnoteRef, not a Link.
+        let ref_idx = doc
+            .nodes
+            .iter()
+            .position(|n| {
+                matches!(&n.block,
+            Block::Para(i) if i.iter().any(|x| matches!(x, Inline::FootnoteRef(NoteId(1)))))
+            })
+            .unwrap();
+        // The Footnote block was moved to immediately after the referencing para.
+        assert!(
+            matches!(
+                &doc.nodes[ref_idx + 1].block,
+                Block::Footnote { id: NoteId(1), .. }
+            ),
+            "footnote must directly follow its first reference, got {:?}",
+            doc.nodes[ref_idx + 1].block
+        );
+    }
+
+    #[test]
+    fn orphan_noteref_falls_back_to_internal_link_path() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p>x<a epub:type=\"noteref\" href=\"#nosuch\">1</a></p></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(!doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Para(i) if i.iter().any(|x| matches!(x, Inline::FootnoteRef(_))))));
+        // "#nosuch" resolves via first-heading fallback -> stays a link, Internal
+        assert!(matches!(
+            first_link_target(&doc),
+            Some(RefTarget::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn unreferenced_aside_stays_in_place() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p>x</p><aside epub:type=\"footnote\" id=\"fn9\"><p>lonely</p></aside></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Footnote { .. })));
     }
 }

@@ -1,4 +1,4 @@
-use kasane_ir::{AssetRef, Block, BlockId, Inline, RefTarget};
+use kasane_ir::{AssetRef, Block, BlockId, Inline, NoteId, RefTarget};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
@@ -28,6 +28,10 @@ enum BlockFrame {
         // figcaption End handler's unconditional `*caption = x` cannot
         // clobber it -- see emit_block's Figure arm and finish_frame.
         extra: Vec<Inline>,
+    },
+    Footnote {
+        note: NoteId,
+        blocks: Vec<Block>,
     },
 }
 
@@ -73,6 +77,7 @@ fn emit_block(
             }
             flatten_block_inlines(&b, extra);
         }
+        Some(BlockFrame::Footnote { blocks, .. }) => blocks.push(b),
     }
 }
 
@@ -191,6 +196,22 @@ fn finish_frame(
                 None => {}
             }
         }
+        BlockFrame::Footnote {
+            note,
+            blocks: fblocks,
+        } => {
+            if !fblocks.is_empty() {
+                emit_block(
+                    frames,
+                    inline_stack,
+                    out,
+                    Block::Footnote {
+                        id: note,
+                        blocks: fblocks,
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -230,6 +251,19 @@ fn is_inline_tag(name: &[u8]) -> bool {
     )
 }
 
+// epub:type is a space-separated token list, e.g. "footnote" or "rearnote footnote".
+fn epub_type_has(e: &quick_xml::events::BytesStart, token: &str) -> bool {
+    e.attributes()
+        .flatten()
+        .find(|a| a.key.as_ref() == b"epub:type")
+        .map(|a| {
+            String::from_utf8_lossy(&a.value)
+                .split_whitespace()
+                .any(|t| t == token)
+        })
+        .unwrap_or(false)
+}
+
 // A single spine file's parse result: its blocks, plus enough to resolve
 // same-file and cross-file `<a href>` fragments against headings once every
 // spine file has been parsed (see `epub::mod::fix_links`).
@@ -238,13 +272,23 @@ pub struct FileParse {
     // id attr -> nearest preceding heading's BlockId.
     pub anchors: Vec<(String, BlockId)>,
     pub first_heading: Option<BlockId>,
+    // <aside epub:type="footnote" id="..."> id attr -> the NoteId it became.
+    pub footnotes: Vec<(String, NoteId)>,
+    // href of every <a epub:type="noteref" href="...">, in document order.
+    pub noteref_hrefs: Vec<String>,
 }
 
 // Returns blocks (plus the anchor map -- see `FileParse`); `next_id` is a
 // running BlockId counter for headings. `base_dir` is the XHTML file's
 // parent directory inside the zip (e.g. "OEBPS"), used to resolve `img`
-// `src` attributes to zip-entry keys.
-pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FileParse {
+// `src` attributes to zip-entry keys. `next_note` is a running NoteId
+// counter for `<aside epub:type="footnote">` elements.
+pub fn xhtml_to_blocks(
+    xml: &str,
+    base_dir: &str,
+    next_id: &mut u32,
+    next_note: &mut u32,
+) -> FileParse {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
     // Real-world XHTML routinely contains a bare `&` (e.g. `Tom & Jerry`).
@@ -290,6 +334,13 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FilePars
     let mut first_heading: Option<BlockId> = None;
     let mut last_heading: Option<BlockId> = None;
     let mut heading_own_id: Option<String> = None; // id attr on the open h1..h6 itself
+                                                   // Footnote tracking: aside id -> the NoteId it became, and every noteref
+                                                   // href seen, in document order. `aside_pushed` mirrors the nesting of
+                                                   // <aside> tags so the End handler knows whether a given close corresponds
+                                                   // to a Footnote frame it opened (a non-footnote <aside> stays transparent).
+    let mut footnotes: Vec<(String, NoteId)> = vec![];
+    let mut noteref_hrefs: Vec<String> = vec![];
+    let mut aside_pushed: Vec<bool> = vec![];
 
     macro_rules! push_text {
         ($t:expr) => {
@@ -432,6 +483,11 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FilePars
                             .flatten()
                             .find(|a| a.key.as_ref() == b"href")
                             .map(|a| String::from_utf8_lossy(&a.value).into_owned());
+                        if epub_type_has(&e, "noteref") {
+                            if let Some(h) = &link_href {
+                                noteref_hrefs.push(h.clone());
+                            }
+                        }
                         inline_stack.push(vec![]);
                     }
                     // close_implicit! already ran above: `pre` is not an
@@ -510,6 +566,27 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FilePars
                         caption: vec![],
                         extra: vec![],
                     }),
+                    b"aside" => {
+                        if epub_type_has(&e, "footnote") {
+                            let note = NoteId(*next_note);
+                            *next_note += 1;
+                            if let Some(idv) = e
+                                .attributes()
+                                .flatten()
+                                .find(|a| a.key.as_ref() == b"id")
+                                .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+                            {
+                                footnotes.push((idv, note));
+                            }
+                            frames.push(BlockFrame::Footnote {
+                                note,
+                                blocks: vec![],
+                            });
+                            aside_pushed.push(true);
+                        } else {
+                            aside_pushed.push(false); // transparent aside
+                        }
+                    }
                     b"figcaption" => inline_stack.push(vec![]),
                     b"img" => {
                         let attr = |k: &[u8]| {
@@ -785,6 +862,13 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FilePars
                             finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
                     }
+                    b"aside"
+                        if aside_pushed.pop() == Some(true)
+                            && matches!(frames.last(), Some(BlockFrame::Footnote { .. })) =>
+                    {
+                        let f = frames.pop().expect("checked");
+                        finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
+                    }
                     _ => {}
                 }
             }
@@ -815,6 +899,8 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FilePars
         blocks,
         anchors,
         first_heading,
+        footnotes,
+        noteref_hrefs,
     }
 }
 
@@ -824,7 +910,7 @@ mod tests {
 
     fn parse(xml: &str) -> FileParse {
         let mut id = 0;
-        xhtml_to_blocks(xml, "OEBPS", &mut id)
+        xhtml_to_blocks(xml, "OEBPS", &mut id, &mut 0)
     }
 
     fn parse_blocks(xml: &str) -> Vec<Block> {
@@ -1795,5 +1881,39 @@ mod tests {
             panic!()
         };
         assert_eq!(text_of(inls), "line one line two");
+    }
+
+    // ---- EPUB3 semantic footnotes ----
+
+    #[test]
+    fn semantic_aside_becomes_footnote_block() {
+        let fp = parse(
+            "<body><h1>C</h1><p>claim<a epub:type=\"noteref\" href=\"#fn1\">1</a></p>\
+             <aside epub:type=\"footnote\" id=\"fn1\"><p>the details</p></aside></body>",
+        );
+        let Some(Block::Footnote { id, blocks }) = fp
+            .blocks
+            .iter()
+            .find(|b| matches!(b, Block::Footnote { .. }))
+        else {
+            panic!("expected Footnote block")
+        };
+        assert_eq!(*id, NoteId(0));
+        assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "the details"));
+        assert_eq!(fp.footnotes, vec![("fn1".to_string(), NoteId(0))]);
+        assert_eq!(fp.noteref_hrefs, vec!["#fn1".to_string()]);
+    }
+
+    #[test]
+    fn non_footnote_aside_stays_transparent() {
+        let fp = parse("<body><h1>C</h1><aside><p>sidebar</p></aside></body>");
+        assert!(!fp
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Footnote { .. })));
+        assert!(fp
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Para(i) if text_of(i) == "sidebar")));
     }
 }
