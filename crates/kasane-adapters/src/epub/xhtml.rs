@@ -127,6 +127,21 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 if e.local_name().as_ref() == b"body" {
                     in_body = true;
                 }
+                // An inline tag (e.g. `strong`, `em`, `a`) that is the FIRST
+                // flow-level content -- no preceding bare text opened the
+                // implicit paragraph -- must open it itself. Otherwise this
+                // Start pushes its own inline frame, and the matching End
+                // pops it and finds inline_stack empty when it tries to
+                // attach the result, silently discarding the content. Mirrors
+                // the Text-arm opener above.
+                if is_inline_tag(e.local_name().as_ref())
+                    && inline_stack.is_empty()
+                    && in_body
+                    && cur_block.is_none()
+                {
+                    inline_stack.push(vec![]);
+                    implicit_para = true;
+                }
                 match e.local_name().as_ref() {
                     b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
                         cur_block = Some(e.local_name().as_ref()[1] - b'0');
@@ -1029,5 +1044,56 @@ mod tests {
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "before"));
         assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "inside"));
         assert!(matches!(&blocks[2], Block::Para(i) if text_of(i) == "after"));
+    }
+
+    // ---- Regression: a leading inline tag at flow level must open the
+    // implicit paragraph itself, not rely on preceding bare text ----
+
+    #[test]
+    fn leading_inline_tag_at_flow_level_opens_implicit_paragraph() {
+        // Repro from review: <strong> is the FIRST flow-level content inside
+        // <body>, with no preceding bare text to open the implicit-paragraph
+        // wrapper. Pre-fix, Start(strong) pushed its own inline frame, then
+        // End(strong) popped it and tried inline_stack.last_mut() to attach
+        // the result -- found the stack empty, and silently discarded
+        // "Warning" entirely. Only Para([" ok"]) survived.
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><strong>Warning</strong> ok</body>", &mut id);
+        assert_eq!(blocks.len(), 1, "expected a single Para, got {blocks:?}");
+        let Block::Para(inls) = &blocks[0] else {
+            panic!("expected Para, got {:?}", blocks[0]);
+        };
+        assert_eq!(
+            inls.len(),
+            2,
+            "expected Strong(\"Warning\") + Text(\" ok\"), got {inls:?}"
+        );
+        match &inls[0] {
+            Inline::Strong(x) => assert_eq!(text_of(x), "Warning"),
+            other => panic!("expected Strong, got {other:?}"),
+        }
+        match &inls[1] {
+            Inline::Text(t) => assert_eq!(t, " ok"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leading_inline_tag_inside_list_item_opens_implicit_paragraph() {
+        // Same regression, but inside a <li>: the first flow-level content
+        // of the item is an inline tag with no preceding bare text.
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<body><ul><li><em>x</em></li></ul></body>", &mut id);
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected List, got {:?}", blocks[0]);
+        };
+        let Block::Para(inls) = &items[0][0] else {
+            panic!("expected Para inside item, got {:?}", items[0]);
+        };
+        assert_eq!(inls.len(), 1, "expected a single Emph, got {inls:?}");
+        match &inls[0] {
+            Inline::Emph(x) => assert_eq!(text_of(x), "x"),
+            other => panic!("expected Emph, got {other:?}"),
+        }
     }
 }
