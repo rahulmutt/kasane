@@ -1,3 +1,15 @@
 [tools]
 rust = "1.97.1"
-"cargo:just" = "1.46.0"
+
+[tasks.build]
+run = "cargo build --workspace"
+
+[tasks.test]
+run = "cargo test --workspace"
+
+[tasks.lint]
+run = ["cargo fmt --all -- --check",
+       "cargo clippy --workspace --all-targets -- -D warnings"]
+
+[tasks.convert]
+run = "cargo run -p kasane-cli --"
