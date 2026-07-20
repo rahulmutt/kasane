@@ -139,10 +139,46 @@ pub(crate) fn parse_shapes(xml: &str, _rels: &SlideRels) -> Vec<Shape> {
 
 // Map a body shape's paragraphs to blocks. Extended in Task 5 to build nested lists.
 fn body_to_blocks(paras: Vec<Paragraph>, out: &mut Vec<Block>) {
-    for p in paras {
-        if !p.inlines.is_empty() {
-            out.push(Block::Para(p.inlines));
+    let non_empty: Vec<Paragraph> = paras
+        .into_iter()
+        .filter(|p| !p.inlines.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return;
+    }
+    if non_empty.len() == 1 && non_empty[0].level == 0 {
+        out.push(Block::Para(non_empty.into_iter().next().unwrap().inlines));
+        return;
+    }
+    out.push(build_list(&non_empty, 0, &mut 0));
+}
+
+// Build a bulleted List for paragraphs at `depth`, consuming from index `*i`.
+// A paragraph deeper than `depth` becomes a nested List under the previous item.
+fn build_list(paras: &[Paragraph], depth: u8, i: &mut usize) -> Block {
+    let mut items: Vec<Vec<Block>> = Vec::new();
+    while *i < paras.len() {
+        let lvl = paras[*i].level;
+        if lvl < depth {
+            break; // belongs to an ancestor list
         }
+        if lvl == depth {
+            items.push(vec![Block::Para(paras[*i].inlines.clone())]);
+            *i += 1;
+        } else {
+            // deeper: nest under the most recent item at this depth
+            let nested = build_list(paras, depth + 1, i);
+            if let Some(last) = items.last_mut() {
+                last.push(nested);
+            } else {
+                // no parent item (malformed jump in levels): promote to this depth
+                items.push(vec![nested]);
+            }
+        }
+    }
+    Block::List {
+        ordered: false,
+        items,
     }
 }
 
@@ -246,5 +282,44 @@ mod tests {
         let mut id = 0u32;
         let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
         assert!(matches!(&blocks[0], Block::Heading { level: 1, .. }));
+    }
+
+    #[test]
+    fn body_with_levels_becomes_nested_list() {
+        use kasane_ir::Block;
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody>
+            <a:p><a:r><a:t>A</a:t></a:r></a:p>
+            <a:p><a:pPr lvl="1"/><a:r><a:t>A1</a:t></a:r></a:p>
+            <a:p><a:r><a:t>B</a:t></a:r></a:p>
+          </p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let list = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("a list");
+        assert_eq!(list.len(), 2); // top-level items A and B
+                                   // A's item contains a nested List holding A1
+        let a_has_nested = list[0].iter().any(|b| matches!(b, Block::List { .. }));
+        assert!(a_has_nested, "A1 should nest under A");
+    }
+
+    #[test]
+    fn lone_paragraph_stays_para() {
+        use kasane_ir::Block;
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><a:r><a:t>solo</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(blocks.iter().any(|b| matches!(b, Block::Para(_))));
+        assert!(!blocks.iter().any(|b| matches!(b, Block::List { .. })));
     }
 }
