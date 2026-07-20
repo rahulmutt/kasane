@@ -415,6 +415,17 @@ pub fn xhtml_to_blocks(
                             text: text.trim_matches('\n').to_string(),
                         },
                     );
+                    // Mirror the main Eof arm's frame drain: EOF mid-<pre>
+                    // can still leave containers (a <ul>/<table>/... that
+                    // opened before the <pre>) on the stack, and they must
+                    // fold into `blocks` the same as any other truncated
+                    // document, not be silently discarded. `implicit_para`
+                    // is already false here -- <pre> is not an inline tag,
+                    // so the Start(b"pre") arm's close_implicit!() already
+                    // flushed any bare text that preceded it.
+                    while let Some(f) = frames.pop() {
+                        finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
+                    }
                     break;
                 }
                 _ => {} // other markup inside <pre> is ignored, its text still arrives as Text events
@@ -1671,6 +1682,37 @@ mod tests {
             panic!("unclosed list must still be emitted")
         };
         assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "orphan"));
+    }
+
+    #[test]
+    fn eof_inside_pre_still_flushes_open_frames() {
+        // Regression: the <pre> intercept's own Eof arm used to emit the
+        // accumulated CodeBlock and `break` directly, bypassing the main
+        // Eof arm's `while let Some(f) = frames.pop() { finish_frame(...) }`
+        // drain. EOF mid-<pre> with an open <ul><li> left the List frame on
+        // the stack forever -- it never folded into `blocks`, silently
+        // dropping the list (and the CodeBlock landed inside it) entirely.
+        let blocks = parse_blocks("<body><ul><li><p>one</p><pre>orphan code");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the list must survive EOF mid-<pre>, got {blocks:?}"
+        );
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected List, got {:?}", blocks[0]);
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].len(),
+            2,
+            "expected Para(\"one\") + CodeBlock(\"orphan code\") in the open item"
+        );
+        assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "one"));
+        assert!(
+            matches!(&items[0][1], Block::CodeBlock { text, .. } if text == "orphan code"),
+            "expected CodeBlock inside the still-open list item, got {:?}",
+            items[0][1]
+        );
     }
 
     // ---- Implicit paragraphs, transparent containers, head/body gating ----
