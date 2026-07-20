@@ -11,6 +11,11 @@ pub struct Opf {
 pub fn parse_opf(xml: &str, opf_dir: &str) -> Opf {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
+    // A bare `&` in e.g. <dc:title> is common in real EPUBs. quick-xml 0.41
+    // raises IllFormedError on it (0.36 passed it through); this loop's
+    // `Err(_) => break` would then abandon the OPF before <manifest>/<spine>,
+    // losing the ENTIRE book at exit 0. Recover the `&` as literal text instead.
+    reader.config_mut().allow_dangling_amp = true;
     // quick-xml does not resolve external entities -> XXE-safe by default.
     let mut title = String::new();
     let mut authors = vec![];
@@ -82,11 +87,11 @@ pub fn parse_opf(xml: &str, opf_dir: &str) -> Opf {
             }
             Ok(Event::Text(t)) => {
                 if cur.is_some() {
-                    let txt = t
-                        .decode()
-                        .ok()
-                        .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
-                        .unwrap_or_default();
+                    // No unescape() here: the reader splits text at every
+                    // reference, so an Event::Text can never contain a `&...;`.
+                    // With allow_dangling_amp it would also turn a recovered
+                    // `& Jerry` into "" via Err(UnterminatedEntity).
+                    let txt = t.decode().map(|d| d.into_owned()).unwrap_or_default();
                     acc.push_str(&txt);
                 }
             }
@@ -133,13 +138,31 @@ mod tests {
         // `A &amp; B` puts the reference between two Text fragments, so under
         // quick-xml 0.41 -- which splits text at every reference -- this
         // exercises resolve_general_ref's unescape() call via the accumulator
-        // path, not decode()/unescape() on Event::Text (Event::Text can never
-        // contain a `&...;` once the reader splits on it).
+        // path. Event::Text can never contain a `&...;` once the reader splits
+        // on it, so that arm only decodes and deliberately does not unescape.
         let xml = r#"<package><metadata>
           <dc:title>A &amp; B</dc:title>
         </metadata></package>"#;
         let opf = parse_opf(xml, "OEBPS");
         assert_eq!(opf.title, "A & B");
+    }
+
+    #[test]
+    fn bare_ampersand_in_title_does_not_lose_the_manifest_and_spine() {
+        // The total-loss case: a dangling `&` in <dc:title> raised
+        // IllFormedError under quick-xml 0.41, and `Err(_) => break` abandoned
+        // the OPF before <manifest>/<spine> -- the whole book vanished at
+        // exit 0. Assert the spine survives, not merely that the title reads
+        // correctly.
+        let xml = r#"<package><metadata>
+          <dc:title>Tom & Jerry</dc:title>
+        </metadata>
+        <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+        <spine><itemref idref="c1"/></spine>
+        </package>"#;
+        let opf = parse_opf(xml, "OEBPS");
+        assert_eq!(opf.title, "Tom & Jerry");
+        assert_eq!(opf.spine_hrefs, vec!["OEBPS/ch1.xhtml".to_string()]);
     }
 
     #[test]

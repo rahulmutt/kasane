@@ -6,6 +6,12 @@ use quick_xml::Reader;
 pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
+    // Real-world XHTML routinely contains a bare `&` (e.g. `Tom & Jerry`).
+    // quick-xml 0.41 raises IllFormedError on a dangling ampersand where 0.36
+    // passed it through, and this loop's `Err(_) => break` would abandon the
+    // rest of the document -- total silent data loss at exit 0. With this set
+    // the `&` is delivered as literal Text and the document survives.
+    reader.config_mut().allow_dangling_amp = true;
     let mut blocks = vec![];
     let mut buf = Vec::new();
     // inline accumulation stack
@@ -65,11 +71,13 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 }
             }
             Ok(Event::Text(t)) => {
-                let s = t
-                    .decode()
-                    .ok()
-                    .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
-                    .unwrap_or_default();
+                // No unescape() here: the reader splits text at every reference,
+                // so an Event::Text can never contain a `&...;`. Worse, with
+                // allow_dangling_amp a recovered fragment like `& Jerry` makes
+                // unescape() return Err(UnterminatedEntity), which the
+                // unwrap_or_default() would turn into "" -- silently deleting
+                // the text run we just rescued.
+                let s = t.decode().map(|d| d.into_owned()).unwrap_or_default();
                 if s.trim().is_empty() {
                     if prev_was_ref {
                         // Adjacent to the reference that just preceded it:
@@ -209,8 +217,9 @@ mod tests {
         // `&lt;` is the paragraph's entire text run, so under quick-xml 0.41
         // it arrives as a lone GeneralRef with no adjacent Event::Text --
         // Event::Text can never contain a `&...;` once the reader splits at
-        // every reference. This exercises resolve_general_ref's own
-        // unescape() call, not decode()/unescape() on Event::Text.
+        // every reference. Reference resolution therefore lives entirely in
+        // resolve_general_ref's unescape() call; the Event::Text arm only
+        // decodes, and deliberately does not unescape.
         let xml = "<p>a &lt; b</p>";
         let mut next_id = 0u32;
         let blocks = xhtml_to_blocks(xml, &mut next_id);
@@ -222,6 +231,26 @@ mod tests {
             })
             .expect("a paragraph");
         assert_eq!(text_of(para), "a < b");
+    }
+
+    #[test]
+    fn bare_ampersand_does_not_truncate_the_rest_of_the_document() {
+        // A dangling `&` is the most common way real EPUB XHTML departs from
+        // well-formedness. quick-xml 0.41 raises IllFormedError on it, and the
+        // parse loop's `Err(_) => break` turned that into loss of EVERY later
+        // block, at exit 0. `allow_dangling_amp` recovers it as literal text.
+        // The regression is the SECOND paragraph, not just the `&`.
+        let xml = "<p>Tom & Jerry</p><p>SECOND</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let paras: Vec<String> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Para(inls) => Some(text_of(inls)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paras, vec!["Tom & Jerry".to_string(), "SECOND".to_string()]);
     }
 
     #[test]

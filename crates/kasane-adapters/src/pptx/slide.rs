@@ -70,6 +70,11 @@ fn styled(text: String, fmt: &RunFmt) -> Inline {
 pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
+    // A bare `&` in an <a:t> run would raise IllFormedError under quick-xml
+    // 0.41 (0.36 passed it through), and this loop treats a reader error as
+    // truncation -- abandoning every later shape on the slide. Recover the
+    // `&` as literal text instead.
+    reader.config_mut().allow_dangling_amp = true;
     let mut buf = Vec::new();
 
     let mut shapes = Vec::new();
@@ -173,11 +178,11 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                 _ => {}
             },
             Ok(Event::Text(t)) if in_run => {
-                let s = t
-                    .decode()
-                    .ok()
-                    .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
-                    .unwrap_or_default();
+                // No unescape() here: the reader splits text at every reference,
+                // so an Event::Text can never contain a `&...;`. With
+                // allow_dangling_amp it would also turn a recovered `& Jerry`
+                // into "" via Err(UnterminatedEntity).
+                let s = t.decode().map(|d| d.into_owned()).unwrap_or_default();
                 if !s.is_empty() {
                     if in_cell {
                         crate::xmltext::push_inline(&mut cur_cell, styled(s, &fmt));
@@ -414,9 +419,9 @@ mod tests {
     fn unescapes_run_text_entities() {
         // `x &amp; y` puts the reference between two Text fragments, so under
         // quick-xml 0.41 -- which splits text at every reference -- this
-        // exercises resolve_general_ref's unescape() call, not decode() /
-        // unescape() on Event::Text (Event::Text can never contain a
-        // `&...;` once the reader splits on it). Existing tests only cover
+        // exercises resolve_general_ref's unescape() call. Event::Text can
+        // never contain a `&...;` once the reader splits on it, so that arm
+        // only decodes and deliberately does not unescape. Existing tests cover
         // plain runs, never the reference-resolution half.
         let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
           <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
@@ -432,6 +437,29 @@ mod tests {
             })
             .expect("a paragraph");
         assert_eq!(text_of(para), "x & y");
+    }
+
+    #[test]
+    fn bare_ampersand_in_run_does_not_truncate_later_shapes() {
+        // A dangling `&` raised IllFormedError under quick-xml 0.41, which this
+        // loop treats as truncation -- dropping every later shape on the slide.
+        // The regression is the SECOND shape, not just the `&`.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+            <p:txBody><a:p><a:r><a:t>Tom & Jerry</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+            <p:txBody><a:p><a:r><a:t>SECOND</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let paras: Vec<String> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Para(inls) => Some(text_of(inls)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paras, vec!["Tom & Jerry".to_string(), "SECOND".to_string()]);
     }
 
     #[test]
