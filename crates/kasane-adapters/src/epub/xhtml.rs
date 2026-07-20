@@ -20,7 +20,10 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     // and must still be dropped. `pending_ws` holds the undecided fragment;
     // it is kept if a GeneralRef precedes or follows it, and discarded at
     // any tag boundary. `prev_was_ref` records the immediately-preceding
-    // case.
+    // case. When kept, the fragment is normalized to a single `" "` rather
+    // than pushed verbatim: XHTML collapses whitespace runs anyway, so a
+    // pretty-printed `"\n  "` adjacent to a reference must render the same
+    // as a literal `" "` would.
     let mut pending_ws: Option<String> = None;
     let mut prev_was_ref = false;
 
@@ -70,9 +73,11 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 if s.trim().is_empty() {
                     if prev_was_ref {
                         // Adjacent to the reference that just preceded it:
-                        // real content, not inter-tag formatting.
+                        // real content, not inter-tag formatting. Normalized
+                        // to a single space -- the run's whitespace content,
+                        // not its literal pretty-printed layout.
                         if !inline_stack.is_empty() {
-                            push_text!(s);
+                            push_text!(" ".to_string());
                         }
                     } else {
                         // Undecided: keep it only if a GeneralRef follows.
@@ -91,9 +96,17 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
             Ok(Event::GeneralRef(r)) => {
                 // A pending whitespace-only Text fragment sitting right before
                 // this reference is reference-adjacent content; flush it.
-                if let Some(ws) = pending_ws.take() {
-                    if !inline_stack.is_empty() {
-                        push_text!(ws);
+                if pending_ws.take().is_some() {
+                    // Normalized to a single space, same as the prev_was_ref
+                    // keep above -- see the comment on `pending_ws` at the
+                    // top of this function. Additionally require that the
+                    // current inline frame already has content: at a block
+                    // or inline boundary (e.g. `<p>\n  &amp;X`, or the start
+                    // of `<em>\n  &amp;B</em>`) the frame was just pushed
+                    // empty, so this whitespace is leading, not a separator
+                    // between two pieces of content -- suppress it.
+                    if inline_stack.last().is_some_and(|top| !top.is_empty()) {
+                        push_text!(" ".to_string());
                     }
                 }
                 let s = crate::xmltext::resolve_general_ref(&r);
@@ -372,4 +385,192 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
     }
+
+    // ---- Finding 5: kept whitespace must be normalized, not verbatim ----
+    //
+    // Every case above uses a literal single-space fragment, so pushing `s`
+    // verbatim and pushing a normalized `" "` are indistinguishable. In
+    // pretty-printed XHTML the fragment is multi-character (`"\n  "`), which
+    // is where the previous fix's verbatim push actually leaked hard
+    // newlines and indentation into paragraph text.
+
+    #[test]
+    fn pending_ws_flush_before_reference_is_normalized_not_verbatim() {
+        // pending_ws = Some("\n  ") -> GeneralRef: the flush site at the top
+        // of the GeneralRef arm. Pre-normalization this pushed "\n  " itself
+        // between Strong("A") and "& B", splitting the paragraph onto a
+        // second line.
+        let xml = "<p>\n  <strong>A</strong>\n  &amp; B</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Strong(\"A\") + Text(\" & B\")");
+        match &para[0] {
+            Inline::Strong(x) => assert_eq!(text_of(x), "A"),
+            other => panic!("expected Strong, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Text(t) => assert_eq!(t, " & B", "whitespace must collapse to one space"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prev_was_ref_keep_of_multichar_whitespace_is_normalized() {
+        // prev_was_ref = true -> Text("\n  "): the keep site inside the
+        // Event::Text handler, mirroring the flush site above. Pre-fix this
+        // pushed "\n  " verbatim between "&" and Emph("Q").
+        let xml = "<p>P &amp;\n  <em>Q</em></p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Text(\"P & \") + Emph(\"Q\")");
+        match &para[0] {
+            Inline::Text(t) => assert_eq!(t, "P & ", "whitespace must collapse to one space"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Emph(x) => assert_eq!(text_of(x), "Q"),
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    // ---- Two additional transitions named in review, not covered above ----
+
+    #[test]
+    fn prev_was_ref_keep_of_trailing_space_before_end_is_retained() {
+        // prev_was_ref = true -> Text(" ") -> End: `<p>a &amp; </p>`.
+        // Pre-7d3163e this trailing space was dropped outright (the old
+        // guard discarded every whitespace-only fragment unconditionally).
+        // Under the reference-adjacency design, a Text(" ") immediately
+        // following a reference is, by the same rule that keeps a leading
+        // separator space, real content -- there is nothing in the state
+        // machine that distinguishes "adjacent to a reference, then more
+        // content follows" from "adjacent to a reference, then the block
+        // ends". Retaining it is the consistent choice; pin it.
+        let xml = "<p>a &amp; </p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(
+            text_of(para),
+            "a & ",
+            "trailing reference-adjacent space is kept"
+        );
+    }
+
+    #[test]
+    fn pending_ws_dropped_at_eof_without_a_flushing_event() {
+        // pending_ws = Some(_) -> Eof: reached only via malformed/truncated
+        // input (a `<p>` never closed), since on well-formed input every
+        // pending_ws is resolved by a Start, End, GeneralRef, or the `_` arm
+        // before Eof is reached. Nothing ever flushes it to inline_stack in
+        // this path -- it is dropped by the same fallthrough as any other
+        // unresolved pending_ws, and the unclosed `<p>` never reaches the
+        // Event::End(b"p") handler that would emit a Block::Para. Pinning
+        // this: no panic, no block, no leaked fragment.
+        let xml = "<p>\n  ";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        assert!(
+            blocks.is_empty(),
+            "unclosed paragraph must not emit a block, got {blocks:?}"
+        );
+    }
+
+    // ---- Leading whitespace at the start of an inline frame is suppressed ----
+
+    #[test]
+    fn pending_ws_flush_at_block_start_suppresses_leading_space() {
+        // pending_ws = Some("\n  ") -> GeneralRef, but with nothing pushed
+        // into the top inline frame yet: `<p>` just pushed a fresh empty
+        // vec, so the "\n  " before `&amp;X` is leading indentation, not a
+        // separator between content. Regression: this used to render as
+        // " &X" with a leading space.
+        let xml = "<p>\n  &amp;X\n</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        // trim_end(), not a bare equality: the trailing "\n" between "X" and
+        // "</p>" arrives as part of the *non-whitespace* Text("X\n") event,
+        // which the plain `else` branch of the Text handler has always
+        // pushed verbatim -- a separate, pre-existing gap with no leading/
+        // trailing trim at all, present since before this fix series
+        // (verified against a20db75 and a31e854) and out of scope for the
+        // GeneralRef-flush-site fix this test pins. It is harmless in the
+        // rendered Markdown (the byte is absorbed as the paragraph's own
+        // line terminator, producing an extra blank line rather than
+        // corrupting the visible "&X" line -- confirmed against the CLI).
+        assert_eq!(
+            text_of(para).trim_end(),
+            "&X",
+            "no leading space at block start"
+        );
+        assert!(
+            !text_of(para).starts_with(' '),
+            "must not have a leading space, the regression under test"
+        );
+    }
+
+    #[test]
+    fn pending_ws_flush_at_nested_inline_start_suppresses_leading_space_per_frame() {
+        // Proves the check is per-frame, not global: `<em>` opens its own
+        // fresh empty inline vec, so the whitespace immediately inside it is
+        // suppressed as leading, even though the paragraph's own top-level
+        // frame already has content ("A ") before the `<em>` starts.
+        let xml = "<p>A <em>\n  &amp;B</em></p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Text(\"A \") + Emph(\"&B\")");
+        match &para[0] {
+            Inline::Text(t) => assert_eq!(t, "A ", "text before <em> is unaffected"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Emph(x) => assert_eq!(
+                text_of(x),
+                "&B",
+                "no leading space inside the em's own fresh frame"
+            ),
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    // Note: the mid-content keep case (whitespace between `</strong>` and
+    // `&amp;` inside `<p>\n  <strong>A</strong>\n  &amp; B\n</p>`) is already
+    // covered by `pending_ws_flush_before_reference_is_normalized_not_verbatim`
+    // above -- by the time that whitespace flushes, `</strong>` has already
+    // pushed `Inline::Strong` into the paragraph's top frame, so the frame is
+    // non-empty and the space survives. Not duplicated here.
 }
