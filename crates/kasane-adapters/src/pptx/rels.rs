@@ -32,7 +32,7 @@ fn local_name(key: &[u8]) -> &[u8] {
 /// which prefix the document binds to the relationships namespace, without
 /// accidentally matching an unrelated unprefixed attribute of the same local
 /// name (e.g. `sldId`'s own unprefixed `id` attribute).
-fn attr_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<String> {
+pub(crate) fn attr_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| {
