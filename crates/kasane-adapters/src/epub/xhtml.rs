@@ -99,13 +99,21 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 if pending_ws.take().is_some() {
                     // Normalized to a single space, same as the prev_was_ref
                     // keep above -- see the comment on `pending_ws` at the
-                    // top of this function. Additionally require that the
-                    // current inline frame already has content: at a block
-                    // or inline boundary (e.g. `<p>\n  &amp;X`, or the start
-                    // of `<em>\n  &amp;B</em>`) the frame was just pushed
-                    // empty, so this whitespace is leading, not a separator
-                    // between two pieces of content -- suppress it.
-                    if inline_stack.last().is_some_and(|top| !top.is_empty()) {
+                    // top of this function. Additionally suppress only at
+                    // the start of the *block* frame (depth 1: `p`/`h1..h6`
+                    // push it and nothing else does -- `strong`/`em`/`a`
+                    // push nested inline frames deeper than that). Per HTML
+                    // whitespace processing, leading whitespace at the start
+                    // of a block is stripped (e.g. `<p>\n  &amp;X` ->
+                    // "&X"), but leading whitespace at the start of an
+                    // *inline* element is real content and must survive
+                    // (`A<em> &amp;B</em>` -> `A` then a space then
+                    // emphasized `&B`). Gating on frame depth, not just
+                    // "was this frame just pushed empty", is what tells the
+                    // two cases apart.
+                    let suppress = inline_stack.len() == 1
+                        && inline_stack.last().is_some_and(|top| top.is_empty());
+                    if !suppress && !inline_stack.is_empty() {
                         push_text!(" ".to_string());
                     }
                 }
@@ -537,11 +545,22 @@ mod tests {
     }
 
     #[test]
-    fn pending_ws_flush_at_nested_inline_start_suppresses_leading_space_per_frame() {
-        // Proves the check is per-frame, not global: `<em>` opens its own
-        // fresh empty inline vec, so the whitespace immediately inside it is
-        // suppressed as leading, even though the paragraph's own top-level
-        // frame already has content ("A ") before the `<em>` starts.
+    fn pending_ws_flush_at_nested_inline_start_keeps_leading_space_per_frame() {
+        // Proves the suppression check is block-vs-inline (frame depth), not
+        // just "was this frame pushed empty": `<em>` opens its own fresh
+        // empty inline vec, but it is a *nested inline* frame (depth 2, not
+        // the block frame at depth 1), so the whitespace immediately inside
+        // it is real content and must survive, same as the paragraph's own
+        // top-level content ("A ") before the `<em>` starts.
+        //
+        // Renamed and re-asserted from
+        // `pending_ws_flush_at_nested_inline_start_suppresses_leading_space_per_frame`,
+        // which pinned the regression this task fixes: it asserted
+        // Emph("&B") (space dropped) for this same input. Per HTML
+        // whitespace processing, only block-start whitespace is stripped;
+        // inline-start whitespace is authored content. Old (wrong)
+        // expectation: Text("A ") + Emph("&B"). New (correct) expectation:
+        // Text("A ") + Emph(" &B").
         let xml = "<p>A <em>\n  &amp;B</em></p>";
         let mut next_id = 0u32;
         let blocks = xhtml_to_blocks(xml, &mut next_id);
@@ -552,7 +571,7 @@ mod tests {
                 _ => None,
             })
             .expect("a paragraph");
-        assert_eq!(para.len(), 2, "expected Text(\"A \") + Emph(\"&B\")");
+        assert_eq!(para.len(), 2, "expected Text(\"A \") + Emph(\" &B\")");
         match &para[0] {
             Inline::Text(t) => assert_eq!(t, "A ", "text before <em> is unaffected"),
             other => panic!("expected Text, got {other:?}"),
@@ -560,11 +579,166 @@ mod tests {
         match &para[1] {
             Inline::Emph(x) => assert_eq!(
                 text_of(x),
-                "&B",
-                "no leading space inside the em's own fresh frame"
+                " &B",
+                "leading space inside a nested inline frame is authored content, not stripped"
             ),
             other => panic!("expected Emph, got {other:?}"),
         }
+    }
+
+    // ---- Regression: suppression must be block-vs-inline, not per-frame ----
+    //
+    // d2ee737 added the empty-top-frame check above to suppress a leading
+    // space at block start (`<p>\n  &amp;X` -> "&X"). It was too blunt: it
+    // also suppressed at the start of any nested inline frame (`<em>`,
+    // `<strong>`, `<a>`), deleting an authored space and joining words. Per
+    // HTML whitespace processing, leading whitespace at the start of a
+    // *block* is stripped, but whitespace at the start of an *inline*
+    // element is not -- `A<em> &amp;B</em>` means `A` then a space then
+    // emphasized `&B`. These pin the corrected block/inline distinction.
+
+    #[test]
+    fn leading_space_survives_at_start_of_em() {
+        let xml = "<p>A<em> &amp;B</em></p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Text(\"A\") + Emph(\" &B\")");
+        match &para[0] {
+            Inline::Text(t) => assert_eq!(t, "A"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Emph(x) => assert_eq!(text_of(x), " &B"),
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leading_space_survives_at_start_of_strong() {
+        let xml = "<p>A<strong> &amp;B</strong> C</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(
+            para.len(),
+            3,
+            "expected Text(\"A\") + Strong(\" &B\") + Text(\" C\")"
+        );
+        match &para[0] {
+            Inline::Text(t) => assert_eq!(t, "A"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Strong(x) => assert_eq!(text_of(x), " &B"),
+            other => panic!("expected Strong, got {other:?}"),
+        }
+        match &para[2] {
+            Inline::Text(t) => assert_eq!(t, " C"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leading_space_survives_at_start_of_doubly_nested_inline() {
+        // `<em><strong>` nests two inline frames (depth 2 and 3), neither of
+        // which is the block frame (depth 1). The suppression must not fire
+        // at either.
+        let xml = "<p>A <em><strong> &amp;B</strong></em></p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(
+            para.len(),
+            2,
+            "expected Text(\"A \") + Emph([Strong(\" &B\")])"
+        );
+        match &para[0] {
+            Inline::Text(t) => assert_eq!(t, "A "),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Emph(x) => {
+                assert_eq!(x.len(), 1, "expected a single Strong inside the Emph");
+                match &x[0] {
+                    Inline::Strong(y) => assert_eq!(text_of(y), " &B"),
+                    other => panic!("expected Strong, got {other:?}"),
+                }
+            }
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_leading_space_survives_at_start_of_em_without_a_reference() {
+        // Control proving the loss was reference-specific: the non-whitespace
+        // Text(" B") fragment always took the plain `else` branch of the
+        // Event::Text handler (line ~89), which has no suppression logic at
+        // all, so this case was never broken. Kept here alongside the
+        // GeneralRef-triggered cases above for contrast.
+        let xml = "<p>A<em> B</em></p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Text(\"A\") + Emph(\" B\")");
+        match &para[0] {
+            Inline::Text(t) => assert_eq!(t, "A"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match &para[1] {
+            Inline::Emph(x) => assert_eq!(text_of(x), " B"),
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_start_suppression_still_applies_inside_a_heading() {
+        // The block/inline fix must not regress the case d2ee737 fixed for
+        // headings, not just paragraphs: h1..h6 push the block frame the
+        // same way `p` does (xhtml.rs Event::Start, `h1"..="h6"` arm).
+        let xml = "<h2>\n  &amp;T\n</h2>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let heading = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Heading { inlines, .. } => Some(inlines),
+                _ => None,
+            })
+            .expect("a heading");
+        assert_eq!(
+            text_of(heading).trim_end(),
+            "&T",
+            "no leading space at block start of a heading"
+        );
+        assert!(
+            !text_of(heading).starts_with(' '),
+            "must not have a leading space, the case d2ee737 fixed"
+        );
     }
 
     // Note: the mid-content keep case (whitespace between `</strong>` and
