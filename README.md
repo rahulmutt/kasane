@@ -9,6 +9,9 @@ into an AI-agent-friendly, progressively-disclosed Markdown file tree.
     mise run convert book.epub -o out/book
     # open out/book/index.md and drill into linked sections
 
+## Install
+    cargo install kasane-cli   # installs the `kasane` binary
+
 ## Development
     mise run test    # run all tests
     mise run lint    # fmt check + clippy -D warnings
