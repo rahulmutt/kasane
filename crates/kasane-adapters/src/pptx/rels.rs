@@ -14,7 +14,41 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key)
-        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+        .map(unescape_attr)
+}
+
+/// Returns the local part of an attribute key: the substring after the last
+/// `:`, or the whole key if there is no `:`. Used to match namespaced
+/// attributes (e.g. `r:id`, `rel:id`) prefix-agnostically.
+fn local_name(key: &[u8]) -> &[u8] {
+    match key.iter().rposition(|&b| b == b':') {
+        Some(i) => &key[i + 1..],
+        None => key,
+    }
+}
+
+/// Finds the first *namespaced* attribute (key containing a `:`) whose local
+/// name matches `local`. Used to match e.g. `r:id` or `rel:id` regardless of
+/// which prefix the document binds to the relationships namespace, without
+/// accidentally matching an unrelated unprefixed attribute of the same local
+/// name (e.g. `sldId`'s own unprefixed `id` attribute).
+fn attr_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Option<String> {
+    e.attributes()
+        .flatten()
+        .find(|a| {
+            let key = a.key.as_ref();
+            key.contains(&b':') && local_name(key) == local
+        })
+        .map(unescape_attr)
+}
+
+/// Unescapes an attribute's XML entities (e.g. `&amp;` -> `&`). Falls back to
+/// the raw lossy-UTF8 value if unescaping fails, so malformed/untrusted input
+/// degrades gracefully instead of panicking or aborting the parse.
+fn unescape_attr(a: quick_xml::events::attributes::Attribute) -> String {
+    a.unescape_value()
+        .map(|v| v.into_owned())
+        .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).into_owned())
 }
 
 pub fn parse_rels(xml: &str) -> Vec<Rel> {
@@ -55,7 +89,7 @@ pub fn parse_slide_order(presentation_xml: &str) -> Vec<String> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"sldId" => {
-                if let Some(id) = attr(&e, b"r:id") {
+                if let Some(id) = attr_local(&e, b"id") {
                     out.push(id);
                 }
             }
@@ -143,5 +177,25 @@ mod tests {
             matches!(sr.get("rId2"), Some(RelTarget::Internal(p)) if p == "ppt/media/image1.png")
         );
         assert!(matches!(sr.get("rId3"), Some(RelTarget::External(u)) if u == "https://e.com"));
+    }
+
+    #[test]
+    fn unescapes_target_attribute_entities() {
+        let xml = r#"<Relationships>
+          <Relationship Id="rId1" Type="http://x/hyperlink" Target="page.html?a=1&amp;b=2" TargetMode="External"/>
+        </Relationships>"#;
+        let rels = parse_rels(xml);
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].target, "page.html?a=1&b=2");
+    }
+
+    #[test]
+    fn parses_slide_order_with_non_r_prefix() {
+        let xml = r#"<p:presentation xmlns:rel="x">
+          <p:sldIdLst>
+            <p:sldId id="256" rel:id="rId3"/>
+            <p:sldId id="257" rel:id="rId2"/>
+          </p:sldIdLst></p:presentation>"#;
+        assert_eq!(parse_slide_order(xml), vec!["rId3", "rId2"]);
     }
 }
