@@ -340,7 +340,9 @@ fn relocate_footnotes(nodes: Vec<Node>) -> Vec<Node> {
     use std::collections::{HashMap, HashSet};
     let mut referenced: HashSet<NoteId> = HashSet::new();
     for n in &nodes {
-        collect_note_refs(&n.block, &mut referenced);
+        let mut refs = Vec::new();
+        collect_note_refs(&n.block, &mut refs, &mut HashSet::new());
+        referenced.extend(refs);
     }
     // Phase 1: pull out every referenced Footnote node (a Footnote block never
     // contains its own ref, so referenced => movable).
@@ -354,11 +356,16 @@ fn relocate_footnotes(nodes: Vec<Node>) -> Vec<Node> {
             _ => rest.push(n),
         }
     }
-    // Phase 2: append each parked note right after the node with its first ref.
+    // Phase 2: append each parked note right after the node with its first
+    // ref, in the order the node references them. `refs_here` is a
+    // document-order Vec (deduped via a scratch seen-set), not a HashSet --
+    // a node referencing 2+ footnotes must append their definitions in the
+    // order they were first referenced, not std's randomized HashSet
+    // iteration order (which could flip run to run).
     let mut out: Vec<Node> = Vec::with_capacity(rest.len() + parked.len());
     for n in rest {
-        let mut refs_here = HashSet::new();
-        collect_note_refs(&n.block, &mut refs_here);
+        let mut refs_here = Vec::new();
+        collect_note_refs(&n.block, &mut refs_here, &mut HashSet::new());
         out.push(n);
         for id in refs_here {
             if let Some(fnote) = parked.remove(&id) {
@@ -367,46 +374,64 @@ fn relocate_footnotes(nodes: Vec<Node>) -> Vec<Node> {
         }
     }
     // Phase 3: safety net (e.g. a ref that only appears inside another parked
-    // footnote's body) -- never drop content.
-    out.extend(parked.into_values());
+    // footnote's body) -- never drop content. Drained in NoteId order for
+    // determinism: `parked` is a HashMap, so its `into_values()` iteration
+    // order is likewise randomized.
+    let mut leftover: Vec<NoteId> = parked.keys().copied().collect();
+    leftover.sort_by_key(|id| id.0);
+    for id in leftover {
+        if let Some(fnote) = parked.remove(&id) {
+            out.push(fnote);
+        }
+    }
     out
 }
 
-fn collect_note_refs(b: &Block, out: &mut std::collections::HashSet<NoteId>) {
+fn collect_note_refs(
+    b: &Block,
+    out: &mut Vec<NoteId>,
+    seen: &mut std::collections::HashSet<NoteId>,
+) {
     match b {
-        Block::Para(inls) | Block::Heading { inlines: inls, .. } => inline_refs(inls, out),
+        Block::Para(inls) | Block::Heading { inlines: inls, .. } => inline_refs(inls, out, seen),
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    collect_note_refs(ib, out);
+                    collect_note_refs(ib, out, seen);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                collect_note_refs(ib, out);
+                collect_note_refs(ib, out, seen);
             }
         }
         Block::Table(t) => {
             for row in std::iter::once(&t.header).chain(t.rows.iter()) {
                 for cell in row {
-                    inline_refs(cell, out);
+                    inline_refs(cell, out, seen);
                 }
             }
         }
-        Block::Figure { caption, .. } => inline_refs(caption, out),
+        Block::Figure { caption, .. } => inline_refs(caption, out, seen),
         _ => {}
     }
 }
 
-fn inline_refs(inls: &[Inline], out: &mut std::collections::HashSet<NoteId>) {
+fn inline_refs(
+    inls: &[Inline],
+    out: &mut Vec<NoteId>,
+    seen: &mut std::collections::HashSet<NoteId>,
+) {
     for i in inls {
         match i {
             Inline::FootnoteRef(n) => {
-                out.insert(*n);
+                if seen.insert(*n) {
+                    out.push(*n);
+                }
             }
             Inline::Emph(x) | Inline::Strong(x) | Inline::Link { inlines: x, .. } => {
-                inline_refs(x, out)
+                inline_refs(x, out, seen)
             }
             _ => {}
         }
@@ -682,5 +707,57 @@ mod tests {
             .nodes
             .iter()
             .any(|n| matches!(&n.block, Block::Footnote { .. })));
+    }
+
+    #[test]
+    fn two_footnotes_from_one_paragraph_relocate_in_reference_order() {
+        // Regression: relocate_footnotes' phase 2 iterated
+        // `refs_here: HashSet<NoteId>` to decide the append order when a
+        // single node references 2+ footnotes. std's RandomState gives a
+        // HashSet no deterministic iteration order, so the two Footnote
+        // definitions could land after the paragraph in either order,
+        // varying run to run.
+        //
+        // The <aside> definitions are placed in the SAME order as the
+        // paragraph's <a href> references (fn1 first, fn2 second), so that
+        // NoteId assignment (by <aside> encounter order while parsing) lines
+        // up with reference order: NoteId(1) is fn1's note, NoteId(2) is
+        // fn2's. That makes "preserve first-reference order" and "ascending
+        // NoteId" the same expectation here, so the assertion below pins a
+        // single unambiguous correct order rather than conflating two
+        // different notions of "correct".
+        let bytes = build_epub2(
+            "<body><h1>One</h1>\
+             <p>claim<a epub:type=\"noteref\" href=\"#fn1\">1</a> and \
+             <a epub:type=\"noteref\" href=\"#fn2\">2</a></p>\
+             <aside epub:type=\"footnote\" id=\"fn1\"><p>first</p></aside>\
+             <aside epub:type=\"footnote\" id=\"fn2\"><p>second</p></aside></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        let ref_idx = doc
+            .nodes
+            .iter()
+            .position(|n| {
+                matches!(&n.block,
+                Block::Para(i) if i.iter().any(|x| matches!(x, Inline::FootnoteRef(NoteId(1)))))
+            })
+            .expect("a paragraph referencing NoteId(1) must exist");
+        assert!(
+            matches!(
+                &doc.nodes[ref_idx + 1].block,
+                Block::Footnote { id: NoteId(1), .. }
+            ),
+            "expected NoteId(1) directly after the referencing para, got {:?}",
+            doc.nodes.get(ref_idx + 1).map(|n| &n.block)
+        );
+        assert!(
+            matches!(
+                &doc.nodes[ref_idx + 2].block,
+                Block::Footnote { id: NoteId(2), .. }
+            ),
+            "expected NoteId(2) right after NoteId(1), got {:?}",
+            doc.nodes.get(ref_idx + 2).map(|n| &n.block)
+        );
     }
 }
