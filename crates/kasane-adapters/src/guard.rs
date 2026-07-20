@@ -41,9 +41,29 @@ pub fn resolve_rel(base_dir: &str, target: &str) -> Option<String> {
     }
 }
 
+/// True when `href` starts with a URL scheme (`http:`, `data:`, `mailto:`, …)
+/// rather than being a document-relative path. A colon only counts before the
+/// first `/`, `#`, or `?`.
+pub(crate) fn has_scheme(href: &str) -> bool {
+    href.chars()
+        .take_while(|c| !matches!(c, '/' | '#' | '?'))
+        .any(|c| c == ':')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn has_scheme_detects_urls_not_paths() {
+        assert!(has_scheme("http://x/a.png"));
+        assert!(has_scheme("data:image/png;base64,AA"));
+        assert!(has_scheme("mailto:a@b"));
+        assert!(!has_scheme("images/a.png"));
+        assert!(!has_scheme("../images/a.png"));
+        assert!(!has_scheme("a/b:c.png")); // colon after a slash is not a scheme
+        assert!(!has_scheme("#frag"));
+    }
+
     #[test]
     fn rejects_traversal_names() {
         assert!(safe_entry_name("../etc/passwd").is_none());

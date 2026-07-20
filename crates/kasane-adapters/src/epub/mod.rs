@@ -41,7 +41,11 @@ impl Adapter for EpubAdapter {
             else {
                 continue;
             };
-            for b in xhtml::xhtml_to_blocks(&xml, &mut next_id) {
+            let file_dir = name
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
+            for b in xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id) {
                 nodes.push(Node {
                     block: b,
                     prov: Provenance {

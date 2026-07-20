@@ -1,4 +1,4 @@
-use kasane_ir::{Block, BlockId, Inline, RefTarget};
+use kasane_ir::{AssetRef, Block, BlockId, Inline, RefTarget};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
@@ -18,6 +18,11 @@ enum BlockFrame {
         in_thead: bool,
         cur_row: Vec<Vec<Inline>>,
         row_has_td: bool,
+    },
+    Figure {
+        image: Option<AssetRef>,
+        alt: Vec<Inline>,
+        caption: Vec<Inline>,
     },
 }
 
@@ -50,6 +55,16 @@ fn emit_block(
         // has nowhere to go; degrade by dropping structure, keeping nothing --
         // real content inside cells is caught by the inline_stack branch above.
         Some(BlockFrame::Table { .. }) => {}
+        // A block emitted directly under <figure> outside of <figcaption>
+        // (e.g. a stray <p>) has no structural home either, but its text is
+        // not thrown away -- it flattens into the caption, same as content
+        // inside an open figcaption via the inline_stack branch above.
+        Some(BlockFrame::Figure { caption, .. }) => {
+            if !caption.is_empty() {
+                crate::xmltext::push_inline(caption, Inline::Text(" ".into()));
+            }
+            flatten_block_inlines(&b, caption);
+        }
     }
 }
 
@@ -138,6 +153,29 @@ fn finish_frame(
                 }),
             );
         }
+        BlockFrame::Figure {
+            image,
+            alt,
+            caption,
+        } => {
+            let caption = if caption.is_empty() { alt } else { caption };
+            match image {
+                Some(image) => emit_block(
+                    frames,
+                    inline_stack,
+                    out,
+                    Block::Figure {
+                        image,
+                        caption,
+                        number: None,
+                    },
+                ),
+                None if !caption.is_empty() => {
+                    emit_block(frames, inline_stack, out, Block::Para(caption)) // never drop
+                }
+                None => {}
+            }
+        }
     }
 }
 
@@ -178,7 +216,9 @@ fn is_inline_tag(name: &[u8]) -> bool {
 }
 
 // Returns blocks; `next_id` is a running BlockId counter for headings.
-pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
+// `base_dir` is the XHTML file's parent directory inside the zip (e.g.
+// "OEBPS"), used to resolve `img` `src` attributes to zip-entry keys.
+pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Block> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
     // Real-world XHTML routinely contains a bare `&` (e.g. `Tom & Jerry`).
@@ -412,6 +452,68 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                             inline_stack.push(vec![]);
                         }
                     }
+                    b"figure" => frames.push(BlockFrame::Figure {
+                        image: None,
+                        alt: vec![],
+                        caption: vec![],
+                    }),
+                    b"figcaption" => inline_stack.push(vec![]),
+                    b"img" => {
+                        let attr = |k: &[u8]| {
+                            e.attributes()
+                                .flatten()
+                                .find(|a| a.key.as_ref() == k)
+                                .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+                        };
+                        let src = attr(b"src").unwrap_or_default();
+                        let alt = attr(b"alt").unwrap_or_default();
+                        let key = if src.is_empty() || crate::guard::has_scheme(&src) {
+                            None
+                        } else {
+                            crate::guard::resolve_rel(base_dir, &src)
+                        };
+                        match key {
+                            Some(key) => {
+                                let aref = AssetRef { key, bytes_ref: 0 };
+                                let alt_inls = if alt.is_empty() {
+                                    vec![]
+                                } else {
+                                    vec![Inline::Text(alt)]
+                                };
+                                if let Some(BlockFrame::Figure {
+                                    image, alt: falt, ..
+                                }) = frames.last_mut()
+                                {
+                                    if image.is_none() {
+                                        *image = Some(aref);
+                                        *falt = alt_inls;
+                                    }
+                                } else {
+                                    emit_block(
+                                        &mut frames,
+                                        &mut inline_stack,
+                                        &mut blocks,
+                                        Block::Figure {
+                                            image: aref,
+                                            caption: alt_inls,
+                                            number: None,
+                                        },
+                                    );
+                                }
+                            }
+                            None => {
+                                eprintln!("warning: skipping image with unusable src '{src}'");
+                                let b = if alt.is_empty() {
+                                    Block::Raw {
+                                        note: format!("image unavailable: {src}"),
+                                    }
+                                } else {
+                                    Block::Para(vec![Inline::Text(alt)])
+                                };
+                                emit_block(&mut frames, &mut inline_stack, &mut blocks, b);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -604,6 +706,22 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                             finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
                     }
+                    b"figcaption" => {
+                        let x = inline_stack.pop().unwrap_or_default();
+                        if let Some(BlockFrame::Figure { caption, .. }) = frames.last_mut() {
+                            *caption = x;
+                        } else if let Some(top) = inline_stack.last_mut() {
+                            top.extend(x);
+                        } else if !x.is_empty() {
+                            emit_block(&mut frames, &mut inline_stack, &mut blocks, Block::Para(x));
+                        }
+                    }
+                    b"figure" => {
+                        if matches!(frames.last(), Some(BlockFrame::Figure { .. })) {
+                            let f = frames.pop().expect("checked");
+                            finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -637,6 +755,11 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
 mod tests {
     use super::*;
 
+    fn parse(xml: &str) -> Vec<Block> {
+        let mut id = 0;
+        xhtml_to_blocks(xml, "OEBPS", &mut id)
+    }
+
     fn text_of(inls: &[Inline]) -> String {
         inls.iter()
             .map(|i| match i {
@@ -644,6 +767,70 @@ mod tests {
                 _ => String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn figure_with_img_and_figcaption() {
+        let blocks = parse(
+            "<body><figure><img src=\"../images/cat.png\" alt=\"a cat\"/>\
+             <figcaption>Feline <em>friend</em></figcaption></figure></body>",
+        );
+        let Block::Figure {
+            image,
+            caption,
+            number,
+        } = &blocks[0]
+        else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        assert_eq!(image.key, "images/cat.png"); // resolved against OEBPS, ../ normalized
+        assert_eq!(text_of(caption), "Feline ");
+        assert!(matches!(&caption[1], Inline::Emph(_)));
+        assert!(number.is_none());
+    }
+
+    #[test]
+    fn bare_img_uses_alt_as_caption() {
+        let blocks = parse("<body><img src=\"pic.png\" alt=\"desc\"/></body>");
+        let Block::Figure { image, caption, .. } = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(image.key, "OEBPS/pic.png");
+        assert_eq!(text_of(caption), "desc");
+    }
+
+    #[test]
+    fn figure_img_alt_used_when_no_figcaption() {
+        let blocks = parse("<body><figure><img src=\"p.png\" alt=\"fallback\"/></figure></body>");
+        let Block::Figure { caption, .. } = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(text_of(caption), "fallback");
+    }
+
+    #[test]
+    fn remote_img_degrades_to_alt_paragraph() {
+        let blocks =
+            parse("<body><img src=\"http://evil/x.png\" alt=\"chart of results\"/></body>");
+        assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "chart of results"));
+    }
+
+    #[test]
+    fn remote_img_without_alt_degrades_to_raw_note() {
+        let blocks = parse("<body><img src=\"data:image/png;base64,AA\"/></body>");
+        assert!(matches!(&blocks[0], Block::Raw { .. }));
+    }
+
+    #[test]
+    fn traversal_img_src_degrades() {
+        let blocks = parse("<body><img src=\"../../../etc/passwd\" alt=\"x\"/></body>");
+        assert!(matches!(&blocks[0], Block::Para(_)));
+    }
+
+    #[test]
+    fn figure_without_img_flattens_caption_to_para() {
+        let blocks = parse("<body><figure><figcaption>orphan caption</figcaption></figure></body>");
+        assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "orphan caption"));
     }
 
     #[test]
@@ -655,8 +842,7 @@ mod tests {
         // resolve_general_ref's unescape() call; the Event::Text arm only
         // decodes, and deliberately does not unescape.
         let xml = "<p>a &lt; b</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -675,8 +861,7 @@ mod tests {
         // block, at exit 0. `allow_dangling_amp` recovers it as literal text.
         // The regression is the SECOND paragraph, not just the `&`.
         let xml = "<p>Tom & Jerry</p><p>SECOND</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let paras: Vec<String> = blocks
             .iter()
             .filter_map(|b| match b {
@@ -693,8 +878,7 @@ mod tests {
         // and hex character references. Under quick-xml 0.41 the leading `&lt;`
         // is the paragraph's first event, arriving before any Event::Text.
         let xml = "<p>&lt;caf&#233;&#xE9;&gt;</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -712,8 +896,7 @@ mod tests {
         // &nbsp; has no XML predefined mapping. Preserving the reference is
         // lossless; the pre-fix behavior dropped it entirely.
         let xml = "<p>a&nbsp;b</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -733,8 +916,7 @@ mod tests {
         // two references and is real content, not inter-tag formatting; the
         // 0.36-era trim guard used to discard it, dropping a real space.
         let xml = "<p>a &lt; &gt; b</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -751,8 +933,7 @@ mod tests {
         // is a Text(" ") event immediately followed by GeneralRef(amp), not
         // preceded by one -- the "follows a reference" half of the fix.
         let xml = "<p><strong>A</strong> &amp; B</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -778,8 +959,7 @@ mod tests {
         // indentation between tags -- must still be discarded, or every
         // formatted XHTML document would sprout stray whitespace inlines.
         let xml = "<p>\n  <strong>A</strong>\n  <em>B</em>\n</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -804,9 +984,8 @@ mod tests {
         // and &#32; (space) are always authored deliberately and must not be
         // treated as discardable inter-tag formatting the way a whitespace
         // Text fragment can be.
-        let mut next_id = 0u32;
 
-        let blocks = xhtml_to_blocks("<p>&#160;</p>", &mut next_id);
+        let blocks = parse("<p>&#160;</p>");
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -816,8 +995,7 @@ mod tests {
             .expect("a paragraph for &#160;");
         assert_eq!(text_of(para), "\u{a0}");
 
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks("<p>&#32;</p>", &mut next_id);
+        let blocks = parse("<p>&#32;</p>");
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -837,8 +1015,7 @@ mod tests {
         // into the following text. This is the case that would catch an
         // over-eager merge.
         let xml = "<p><strong>A</strong>&amp;B</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -872,8 +1049,7 @@ mod tests {
         // between Strong("A") and "& B", splitting the paragraph onto a
         // second line.
         let xml = "<p>\n  <strong>A</strong>\n  &amp; B</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -898,8 +1074,7 @@ mod tests {
         // Event::Text handler, mirroring the flush site above. Pre-fix this
         // pushed "\n  " verbatim between "&" and Emph("Q").
         let xml = "<p>P &amp;\n  <em>Q</em></p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -932,8 +1107,7 @@ mod tests {
         // content follows" from "adjacent to a reference, then the block
         // ends". Retaining it is the consistent choice; pin it.
         let xml = "<p>a &amp; </p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -959,8 +1133,7 @@ mod tests {
         // Event::End(b"p") handler that would emit a Block::Para. Pinning
         // this: no panic, no block, no leaked fragment.
         let xml = "<p>\n  ";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         assert!(
             blocks.is_empty(),
             "unclosed paragraph must not emit a block, got {blocks:?}"
@@ -977,8 +1150,7 @@ mod tests {
         // separator between content. Regression: this used to render as
         // " &X" with a leading space.
         let xml = "<p>\n  &amp;X\n</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1025,8 +1197,7 @@ mod tests {
         // expectation: Text("A ") + Emph("&B"). New (correct) expectation:
         // Text("A ") + Emph(" &B").
         let xml = "<p>A <em>\n  &amp;B</em></p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1063,8 +1234,7 @@ mod tests {
     #[test]
     fn leading_space_survives_at_start_of_em() {
         let xml = "<p>A<em> &amp;B</em></p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1086,8 +1256,7 @@ mod tests {
     #[test]
     fn leading_space_survives_at_start_of_strong() {
         let xml = "<p>A<strong> &amp;B</strong> C</p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1120,8 +1289,7 @@ mod tests {
         // which is the block frame (depth 1). The suppression must not fire
         // at either.
         let xml = "<p>A <em><strong> &amp;B</strong></em></p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1158,8 +1326,7 @@ mod tests {
         // all, so this case was never broken. Kept here alongside the
         // GeneralRef-triggered cases above for contrast.
         let xml = "<p>A<em> B</em></p>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1184,8 +1351,7 @@ mod tests {
         // headings, not just paragraphs: h1..h6 push the block frame the
         // same way `p` does (xhtml.rs Event::Start, `h1"..="h6"` arm).
         let xml = "<h2>\n  &amp;T\n</h2>";
-        let mut next_id = 0u32;
-        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let blocks = parse(xml);
         let heading = blocks
             .iter()
             .find_map(|b| match b {
@@ -1215,11 +1381,7 @@ mod tests {
 
     #[test]
     fn parses_flat_unordered_list() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><ul><li><p>one</p></li><li><p>two</p></li></ul></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><ul><li><p>one</p></li><li><p>two</p></li></ul></body>");
         assert_eq!(blocks.len(), 1);
         let Block::List { ordered, items } = &blocks[0] else {
             panic!("expected List, got {:?}", blocks[0]);
@@ -1232,18 +1394,14 @@ mod tests {
 
     #[test]
     fn ordered_list_sets_ordered_flag() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<ol><li><p>a</p></li></ol>", &mut id);
+        let blocks = parse("<ol><li><p>a</p></li></ol>");
         assert!(matches!(&blocks[0], Block::List { ordered: true, .. }));
     }
 
     #[test]
     fn nested_list_folds_into_parent_item() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<ul><li><p>A</p><ul><li><p>A1</p></li></ul></li><li><p>B</p></li></ul>",
-            &mut id,
-        );
+        let blocks =
+            parse("<ul><li><p>A</p><ul><li><p>A1</p></li></ul></li><li><p>B</p></li></ul>");
         assert_eq!(
             blocks.len(),
             1,
@@ -1263,8 +1421,7 @@ mod tests {
 
     #[test]
     fn heading_inside_list_item_stays_in_item() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<ul><li><h3>t</h3></li></ul>", &mut id);
+        let blocks = parse("<ul><li><h3>t</h3></li></ul>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!()
         };
@@ -1273,8 +1430,7 @@ mod tests {
 
     #[test]
     fn unclosed_list_at_eof_is_flushed_not_dropped() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<ul><li><p>orphan</p>", &mut id);
+        let blocks = parse("<ul><li><p>orphan</p>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!("unclosed list must still be emitted")
         };
@@ -1285,11 +1441,7 @@ mod tests {
 
     #[test]
     fn blockquote_bare_text_becomes_paragraph() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><blockquote>quoted <em>words</em> here</blockquote></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><blockquote>quoted <em>words</em> here</blockquote></body>");
         assert_eq!(blocks.len(), 1);
         let Block::Para(inls) = &blocks[0] else {
             panic!("expected Para")
@@ -1300,11 +1452,7 @@ mod tests {
 
     #[test]
     fn dl_definition_text_is_flattened_not_dropped() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><dl><dt>term</dt><dd>meaning</dd></dl></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><dl><dt>term</dt><dd>meaning</dd></dl></body>");
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "term"));
         assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "meaning"));
@@ -1312,8 +1460,7 @@ mod tests {
 
     #[test]
     fn bare_li_text_becomes_item_paragraph() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><ul><li>one</li><li>two</li></ul></body>", &mut id);
+        let blocks = parse("<body><ul><li>one</li><li>two</li></ul></body>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!()
         };
@@ -1323,19 +1470,15 @@ mod tests {
 
     #[test]
     fn head_title_text_stays_out_of_output() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<html><head><title>Skip Me</title></head><body><p>keep</p></body></html>",
-            &mut id,
-        );
+        let blocks =
+            parse("<html><head><title>Skip Me</title></head><body><p>keep</p></body></html>");
         assert_eq!(blocks.len(), 1);
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "keep"));
     }
 
     #[test]
     fn implicit_paragraph_splits_at_block_boundary() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><div>before<p>inside</p>after</div></body>", &mut id);
+        let blocks = parse("<body><div>before<p>inside</p>after</div></body>");
         assert_eq!(blocks.len(), 3);
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "before"));
         assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "inside"));
@@ -1353,8 +1496,7 @@ mod tests {
         // End(strong) popped it and tried inline_stack.last_mut() to attach
         // the result -- found the stack empty, and silently discarded
         // "Warning" entirely. Only Para([" ok"]) survived.
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><strong>Warning</strong> ok</body>", &mut id);
+        let blocks = parse("<body><strong>Warning</strong> ok</body>");
         assert_eq!(blocks.len(), 1, "expected a single Para, got {blocks:?}");
         let Block::Para(inls) = &blocks[0] else {
             panic!("expected Para, got {:?}", blocks[0]);
@@ -1378,8 +1520,7 @@ mod tests {
     fn leading_inline_tag_inside_list_item_opens_implicit_paragraph() {
         // Same regression, but inside a <li>: the first flow-level content
         // of the item is an inline tag with no preceding bare text.
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><ul><li><em>x</em></li></ul></body>", &mut id);
+        let blocks = parse("<body><ul><li><em>x</em></li></ul></body>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!("expected List, got {:?}", blocks[0]);
         };
@@ -1397,11 +1538,9 @@ mod tests {
 
     #[test]
     fn parses_table_with_thead() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
+        let blocks = parse(
             "<body><table><thead><tr><th>H1</th><th>H2</th></tr></thead>\
              <tbody><tr><td>a</td><td><em>b</em></td></tr></tbody></table></body>",
-            &mut id,
         );
         let Block::Table(t) = &blocks[0] else {
             panic!("expected Table")
@@ -1416,11 +1555,7 @@ mod tests {
 
     #[test]
     fn th_only_first_row_without_thead_becomes_header() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><table><tr><th>H</th></tr><tr><td>v</td></tr></table></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><table><tr><th>H</th></tr><tr><td>v</td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1430,11 +1565,7 @@ mod tests {
 
     #[test]
     fn headerless_table_promotes_first_row() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><table><tr><td>a</td></tr><tr><td>b</td></tr></table></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><table><tr><td>a</td></tr><tr><td>b</td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1444,11 +1575,7 @@ mod tests {
 
     #[test]
     fn colspan_sets_merged_flag() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1457,10 +1584,8 @@ mod tests {
 
     #[test]
     fn short_row_is_padded_to_table_width() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
+        let blocks = parse(
             "<body><table><tr><th>A</th><th>B</th></tr><tr><td>only</td></tr></table></body>",
-            &mut id,
         );
         let Block::Table(t) = &blocks[0] else {
             panic!()
@@ -1471,11 +1596,7 @@ mod tests {
 
     #[test]
     fn paragraph_inside_cell_flattens_to_cell_inlines() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><table><tr><td><p>x</p><p>y</p></td></tr></table></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><table><tr><td><p>x</p><p>y</p></td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1486,11 +1607,7 @@ mod tests {
 
     #[test]
     fn pre_becomes_code_block_with_verbatim_whitespace() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks(
-            "<body><pre><code class=\"language-rust\">fn main() {\n    let x = 1 &amp; 2;\n}</code></pre></body>",
-            &mut id,
-        );
+        let blocks = parse("<body><pre><code class=\"language-rust\">fn main() {\n    let x = 1 &amp; 2;\n}</code></pre></body>");
         let Block::CodeBlock { lang, text } = &blocks[0] else {
             panic!("expected CodeBlock, got {:?}", blocks[0])
         };
@@ -1500,8 +1617,7 @@ mod tests {
 
     #[test]
     fn pre_without_code_child_still_works() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><pre>plain  spaced</pre></body>", &mut id);
+        let blocks = parse("<body><pre>plain  spaced</pre></body>");
         assert!(
             matches!(&blocks[0], Block::CodeBlock { lang: None, text } if text == "plain  spaced")
         );
@@ -1509,8 +1625,7 @@ mod tests {
 
     #[test]
     fn inline_code_survives_in_paragraph() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><p>call <code>foo()</code> now</p></body>", &mut id);
+        let blocks = parse("<body><p>call <code>foo()</code> now</p></body>");
         let Block::Para(inls) = &blocks[0] else {
             panic!()
         };
@@ -1521,8 +1636,7 @@ mod tests {
 
     #[test]
     fn br_becomes_single_space() {
-        let mut id = 0;
-        let blocks = xhtml_to_blocks("<body><p>line one<br/>line two</p></body>", &mut id);
+        let blocks = parse("<body><p>line one<br/>line two</p></body>");
         let Block::Para(inls) = &blocks[0] else {
             panic!()
         };
