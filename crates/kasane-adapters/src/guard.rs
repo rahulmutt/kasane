@@ -19,7 +19,6 @@ pub fn check_expansion(compressed: u64, decompressed: u64) -> bool {
 /// normalizing `.`/`..` and confining the result to the archive root. A leading
 /// `/` makes the target package-absolute (resolved from root). Returns `None` if
 /// the target escapes the root or resolves to nothing.
-#[allow(dead_code)]
 pub fn resolve_rel(base_dir: &str, target: &str) -> Option<String> {
     let mut parts: Vec<&str> = if target.starts_with('/') || base_dir.is_empty() {
         Vec::new()

@@ -1,6 +1,8 @@
 mod detect;
 mod epub;
 mod guard;
+#[allow(dead_code)] // consumed in later tasks
+mod pptx;
 mod ziputil;
 
 pub use detect::{detect, Format};
