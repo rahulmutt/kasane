@@ -47,7 +47,7 @@ impl Adapter for PptxAdapter {
                 push_slide_fallback(&mut nodes, &mut next_id, idx, spath);
                 continue;
             };
-            let sdir = parent_dir(spath);
+            let sdir = crate::guard::parent_dir(spath);
             let srels_path = rels_path_for(spath);
             let srels_xml =
                 read_entry_string(&mut zip, &srels_path, &mut total).unwrap_or_default();
@@ -74,7 +74,8 @@ impl Adapter for PptxAdapter {
                 if let Block::Figure { image, .. } = b {
                     if !seen_media.contains_key(&image.key) {
                         if let Ok(data) = read_entry_bytes(&mut zip, &image.key, &mut total) {
-                            let filename = safe_media_filename(&image.key, seen_media.len());
+                            let filename =
+                                crate::guard::safe_media_filename(&image.key, seen_media.len());
                             seen_media.insert(image.key.clone(), filename.clone());
                             assets.items.push(AssetItem {
                                 key: image.key.clone(),
@@ -147,42 +148,12 @@ fn push_slide_fallback(nodes: &mut Vec<Node>, next_id: &mut u32, idx: usize, spa
     });
 }
 
-fn parent_dir(path: &str) -> String {
-    path.rsplit_once('/')
-        .map(|(d, _)| d.to_string())
-        .unwrap_or_default()
-}
-
 // "ppt/slides/slide1.xml" -> "ppt/slides/_rels/slide1.xml.rels"
 fn rels_path_for(path: &str) -> String {
     match path.rsplit_once('/') {
         Some((dir, file)) => format!("{}/_rels/{}.rels", dir, file),
         None => format!("_rels/{}.rels", path),
     }
-}
-
-fn safe_media_filename(archive_path: &str, n: usize) -> String {
-    let base = archive_path.rsplit('/').next().unwrap_or("image");
-    let cleaned: String = base
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // Prefix an index to guarantee uniqueness even if basenames collide across dirs.
-    format!(
-        "{:03}-{}",
-        n,
-        if cleaned.is_empty() {
-            "image".into()
-        } else {
-            cleaned
-        }
-    )
 }
 
 fn derive_title(source_path: &str) -> String {

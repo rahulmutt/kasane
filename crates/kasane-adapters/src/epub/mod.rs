@@ -56,6 +56,43 @@ impl Adapter for EpubAdapter {
             }
         }
 
+        // Extract every referenced image once; remember which keys failed so their
+        // Figures can degrade instead of rendering a broken link.
+        let mut assets = AssetBag::default();
+        let mut seen: std::collections::HashMap<String, bool> = Default::default(); // key -> readable
+        for n in &nodes {
+            collect_figure_keys(&n.block, &mut |key: &str| {
+                if seen.contains_key(key) {
+                    return;
+                }
+                match crate::ziputil::read_entry_bytes(&mut zip, key, &mut total_read) {
+                    Ok(data) => {
+                        let filename = crate::guard::safe_media_filename(key, assets.items.len());
+                        assets.items.push(AssetItem {
+                            key: key.to_string(),
+                            filename,
+                            bytes: data,
+                        });
+                        seen.insert(key.to_string(), true);
+                    }
+                    Err(_) => {
+                        eprintln!("warning: image entry unreadable, degrading figure: {key}");
+                        seen.insert(key.to_string(), false);
+                    }
+                }
+            });
+        }
+        let failed: std::collections::HashSet<String> = seen
+            .into_iter()
+            .filter(|(_, ok)| !ok)
+            .map(|(k, _)| k)
+            .collect();
+        if !failed.is_empty() {
+            for n in &mut nodes {
+                degrade_failed_figures(&mut n.block, &failed);
+            }
+        }
+
         let doc = Document {
             meta: DocMeta {
                 title: if parsed.title.is_empty() {
@@ -70,7 +107,54 @@ impl Adapter for EpubAdapter {
             },
             nodes,
         };
-        Ok((doc, AssetBag::default()))
+        Ok((doc, assets))
+    }
+}
+
+// Figures can sit inside lists/footnotes, so walk recursively.
+fn collect_figure_keys(b: &Block, f: &mut impl FnMut(&str)) {
+    match b {
+        Block::Figure { image, .. } => f(&image.key),
+        Block::List { items, .. } => {
+            for item in items {
+                for ib in item {
+                    collect_figure_keys(ib, f);
+                }
+            }
+        }
+        Block::Footnote { blocks, .. } => {
+            for ib in blocks {
+                collect_figure_keys(ib, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<String>) {
+    match b {
+        Block::Figure { image, caption, .. } if failed.contains(&image.key) => {
+            *b = if caption.is_empty() {
+                Block::Raw {
+                    note: format!("image unavailable: {}", image.key),
+                }
+            } else {
+                Block::Para(std::mem::take(caption))
+            };
+        }
+        Block::List { items, .. } => {
+            for item in items {
+                for ib in item {
+                    degrade_failed_figures(ib, failed);
+                }
+            }
+        }
+        Block::Footnote { blocks, .. } => {
+            for ib in blocks {
+                degrade_failed_figures(ib, failed);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -109,5 +193,85 @@ mod tests {
     fn find_opf_path_normal_case_still_works() {
         let xml = r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
         assert_eq!(find_opf_path(xml), Some("OEBPS/content.opf".to_string()));
+    }
+
+    fn add<W: std::io::Write + std::io::Seek>(w: &mut zip::ZipWriter<W>, name: &str, data: &[u8]) {
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        w.start_file(name, opts).unwrap();
+        std::io::Write::write_all(w, data).unwrap();
+    }
+
+    fn build_epub(chapter_xhtml: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(
+            &mut w,
+            "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+        <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+        <spine><itemref idref="c1"/></spine></package>"#,
+        );
+        add(&mut w, "OEBPS/ch1.xhtml", chapter_xhtml.as_bytes());
+        for (name, data) in extra {
+            add(&mut w, name, data);
+        }
+        w.finish().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn extracts_referenced_image_into_asset_bag() {
+        let bytes = build_epub(
+            "<body><h1>C</h1><img src=\"images/cat.png\" alt=\"cat\"/></body>",
+            &[("OEBPS/images/cat.png", b"\x89PNG\r\n\x1a\nFAKE")],
+        );
+        let (doc, assets) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert_eq!(assets.items.len(), 1);
+        assert_eq!(assets.items[0].key, "OEBPS/images/cat.png");
+        assert!(assets.items[0].bytes.starts_with(b"\x89PNG"));
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+    }
+
+    #[test]
+    fn missing_image_degrades_to_alt_paragraph() {
+        let bytes = build_epub(
+            "<body><h1>C</h1><img src=\"images/gone.png\" alt=\"lost chart\"/></body>",
+            &[],
+        );
+        let (doc, assets) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(assets.items.is_empty());
+        assert!(!doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+        assert!(
+            doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Para(i) if i.iter().any(|x| matches!(x, Inline::Text(t) if t == "lost chart"))))
+        );
+    }
+
+    #[test]
+    fn same_image_referenced_twice_extracted_once() {
+        let xhtml =
+            "<body><h1>C</h1><img src=\"i.png\" alt=\"a\"/><img src=\"i.png\" alt=\"b\"/></body>";
+        let bytes = build_epub(xhtml, &[("OEBPS/i.png", b"\x89PNG\r\n\x1a\nX")]);
+        let (doc, assets) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert_eq!(assets.items.len(), 1);
+        let figs = doc
+            .nodes
+            .iter()
+            .filter(|n| matches!(&n.block, Block::Figure { .. }))
+            .count();
+        assert_eq!(figs, 2);
     }
 }

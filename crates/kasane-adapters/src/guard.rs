@@ -50,6 +50,36 @@ pub(crate) fn has_scheme(href: &str) -> bool {
         .any(|c| c == ':')
 }
 
+pub(crate) fn parent_dir(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default()
+}
+
+pub(crate) fn safe_media_filename(archive_path: &str, n: usize) -> String {
+    let base = archive_path.rsplit('/').next().unwrap_or("image");
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Prefix an index to guarantee uniqueness even if basenames collide across dirs.
+    format!(
+        "{:03}-{}",
+        n,
+        if cleaned.is_empty() {
+            "image".into()
+        } else {
+            cleaned
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
