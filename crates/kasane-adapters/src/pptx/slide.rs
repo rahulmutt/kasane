@@ -11,6 +11,7 @@ pub(crate) struct Paragraph {
 pub(crate) enum Shape {
     Title(Vec<Inline>),
     Body(Vec<Paragraph>),
+    Table(kasane_ir::Table),
 }
 
 // Run-formatting state carried while inside <a:r>.
@@ -61,6 +62,12 @@ pub(crate) fn parse_shapes(xml: &str, _rels: &SlideRels) -> Vec<Shape> {
     let mut cur_para: Option<Paragraph> = None;
     let mut fmt = RunFmt::default();
     let mut in_run = false;
+    let mut in_tbl = false;
+    let mut tbl_rows: Vec<Vec<Vec<Inline>>> = Vec::new();
+    let mut cur_row: Vec<Vec<Inline>> = Vec::new();
+    let mut cur_cell: Vec<Inline> = Vec::new();
+    let mut in_cell = false;
+    let mut has_merged = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -100,12 +107,35 @@ pub(crate) fn parse_shapes(xml: &str, _rels: &SlideRels) -> Vec<Shape> {
                     fmt.bold = attr_bool(&e, b"b");
                     fmt.italic = attr_bool(&e, b"i");
                 }
+                b"tbl" => {
+                    in_tbl = true;
+                    tbl_rows = Vec::new();
+                }
+                b"tr" if in_tbl => cur_row = Vec::new(),
+                b"tc" if in_tbl => {
+                    // gridSpan/hMerge/vMerge/rowSpan => the writer's HTML fallback
+                    if attr_str(&e, b"gridSpan").is_some()
+                        || attr_str(&e, b"rowSpan").is_some()
+                        || attr_bool(&e, b"hMerge")
+                        || attr_bool(&e, b"vMerge")
+                    {
+                        has_merged = true;
+                    }
+                    in_cell = true;
+                    cur_cell = Vec::new();
+                }
+                b"r" if in_cell => {
+                    in_run = true;
+                    fmt = RunFmt::default();
+                }
                 _ => {}
             },
             Ok(Event::Text(t)) if in_run => {
                 let s = t.unescape().unwrap_or_default().to_string();
                 if !s.is_empty() {
-                    if let Some(p) = cur_para.as_mut() {
+                    if in_cell {
+                        cur_cell.push(styled(s, &fmt));
+                    } else if let Some(p) = cur_para.as_mut() {
                         p.inlines.push(styled(s, &fmt));
                     }
                 }
@@ -125,6 +155,26 @@ pub(crate) fn parse_shapes(xml: &str, _rels: &SlideRels) -> Vec<Shape> {
                     } else if !paras.iter().all(|p| p.inlines.is_empty()) {
                         shapes.push(Shape::Body(std::mem::take(&mut paras)));
                     }
+                }
+                b"tc" if in_tbl => {
+                    in_cell = false;
+                    cur_row.push(std::mem::take(&mut cur_cell));
+                }
+                b"tr" if in_tbl => tbl_rows.push(std::mem::take(&mut cur_row)),
+                b"tbl" => {
+                    in_tbl = false;
+                    let mut rows = std::mem::take(&mut tbl_rows);
+                    let header = if rows.is_empty() {
+                        Vec::new()
+                    } else {
+                        rows.remove(0)
+                    };
+                    shapes.push(Shape::Table(kasane_ir::Table {
+                        header,
+                        rows,
+                        has_merged,
+                    }));
+                    has_merged = false;
                 }
                 _ => {}
             },
@@ -205,6 +255,7 @@ pub fn slide_to_blocks(xml: &str, next_id: &mut u32, rels: &SlideRels) -> Vec<Bl
         match s {
             Shape::Title(_) => {}
             Shape::Body(paras) => body_to_blocks(paras, &mut out),
+            Shape::Table(t) => out.push(Block::Table(t)),
         }
     }
     out
@@ -321,5 +372,34 @@ mod tests {
         let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
         assert!(blocks.iter().any(|b| matches!(b, Block::Para(_))));
         assert!(!blocks.iter().any(|b| matches!(b, Block::List { .. })));
+    }
+
+    #[test]
+    fn graphic_frame_table_becomes_table_block() {
+        use kasane_ir::Block;
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:graphicFrame><a:graphic><a:graphicData><a:tbl>
+            <a:tr>
+              <a:tc><a:txBody><a:p><a:r><a:t>H1</a:t></a:r></a:p></a:txBody></a:tc>
+              <a:tc><a:txBody><a:p><a:r><a:t>H2</a:t></a:r></a:p></a:txBody></a:tc>
+            </a:tr>
+            <a:tr>
+              <a:tc><a:txBody><a:p><a:r><a:t>a</a:t></a:r></a:p></a:txBody></a:tc>
+              <a:tc><a:txBody><a:p><a:r><a:t>b</a:t></a:r></a:p></a:txBody></a:tc>
+            </a:tr>
+          </a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &crate::pptx::rels::SlideRels::empty());
+        let t = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("a table");
+        assert_eq!(t.header.len(), 2);
+        assert_eq!(t.rows.len(), 1);
+        assert!(!t.has_merged);
     }
 }
