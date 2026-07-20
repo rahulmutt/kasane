@@ -230,10 +230,21 @@ fn is_inline_tag(name: &[u8]) -> bool {
     )
 }
 
-// Returns blocks; `next_id` is a running BlockId counter for headings.
-// `base_dir` is the XHTML file's parent directory inside the zip (e.g.
-// "OEBPS"), used to resolve `img` `src` attributes to zip-entry keys.
-pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Block> {
+// A single spine file's parse result: its blocks, plus enough to resolve
+// same-file and cross-file `<a href>` fragments against headings once every
+// spine file has been parsed (see `epub::mod::fix_links`).
+pub struct FileParse {
+    pub blocks: Vec<Block>,
+    // id attr -> nearest preceding heading's BlockId.
+    pub anchors: Vec<(String, BlockId)>,
+    pub first_heading: Option<BlockId>,
+}
+
+// Returns blocks (plus the anchor map -- see `FileParse`); `next_id` is a
+// running BlockId counter for headings. `base_dir` is the XHTML file's
+// parent directory inside the zip (e.g. "OEBPS"), used to resolve `img`
+// `src` attributes to zip-entry keys.
+pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> FileParse {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = true;
     // Real-world XHTML routinely contains a bare `&` (e.g. `Tom & Jerry`).
@@ -270,6 +281,15 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Bloc
     // the pending_ws/prev_was_ref machinery above entirely -- see the
     // interception block at the top of the loop below.
     let mut pre: Option<(Option<String>, String)> = None;
+    // Anchor tracking: every `id` attribute in the file maps to the nearest
+    // preceding heading's BlockId, so a same-file or cross-file `<a href>`
+    // fragment can resolve to a heading even when the id itself sits on a
+    // <p> or <span>, not the heading.
+    let mut anchors: Vec<(String, BlockId)> = vec![];
+    let mut pending_anchor_ids: Vec<String> = vec![]; // ids seen before the first heading
+    let mut first_heading: Option<BlockId> = None;
+    let mut last_heading: Option<BlockId> = None;
+    let mut heading_own_id: Option<String> = None; // id attr on the open h1..h6 itself
 
     macro_rules! push_text {
         ($t:expr) => {
@@ -377,6 +397,23 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Bloc
                 {
                     inline_stack.push(vec![]);
                     implicit_para = true;
+                }
+                let id_attr = e
+                    .attributes()
+                    .flatten()
+                    .find(|a| a.key.as_ref() == b"id")
+                    .map(|a| String::from_utf8_lossy(&a.value).into_owned());
+                if let Some(idv) = id_attr {
+                    if matches!(
+                        e.local_name().as_ref(),
+                        b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6"
+                    ) {
+                        heading_own_id = Some(idv); // resolved to the heading's own BlockId at End
+                    } else if let Some(h) = last_heading {
+                        anchors.push((idv, h));
+                    } else {
+                        pending_anchor_ids.push(idv);
+                    }
                 }
                 match e.local_name().as_ref() {
                     b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
@@ -663,6 +700,16 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Bloc
                                 inlines: inls,
                             },
                         );
+                        last_heading = Some(id);
+                        if first_heading.is_none() {
+                            first_heading = Some(id);
+                            for a in pending_anchor_ids.drain(..) {
+                                anchors.push((a, id));
+                            }
+                        }
+                        if let Some(own) = heading_own_id.take() {
+                            anchors.push((own, id));
+                        }
                     }
                     b"p" => {
                         let inls = inline_stack.pop().unwrap_or_default();
@@ -764,16 +811,56 @@ pub fn xhtml_to_blocks(xml: &str, base_dir: &str, next_id: &mut u32) -> Vec<Bloc
         }
         buf.clear();
     }
-    blocks
+    FileParse {
+        blocks,
+        anchors,
+        first_heading,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn parse(xml: &str) -> Vec<Block> {
+    fn parse(xml: &str) -> FileParse {
         let mut id = 0;
         xhtml_to_blocks(xml, "OEBPS", &mut id)
+    }
+
+    fn parse_blocks(xml: &str) -> Vec<Block> {
+        parse(xml).blocks
+    }
+
+    #[test]
+    fn anchors_map_ids_to_nearest_preceding_heading() {
+        let fp = parse(
+            "<body><h1 id=\"top\">A</h1><p id=\"p1\">x</p><h2 id=\"s2\">B</h2><p id=\"p2\">y</p></body>",
+        );
+        assert_eq!(fp.first_heading, Some(BlockId(0)));
+        let get = |k: &str| fp.anchors.iter().find(|(a, _)| a == k).map(|(_, b)| *b);
+        assert_eq!(get("top"), Some(BlockId(0))); // id on the heading -> the heading itself
+        assert_eq!(get("p1"), Some(BlockId(0)));
+        assert_eq!(get("s2"), Some(BlockId(1)));
+        assert_eq!(get("p2"), Some(BlockId(1)));
+    }
+
+    #[test]
+    fn pre_heading_ids_resolve_to_first_heading() {
+        let fp = parse("<body><p id=\"intro\">x</p><h1>A</h1></body>");
+        assert_eq!(
+            fp.anchors
+                .iter()
+                .find(|(a, _)| a == "intro")
+                .map(|(_, b)| *b),
+            Some(BlockId(0))
+        );
+    }
+
+    #[test]
+    fn headingless_file_records_no_anchors() {
+        let fp = parse("<body><p id=\"x\">y</p></body>");
+        assert!(fp.anchors.is_empty());
+        assert!(fp.first_heading.is_none());
     }
 
     fn text_of(inls: &[Inline]) -> String {
@@ -787,7 +874,7 @@ mod tests {
 
     #[test]
     fn figure_with_img_and_figcaption() {
-        let blocks = parse(
+        let blocks = parse_blocks(
             "<body><figure><img src=\"../images/cat.png\" alt=\"a cat\"/>\
              <figcaption>Feline <em>friend</em></figcaption></figure></body>",
         );
@@ -807,7 +894,7 @@ mod tests {
 
     #[test]
     fn bare_img_uses_alt_as_caption() {
-        let blocks = parse("<body><img src=\"pic.png\" alt=\"desc\"/></body>");
+        let blocks = parse_blocks("<body><img src=\"pic.png\" alt=\"desc\"/></body>");
         let Block::Figure { image, caption, .. } = &blocks[0] else {
             panic!()
         };
@@ -817,7 +904,8 @@ mod tests {
 
     #[test]
     fn figure_img_alt_used_when_no_figcaption() {
-        let blocks = parse("<body><figure><img src=\"p.png\" alt=\"fallback\"/></figure></body>");
+        let blocks =
+            parse_blocks("<body><figure><img src=\"p.png\" alt=\"fallback\"/></figure></body>");
         let Block::Figure { caption, .. } = &blocks[0] else {
             panic!()
         };
@@ -827,19 +915,19 @@ mod tests {
     #[test]
     fn remote_img_degrades_to_alt_paragraph() {
         let blocks =
-            parse("<body><img src=\"http://evil/x.png\" alt=\"chart of results\"/></body>");
+            parse_blocks("<body><img src=\"http://evil/x.png\" alt=\"chart of results\"/></body>");
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "chart of results"));
     }
 
     #[test]
     fn remote_img_without_alt_degrades_to_raw_note() {
-        let blocks = parse("<body><img src=\"data:image/png;base64,AA\"/></body>");
+        let blocks = parse_blocks("<body><img src=\"data:image/png;base64,AA\"/></body>");
         assert!(matches!(&blocks[0], Block::Raw { .. }));
     }
 
     #[test]
     fn traversal_img_src_degrades() {
-        let blocks = parse("<body><img src=\"../../../etc/passwd\" alt=\"x\"/></body>");
+        let blocks = parse_blocks("<body><img src=\"../../../etc/passwd\" alt=\"x\"/></body>");
         assert!(matches!(&blocks[0], Block::Para(_)));
     }
 
@@ -850,7 +938,7 @@ mod tests {
         // figcaption End handler does an unconditional `*caption = x` --
         // silently dropping the stray content when figcaption is processed
         // afterward.
-        let blocks = parse(
+        let blocks = parse_blocks(
             "<body><figure><p>Photo by Jane</p><img src=\"a.png\" alt=\"x\"/>\
              <figcaption>The cat</figcaption></figure></body>",
         );
@@ -870,7 +958,7 @@ mod tests {
 
     #[test]
     fn stray_content_after_figcaption_is_preserved() {
-        let blocks = parse(
+        let blocks = parse_blocks(
             "<body><figure><img src=\"a.png\" alt=\"x\"/>\
              <figcaption>The cat</figcaption><p>after</p></figure></body>",
         );
@@ -890,7 +978,8 @@ mod tests {
 
     #[test]
     fn figure_without_img_flattens_caption_to_para() {
-        let blocks = parse("<body><figure><figcaption>orphan caption</figcaption></figure></body>");
+        let blocks =
+            parse_blocks("<body><figure><figcaption>orphan caption</figcaption></figure></body>");
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "orphan caption"));
     }
 
@@ -903,7 +992,7 @@ mod tests {
         // resolve_general_ref's unescape() call; the Event::Text arm only
         // decodes, and deliberately does not unescape.
         let xml = "<p>a &lt; b</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -922,7 +1011,7 @@ mod tests {
         // block, at exit 0. `allow_dangling_amp` recovers it as literal text.
         // The regression is the SECOND paragraph, not just the `&`.
         let xml = "<p>Tom & Jerry</p><p>SECOND</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let paras: Vec<String> = blocks
             .iter()
             .filter_map(|b| match b {
@@ -939,7 +1028,7 @@ mod tests {
         // and hex character references. Under quick-xml 0.41 the leading `&lt;`
         // is the paragraph's first event, arriving before any Event::Text.
         let xml = "<p>&lt;caf&#233;&#xE9;&gt;</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -957,7 +1046,7 @@ mod tests {
         // &nbsp; has no XML predefined mapping. Preserving the reference is
         // lossless; the pre-fix behavior dropped it entirely.
         let xml = "<p>a&nbsp;b</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -977,7 +1066,7 @@ mod tests {
         // two references and is real content, not inter-tag formatting; the
         // 0.36-era trim guard used to discard it, dropping a real space.
         let xml = "<p>a &lt; &gt; b</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -994,7 +1083,7 @@ mod tests {
         // is a Text(" ") event immediately followed by GeneralRef(amp), not
         // preceded by one -- the "follows a reference" half of the fix.
         let xml = "<p><strong>A</strong> &amp; B</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1020,7 +1109,7 @@ mod tests {
         // indentation between tags -- must still be discarded, or every
         // formatted XHTML document would sprout stray whitespace inlines.
         let xml = "<p>\n  <strong>A</strong>\n  <em>B</em>\n</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1046,7 +1135,7 @@ mod tests {
         // treated as discardable inter-tag formatting the way a whitespace
         // Text fragment can be.
 
-        let blocks = parse("<p>&#160;</p>");
+        let blocks = parse_blocks("<p>&#160;</p>");
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1056,7 +1145,7 @@ mod tests {
             .expect("a paragraph for &#160;");
         assert_eq!(text_of(para), "\u{a0}");
 
-        let blocks = parse("<p>&#32;</p>");
+        let blocks = parse_blocks("<p>&#32;</p>");
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1076,7 +1165,7 @@ mod tests {
         // into the following text. This is the case that would catch an
         // over-eager merge.
         let xml = "<p><strong>A</strong>&amp;B</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1110,7 +1199,7 @@ mod tests {
         // between Strong("A") and "& B", splitting the paragraph onto a
         // second line.
         let xml = "<p>\n  <strong>A</strong>\n  &amp; B</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1135,7 +1224,7 @@ mod tests {
         // Event::Text handler, mirroring the flush site above. Pre-fix this
         // pushed "\n  " verbatim between "&" and Emph("Q").
         let xml = "<p>P &amp;\n  <em>Q</em></p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1168,7 +1257,7 @@ mod tests {
         // content follows" from "adjacent to a reference, then the block
         // ends". Retaining it is the consistent choice; pin it.
         let xml = "<p>a &amp; </p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1194,7 +1283,7 @@ mod tests {
         // Event::End(b"p") handler that would emit a Block::Para. Pinning
         // this: no panic, no block, no leaked fragment.
         let xml = "<p>\n  ";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         assert!(
             blocks.is_empty(),
             "unclosed paragraph must not emit a block, got {blocks:?}"
@@ -1211,7 +1300,7 @@ mod tests {
         // separator between content. Regression: this used to render as
         // " &X" with a leading space.
         let xml = "<p>\n  &amp;X\n</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1258,7 +1347,7 @@ mod tests {
         // expectation: Text("A ") + Emph("&B"). New (correct) expectation:
         // Text("A ") + Emph(" &B").
         let xml = "<p>A <em>\n  &amp;B</em></p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1295,7 +1384,7 @@ mod tests {
     #[test]
     fn leading_space_survives_at_start_of_em() {
         let xml = "<p>A<em> &amp;B</em></p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1317,7 +1406,7 @@ mod tests {
     #[test]
     fn leading_space_survives_at_start_of_strong() {
         let xml = "<p>A<strong> &amp;B</strong> C</p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1350,7 +1439,7 @@ mod tests {
         // which is the block frame (depth 1). The suppression must not fire
         // at either.
         let xml = "<p>A <em><strong> &amp;B</strong></em></p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1387,7 +1476,7 @@ mod tests {
         // all, so this case was never broken. Kept here alongside the
         // GeneralRef-triggered cases above for contrast.
         let xml = "<p>A<em> B</em></p>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let para = blocks
             .iter()
             .find_map(|b| match b {
@@ -1412,7 +1501,7 @@ mod tests {
         // headings, not just paragraphs: h1..h6 push the block frame the
         // same way `p` does (xhtml.rs Event::Start, `h1"..="h6"` arm).
         let xml = "<h2>\n  &amp;T\n</h2>";
-        let blocks = parse(xml);
+        let blocks = parse_blocks(xml);
         let heading = blocks
             .iter()
             .find_map(|b| match b {
@@ -1442,7 +1531,7 @@ mod tests {
 
     #[test]
     fn parses_flat_unordered_list() {
-        let blocks = parse("<body><ul><li><p>one</p></li><li><p>two</p></li></ul></body>");
+        let blocks = parse_blocks("<body><ul><li><p>one</p></li><li><p>two</p></li></ul></body>");
         assert_eq!(blocks.len(), 1);
         let Block::List { ordered, items } = &blocks[0] else {
             panic!("expected List, got {:?}", blocks[0]);
@@ -1455,14 +1544,14 @@ mod tests {
 
     #[test]
     fn ordered_list_sets_ordered_flag() {
-        let blocks = parse("<ol><li><p>a</p></li></ol>");
+        let blocks = parse_blocks("<ol><li><p>a</p></li></ol>");
         assert!(matches!(&blocks[0], Block::List { ordered: true, .. }));
     }
 
     #[test]
     fn nested_list_folds_into_parent_item() {
         let blocks =
-            parse("<ul><li><p>A</p><ul><li><p>A1</p></li></ul></li><li><p>B</p></li></ul>");
+            parse_blocks("<ul><li><p>A</p><ul><li><p>A1</p></li></ul></li><li><p>B</p></li></ul>");
         assert_eq!(
             blocks.len(),
             1,
@@ -1482,7 +1571,7 @@ mod tests {
 
     #[test]
     fn heading_inside_list_item_stays_in_item() {
-        let blocks = parse("<ul><li><h3>t</h3></li></ul>");
+        let blocks = parse_blocks("<ul><li><h3>t</h3></li></ul>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!()
         };
@@ -1491,7 +1580,7 @@ mod tests {
 
     #[test]
     fn unclosed_list_at_eof_is_flushed_not_dropped() {
-        let blocks = parse("<ul><li><p>orphan</p>");
+        let blocks = parse_blocks("<ul><li><p>orphan</p>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!("unclosed list must still be emitted")
         };
@@ -1502,7 +1591,8 @@ mod tests {
 
     #[test]
     fn blockquote_bare_text_becomes_paragraph() {
-        let blocks = parse("<body><blockquote>quoted <em>words</em> here</blockquote></body>");
+        let blocks =
+            parse_blocks("<body><blockquote>quoted <em>words</em> here</blockquote></body>");
         assert_eq!(blocks.len(), 1);
         let Block::Para(inls) = &blocks[0] else {
             panic!("expected Para")
@@ -1513,7 +1603,7 @@ mod tests {
 
     #[test]
     fn dl_definition_text_is_flattened_not_dropped() {
-        let blocks = parse("<body><dl><dt>term</dt><dd>meaning</dd></dl></body>");
+        let blocks = parse_blocks("<body><dl><dt>term</dt><dd>meaning</dd></dl></body>");
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "term"));
         assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "meaning"));
@@ -1521,7 +1611,7 @@ mod tests {
 
     #[test]
     fn bare_li_text_becomes_item_paragraph() {
-        let blocks = parse("<body><ul><li>one</li><li>two</li></ul></body>");
+        let blocks = parse_blocks("<body><ul><li>one</li><li>two</li></ul></body>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!()
         };
@@ -1531,15 +1621,16 @@ mod tests {
 
     #[test]
     fn head_title_text_stays_out_of_output() {
-        let blocks =
-            parse("<html><head><title>Skip Me</title></head><body><p>keep</p></body></html>");
+        let blocks = parse_blocks(
+            "<html><head><title>Skip Me</title></head><body><p>keep</p></body></html>",
+        );
         assert_eq!(blocks.len(), 1);
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "keep"));
     }
 
     #[test]
     fn implicit_paragraph_splits_at_block_boundary() {
-        let blocks = parse("<body><div>before<p>inside</p>after</div></body>");
+        let blocks = parse_blocks("<body><div>before<p>inside</p>after</div></body>");
         assert_eq!(blocks.len(), 3);
         assert!(matches!(&blocks[0], Block::Para(i) if text_of(i) == "before"));
         assert!(matches!(&blocks[1], Block::Para(i) if text_of(i) == "inside"));
@@ -1557,7 +1648,7 @@ mod tests {
         // End(strong) popped it and tried inline_stack.last_mut() to attach
         // the result -- found the stack empty, and silently discarded
         // "Warning" entirely. Only Para([" ok"]) survived.
-        let blocks = parse("<body><strong>Warning</strong> ok</body>");
+        let blocks = parse_blocks("<body><strong>Warning</strong> ok</body>");
         assert_eq!(blocks.len(), 1, "expected a single Para, got {blocks:?}");
         let Block::Para(inls) = &blocks[0] else {
             panic!("expected Para, got {:?}", blocks[0]);
@@ -1581,7 +1672,7 @@ mod tests {
     fn leading_inline_tag_inside_list_item_opens_implicit_paragraph() {
         // Same regression, but inside a <li>: the first flow-level content
         // of the item is an inline tag with no preceding bare text.
-        let blocks = parse("<body><ul><li><em>x</em></li></ul></body>");
+        let blocks = parse_blocks("<body><ul><li><em>x</em></li></ul></body>");
         let Block::List { items, .. } = &blocks[0] else {
             panic!("expected List, got {:?}", blocks[0]);
         };
@@ -1599,7 +1690,7 @@ mod tests {
 
     #[test]
     fn parses_table_with_thead() {
-        let blocks = parse(
+        let blocks = parse_blocks(
             "<body><table><thead><tr><th>H1</th><th>H2</th></tr></thead>\
              <tbody><tr><td>a</td><td><em>b</em></td></tr></tbody></table></body>",
         );
@@ -1616,7 +1707,8 @@ mod tests {
 
     #[test]
     fn th_only_first_row_without_thead_becomes_header() {
-        let blocks = parse("<body><table><tr><th>H</th></tr><tr><td>v</td></tr></table></body>");
+        let blocks =
+            parse_blocks("<body><table><tr><th>H</th></tr><tr><td>v</td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1626,7 +1718,8 @@ mod tests {
 
     #[test]
     fn headerless_table_promotes_first_row() {
-        let blocks = parse("<body><table><tr><td>a</td></tr><tr><td>b</td></tr></table></body>");
+        let blocks =
+            parse_blocks("<body><table><tr><td>a</td></tr><tr><td>b</td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1636,7 +1729,7 @@ mod tests {
 
     #[test]
     fn colspan_sets_merged_flag() {
-        let blocks = parse("<body><table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table></body>");
+        let blocks = parse_blocks("<body><table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1645,7 +1738,7 @@ mod tests {
 
     #[test]
     fn short_row_is_padded_to_table_width() {
-        let blocks = parse(
+        let blocks = parse_blocks(
             "<body><table><tr><th>A</th><th>B</th></tr><tr><td>only</td></tr></table></body>",
         );
         let Block::Table(t) = &blocks[0] else {
@@ -1657,7 +1750,7 @@ mod tests {
 
     #[test]
     fn paragraph_inside_cell_flattens_to_cell_inlines() {
-        let blocks = parse("<body><table><tr><td><p>x</p><p>y</p></td></tr></table></body>");
+        let blocks = parse_blocks("<body><table><tr><td><p>x</p><p>y</p></td></tr></table></body>");
         let Block::Table(t) = &blocks[0] else {
             panic!()
         };
@@ -1668,7 +1761,7 @@ mod tests {
 
     #[test]
     fn pre_becomes_code_block_with_verbatim_whitespace() {
-        let blocks = parse("<body><pre><code class=\"language-rust\">fn main() {\n    let x = 1 &amp; 2;\n}</code></pre></body>");
+        let blocks = parse_blocks("<body><pre><code class=\"language-rust\">fn main() {\n    let x = 1 &amp; 2;\n}</code></pre></body>");
         let Block::CodeBlock { lang, text } = &blocks[0] else {
             panic!("expected CodeBlock, got {:?}", blocks[0])
         };
@@ -1678,7 +1771,7 @@ mod tests {
 
     #[test]
     fn pre_without_code_child_still_works() {
-        let blocks = parse("<body><pre>plain  spaced</pre></body>");
+        let blocks = parse_blocks("<body><pre>plain  spaced</pre></body>");
         assert!(
             matches!(&blocks[0], Block::CodeBlock { lang: None, text } if text == "plain  spaced")
         );
@@ -1686,7 +1779,7 @@ mod tests {
 
     #[test]
     fn inline_code_survives_in_paragraph() {
-        let blocks = parse("<body><p>call <code>foo()</code> now</p></body>");
+        let blocks = parse_blocks("<body><p>call <code>foo()</code> now</p></body>");
         let Block::Para(inls) = &blocks[0] else {
             panic!()
         };
@@ -1697,7 +1790,7 @@ mod tests {
 
     #[test]
     fn br_becomes_single_space() {
-        let blocks = parse("<body><p>line one<br/>line two</p></body>");
+        let blocks = parse_blocks("<body><p>line one<br/>line two</p></body>");
         let Block::Para(inls) = &blocks[0] else {
             panic!()
         };

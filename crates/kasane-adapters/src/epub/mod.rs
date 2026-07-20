@@ -33,6 +33,8 @@ impl Adapter for EpubAdapter {
 
         let mut nodes = Vec::new();
         let mut next_id = 0u32;
+        let mut anchor_map: std::collections::HashMap<(String, String), BlockId> =
+            std::collections::HashMap::new();
         for href in &parsed.spine_hrefs {
             let Some(name) = safe_entry_name(href) else {
                 continue;
@@ -45,7 +47,14 @@ impl Adapter for EpubAdapter {
                 .rsplit_once('/')
                 .map(|(d, _)| d.to_string())
                 .unwrap_or_default();
-            for b in xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id) {
+            let fp = xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id);
+            for (aid, bid) in &fp.anchors {
+                anchor_map.insert((name.clone(), aid.clone()), *bid);
+            }
+            if let Some(fh) = fp.first_heading {
+                anchor_map.insert((name.clone(), String::new()), fh);
+            }
+            for b in fp.blocks {
                 nodes.push(Node {
                     block: b,
                     prov: Provenance {
@@ -55,6 +64,7 @@ impl Adapter for EpubAdapter {
                 });
             }
         }
+        fix_links(&mut nodes, &anchor_map);
 
         // Extract every referenced image once; remember which keys failed so their
         // Figures can degrade instead of rendering a broken link.
@@ -156,6 +166,116 @@ fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<Stri
         }
         _ => {}
     }
+}
+
+// Rewrites every `<a href>` that survived xhtml.rs as `RefTarget::External`
+// (Task 6 doesn't yet know a target file's headings) into `Internal(BlockId)`
+// once every spine file's anchor map is known. Scheme/empty hrefs are left
+// external; a relative href with no matching entry in `map` is stripped to
+// plain text with a warning rather than routed through the core's
+// dangling-ref degradation -- see the Step 4 comment in the task brief for
+// why this is an intentional, output-identical deviation from the spec.
+fn fix_links(nodes: &mut [Node], map: &std::collections::HashMap<(String, String), BlockId>) {
+    for n in nodes {
+        let file = n.prov.source_href.clone().unwrap_or_default();
+        fix_block_links(&mut n.block, &file, map);
+    }
+}
+
+fn fix_block_links(
+    b: &mut Block,
+    file: &str,
+    map: &std::collections::HashMap<(String, String), BlockId>,
+) {
+    match b {
+        Block::Para(inls) | Block::Heading { inlines: inls, .. } => fix_inline_vec(inls, file, map),
+        Block::List { items, .. } => {
+            for item in items {
+                for ib in item {
+                    fix_block_links(ib, file, map);
+                }
+            }
+        }
+        Block::Footnote { blocks, .. } => {
+            for ib in blocks {
+                fix_block_links(ib, file, map);
+            }
+        }
+        Block::Table(t) => {
+            for row in std::iter::once(&mut t.header).chain(t.rows.iter_mut()) {
+                for cell in row {
+                    fix_inline_vec(cell, file, map);
+                }
+            }
+        }
+        Block::Figure { caption, .. } => fix_inline_vec(caption, file, map),
+        _ => {}
+    }
+}
+
+fn fix_inline_vec(
+    inls: &mut Vec<Inline>,
+    file: &str,
+    map: &std::collections::HashMap<(String, String), BlockId>,
+) {
+    let old = std::mem::take(inls);
+    for i in old {
+        match i {
+            Inline::Emph(mut x) => {
+                fix_inline_vec(&mut x, file, map);
+                inls.push(Inline::Emph(x));
+            }
+            Inline::Strong(mut x) => {
+                fix_inline_vec(&mut x, file, map);
+                inls.push(Inline::Strong(x));
+            }
+            Inline::Link {
+                target: RefTarget::External(h),
+                inlines: mut inner,
+            } => {
+                fix_inline_vec(&mut inner, file, map);
+                if h.is_empty() || crate::guard::has_scheme(&h) {
+                    inls.push(Inline::Link {
+                        target: RefTarget::External(h),
+                        inlines: inner,
+                    });
+                } else {
+                    match resolve_internal(file, &h, map) {
+                        Some(bid) => inls.push(Inline::Link {
+                            target: RefTarget::Internal(bid),
+                            inlines: inner,
+                        }),
+                        None => {
+                            eprintln!("warning: unresolved internal link '{h}' in {file}");
+                            inls.extend(inner); // link text survives as plain text
+                        }
+                    }
+                }
+            }
+            other => inls.push(other),
+        }
+    }
+}
+
+// "ch2.xhtml#s2" / "#frag" / "ch2.xhtml" -> a heading BlockId, if the target
+// file is in the spine. Exact fragment first, then the file's first heading.
+fn resolve_internal(
+    file: &str,
+    href: &str,
+    map: &std::collections::HashMap<(String, String), BlockId>,
+) -> Option<BlockId> {
+    let (path, frag) = match href.split_once('#') {
+        Some((p, f)) => (p, f),
+        None => (href, ""),
+    };
+    let target_file = if path.is_empty() {
+        file.to_string()
+    } else {
+        crate::guard::resolve_rel(&crate::guard::parent_dir(file), path)?
+    };
+    map.get(&(target_file.clone(), frag.to_string()))
+        .or_else(|| map.get(&(target_file, String::new())))
+        .copied()
 }
 
 fn find_opf_path(container_xml: &str) -> Option<String> {
@@ -273,5 +393,98 @@ mod tests {
             .filter(|n| matches!(&n.block, Block::Figure { .. }))
             .count();
         assert_eq!(figs, 2);
+    }
+
+    fn build_epub2(ch1: &str, ch2: &str) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="ch2.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#,
+        );
+        add(&mut w, "OEBPS/ch1.xhtml", ch1.as_bytes());
+        add(&mut w, "OEBPS/ch2.xhtml", ch2.as_bytes());
+        w.finish().unwrap();
+        buf.into_inner()
+    }
+
+    fn first_link_target(doc: &Document) -> Option<RefTarget> {
+        doc.nodes.iter().find_map(|n| match &n.block {
+            Block::Para(inls) => inls.iter().find_map(|i| match i {
+                Inline::Link { target, .. } => Some(target.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn cross_file_link_resolves_to_internal_block_id() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p><a href=\"ch2.xhtml#s2\">go</a></p></body>",
+            "<body><h1>Two</h1><h2 id=\"s2\">Sect</h2><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        // ch1: h1 -> BlockId(0); ch2: h1 -> 1, h2#s2 -> 2
+        assert!(matches!(
+            first_link_target(&doc),
+            Some(RefTarget::Internal(BlockId(2)))
+        ));
+    }
+
+    #[test]
+    fn fragmentless_and_unknown_fragment_hrefs_fall_back_to_first_heading() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p><a href=\"ch2.xhtml\">a</a> <a href=\"ch2.xhtml#nope\">b</a></p></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        let links: Vec<RefTarget> = doc
+            .nodes
+            .iter()
+            .flat_map(|n| match &n.block {
+                Block::Para(inls) => inls
+                    .iter()
+                    .filter_map(|i| match i {
+                        Inline::Link { target, .. } => Some(target.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => vec![],
+            })
+            .collect();
+        assert!(matches!(links[0], RefTarget::Internal(BlockId(1))));
+        assert!(matches!(links[1], RefTarget::Internal(BlockId(1))));
+    }
+
+    #[test]
+    fn unresolvable_internal_href_strips_to_text() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p><a href=\"missing.xhtml#x\">gone link</a></p></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(first_link_target(&doc).is_none(), "link must be stripped");
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Para(i) if i.iter().any(|x| matches!(x, Inline::Text(t) if t == "gone link")))));
+    }
+
+    #[test]
+    fn external_url_links_stay_external() {
+        let bytes = build_epub2(
+            "<body><h1>One</h1><p><a href=\"https://example.com\">ext</a></p></body>",
+            "<body><h1>Two</h1><p>t</p></body>",
+        );
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(
+            matches!(first_link_target(&doc), Some(RefTarget::External(u)) if u == "https://example.com")
+        );
     }
 }
