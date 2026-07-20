@@ -41,9 +41,59 @@ pub fn resolve_rel(base_dir: &str, target: &str) -> Option<String> {
     }
 }
 
+/// True when `href` starts with a URL scheme (`http:`, `data:`, `mailto:`, …)
+/// rather than being a document-relative path. A colon only counts before the
+/// first `/`, `#`, or `?`.
+pub(crate) fn has_scheme(href: &str) -> bool {
+    href.chars()
+        .take_while(|c| !matches!(c, '/' | '#' | '?'))
+        .any(|c| c == ':')
+}
+
+pub(crate) fn parent_dir(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_default()
+}
+
+pub(crate) fn safe_media_filename(archive_path: &str, n: usize) -> String {
+    let base = archive_path.rsplit('/').next().unwrap_or("image");
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Prefix an index to guarantee uniqueness even if basenames collide across dirs.
+    format!(
+        "{:03}-{}",
+        n,
+        if cleaned.is_empty() {
+            "image".into()
+        } else {
+            cleaned
+        }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn has_scheme_detects_urls_not_paths() {
+        assert!(has_scheme("http://x/a.png"));
+        assert!(has_scheme("data:image/png;base64,AA"));
+        assert!(has_scheme("mailto:a@b"));
+        assert!(!has_scheme("images/a.png"));
+        assert!(!has_scheme("../images/a.png"));
+        assert!(!has_scheme("a/b:c.png")); // colon after a slash is not a scheme
+        assert!(!has_scheme("#frag"));
+    }
+
     #[test]
     fn rejects_traversal_names() {
         assert!(safe_entry_name("../etc/passwd").is_none());
