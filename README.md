@@ -5,13 +5,16 @@ into an AI-agent-friendly, progressively-disclosed Markdown file tree.
 
 ## Quick start
     mise install
-    just build
-    just run book.epub -o out/book
+    mise run build
+    mise run convert book.epub -o out/book
     # open out/book/index.md and drill into linked sections
 
+## Install
+    cargo install kasane-cli   # installs the `kasane` binary
+
 ## Development
-    just test    # run all tests
-    just lint    # fmt check + clippy -D warnings
+    mise run test    # run all tests
+    mise run lint    # fmt check + clippy -D warnings
 
 See AGENTS.md for the codebase map.
 

@@ -2,6 +2,7 @@ mod detect;
 mod epub;
 mod guard;
 mod pptx;
+mod xmltext;
 mod ziputil;
 
 pub use detect::{detect, Format};

@@ -1,0 +1,26 @@
+name: audit
+
+on:
+  push:
+    branches: [main]
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', 'mise.toml', '.github/workflows/audit.yml']
+  pull_request:
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'deny.toml', 'mise.toml', '.github/workflows/audit.yml']
+  # The important trigger. Advisories are published against dependencies that
+  # were already committed, so an audit that only fires on code changes goes
+  # stale silently. Mondays 07:00 UTC.
+  schedule:
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Audit dependencies
+        run: cargo deny check advisories

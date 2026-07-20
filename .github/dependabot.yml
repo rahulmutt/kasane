@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Required, not optional. The workflows pin actions by commit SHA, and a SHA
+  # pin never updates itself — without this, those pins silently rot and stop
+  # receiving upstream security fixes. Dependabot reads the version from the
+  # trailing comment next to each SHA.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,5 @@
+# Scoped to advisories only. License and banned-crate policy are deliberately
+# out of scope: they are a policy discussion, and letting one block the other
+# would mean shipping no vulnerability scanning at all.
+[advisories]
+ignore = []

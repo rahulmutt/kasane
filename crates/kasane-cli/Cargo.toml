@@ -1,27 +1,25 @@
 [package]
 name = "kasane-cli"
-version = "0.1.0"
+description = "CLI that converts documents and ebooks into agent-friendly Markdown trees"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "kasane"
 path = "src/main.rs"
 
 [dependencies]
-kasane-adapters = { path = "../kasane-adapters" }
-kasane-core = { path = "../kasane-core" }
-kasane-writer = { path = "../kasane-writer" }
-# Pinned: clap 4.6+ requires Rust 1.85 (edition2024); 4.5.48 is the newest that
-# builds on the pinned rust 1.83. (cargo 1.83 has no MSRV-aware resolution.)
-clap = { version = "=4.5.48", features = ["derive"] }
+kasane-adapters.workspace = true
+kasane-core.workspace = true
+kasane-writer.workspace = true
+clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 
 [dev-dependencies]
-# Pinned: tempfile 3.15+ pulls getrandom 0.4.x (edition2024, needs Rust 1.85);
-# 3.14.0 is the newest that builds on the pinned rust 1.83 (fastrand/rustix chain).
-tempfile = "=3.14.0"
+tempfile = "3"
 
 [lints]
 workspace = true

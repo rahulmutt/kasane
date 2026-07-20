@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # required to create the GitHub Release
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners per architecture rather than cross-compiling: no
+          # cross-linker to configure, and each binary is built on the
+          # architecture it will actually run on.
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build release binary
+        run: cargo build --release -p kasane-cli
+
+      - name: Package tarball
+        run: |
+          tar -czf "kasane-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" \
+            -C target/release kasane
+
+      # Every matrix leg uploads its own tarball to the SAME release. That is
+      # safe only because this pin (v2.6.2) postdates the concurrent-create and
+      # upload-race fixes released in v2.5.2. Dependabot bumps exactly this
+      # line, so do not move the pin BELOW v2.5.2 -- the race returns silently.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: kasane-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+
+  publish:
+    # Only publish once binaries prove the tag builds on both architectures.
+    # An unpublish on crates.io is not possible; a failed release job is.
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+
+      - name: Test before publishing
+        run: mise run test
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace

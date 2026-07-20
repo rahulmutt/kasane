@@ -1,3 +1,26 @@
 [tools]
-rust = "1.83.0"
-"cargo:just" = "1.46.0"
+# NOTE: Dependabot cannot read mise.toml. Both pins below -- the Rust
+# toolchain and cargo-deny -- are MANUAL bumps and receive no automated
+# security PRs. Do not assume anything here is being watched for you.
+#
+# `components` is load-bearing, not decoration. Locally mise installs a full
+# Rust distribution that already ships rustfmt and clippy, but in CI
+# jdx/mise-action delegates to rustup, which installs the minimal profile
+# without them -- so `mise run lint` passed on a laptop and failed on the
+# runner with "cargo-fmt is not installed". Naming them here keeps the two
+# environments resolving from one file, which is the point of mise-first.
+rust = { version = "1.97.1", components = "rustfmt,clippy" }
+"cargo:cargo-deny" = "0.20.2"
+
+[tasks.build]
+run = "cargo build --workspace"
+
+[tasks.test]
+run = "cargo test --workspace"
+
+[tasks.lint]
+run = ["cargo fmt --all -- --check",
+       "cargo clippy --workspace --all-targets -- -D warnings"]
+
+[tasks.convert]
+run = "cargo run -p kasane-cli --"
