@@ -2,6 +2,41 @@ use kasane_ir::{Block, BlockId, Inline, RefTarget};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+// Open block containers. Finished blocks land in the top frame instead of the
+// output; closing the container folds the frame into its parent. This is what
+// makes nesting (list items holding paragraphs, lists holding lists)
+// representable in a single streaming pass.
+enum BlockFrame {
+    List {
+        ordered: bool,
+        items: Vec<Vec<Block>>,
+    },
+}
+
+fn emit_block(frames: &mut [BlockFrame], out: &mut Vec<Block>, b: Block) {
+    match frames.last_mut() {
+        None => out.push(b),
+        Some(BlockFrame::List { items, .. }) => {
+            // A block arriving before any <li> (malformed) opens an item
+            // rather than being dropped.
+            if items.is_empty() {
+                items.push(Vec::new());
+            }
+            items.last_mut().expect("non-empty").push(b);
+        }
+    }
+}
+
+fn finish_frame(f: BlockFrame, frames: &mut [BlockFrame], out: &mut Vec<Block>) {
+    match f {
+        BlockFrame::List { ordered, items } => {
+            if !items.is_empty() {
+                emit_block(frames, out, Block::List { ordered, items });
+            }
+        }
+    }
+}
+
 // Returns blocks; `next_id` is a running BlockId counter for headings.
 pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     let mut reader = Reader::from_str(xml);
@@ -16,6 +51,7 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     let mut buf = Vec::new();
     // inline accumulation stack
     let mut inline_stack: Vec<Vec<Inline>> = vec![];
+    let mut frames: Vec<BlockFrame> = vec![];
     let mut cur_block: Option<u8> = None; // heading level, or 0 for para
     let mut link_href: Option<String> = None;
     // A whitespace-only Text fragment is ambiguous until we see what comes
@@ -66,6 +102,17 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                             .find(|a| a.key.as_ref() == b"href")
                             .map(|a| String::from_utf8_lossy(&a.value).into_owned());
                         inline_stack.push(vec![]);
+                    }
+                    b"ul" | b"ol" => {
+                        frames.push(BlockFrame::List {
+                            ordered: e.local_name().as_ref() == b"ol",
+                            items: vec![],
+                        });
+                    }
+                    b"li" => {
+                        if let Some(BlockFrame::List { items, .. }) = frames.last_mut() {
+                            items.push(Vec::new());
+                        }
                     }
                     _ => {}
                 }
@@ -170,23 +217,37 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                         let level = cur_block.take().unwrap_or(1);
                         let id = BlockId(*next_id);
                         *next_id += 1;
-                        blocks.push(Block::Heading {
-                            level,
-                            id,
-                            inlines: inls,
-                        });
+                        emit_block(
+                            &mut frames,
+                            &mut blocks,
+                            Block::Heading {
+                                level,
+                                id,
+                                inlines: inls,
+                            },
+                        );
                     }
                     b"p" => {
                         let inls = inline_stack.pop().unwrap_or_default();
                         cur_block = None;
                         if !inls.is_empty() {
-                            blocks.push(Block::Para(inls));
+                            emit_block(&mut frames, &mut blocks, Block::Para(inls));
+                        }
+                    }
+                    b"ul" | b"ol" => {
+                        if let Some(f) = frames.pop() {
+                            finish_frame(f, &mut frames, &mut blocks);
                         }
                     }
                     _ => {}
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) => {
+                while let Some(f) = frames.pop() {
+                    finish_frame(f, &mut frames, &mut blocks);
+                }
+                break;
+            }
             Err(_) => break,
             _ => {
                 // Other events (comments, PI, etc.) also break adjacency.
@@ -776,4 +837,74 @@ mod tests {
     // above -- by the time that whitespace flushes, `</strong>` has already
     // pushed `Inline::Strong` into the paragraph's top frame, so the frame is
     // non-empty and the space survives. Not duplicated here.
+
+    // ---- Block-frame stack: nested lists ----
+
+    #[test]
+    fn parses_flat_unordered_list() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><ul><li><p>one</p></li><li><p>two</p></li></ul></body>",
+            &mut id,
+        );
+        assert_eq!(blocks.len(), 1);
+        let Block::List { ordered, items } = &blocks[0] else {
+            panic!("expected List, got {:?}", blocks[0]);
+        };
+        assert!(!ordered);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "one"));
+        assert!(matches!(&items[1][0], Block::Para(i) if text_of(i) == "two"));
+    }
+
+    #[test]
+    fn ordered_list_sets_ordered_flag() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<ol><li><p>a</p></li></ol>", &mut id);
+        assert!(matches!(&blocks[0], Block::List { ordered: true, .. }));
+    }
+
+    #[test]
+    fn nested_list_folds_into_parent_item() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<ul><li><p>A</p><ul><li><p>A1</p></li></ul></li><li><p>B</p></li></ul>",
+            &mut id,
+        );
+        assert_eq!(
+            blocks.len(),
+            1,
+            "nested list must not become a sibling block"
+        );
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(items.len(), 2);
+        // item A holds its Para plus the nested List
+        assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "A"));
+        let Block::List { items: sub, .. } = &items[0][1] else {
+            panic!("expected nested List inside item A, got {:?}", items[0])
+        };
+        assert!(matches!(&sub[0][0], Block::Para(i) if text_of(i) == "A1"));
+    }
+
+    #[test]
+    fn heading_inside_list_item_stays_in_item() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<ul><li><h3>t</h3></li></ul>", &mut id);
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!()
+        };
+        assert!(matches!(&items[0][0], Block::Heading { level: 3, .. }));
+    }
+
+    #[test]
+    fn unclosed_list_at_eof_is_flushed_not_dropped() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks("<ul><li><p>orphan</p>", &mut id);
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("unclosed list must still be emitted")
+        };
+        assert!(matches!(&items[0][0], Block::Para(i) if text_of(i) == "orphan"));
+    }
 }
