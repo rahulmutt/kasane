@@ -51,7 +51,11 @@ pub fn parse_opf(xml: &str, opf_dir: &str) -> Opf {
                 }
             }
             Ok(Event::Text(t)) => {
-                let txt = t.unescape().unwrap_or_default().to_string();
+                let txt = t
+                    .decode()
+                    .ok()
+                    .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
+                    .unwrap_or_default();
                 match cur.take() {
                     Some("title") => title = txt,
                     Some("creator") => authors.push(txt),

@@ -51,7 +51,7 @@ pub(crate) fn attr_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Opt
 /// the raw lossy-UTF8 value if unescaping fails, so malformed/untrusted input
 /// degrades gracefully instead of panicking or aborting the parse.
 pub(crate) fn unescape_attr(a: quick_xml::events::attributes::Attribute) -> String {
-    a.unescape_value()
+    a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
         .map(|v| v.into_owned())
         .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).into_owned())
 }

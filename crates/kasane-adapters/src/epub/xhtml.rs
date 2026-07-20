@@ -45,7 +45,11 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 _ => {}
             },
             Ok(Event::Text(t)) => {
-                let s = t.unescape().unwrap_or_default().to_string();
+                let s = t
+                    .decode()
+                    .ok()
+                    .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
+                    .unwrap_or_default();
                 if !s.trim().is_empty() && !inline_stack.is_empty() {
                     push_text!(s);
                 }

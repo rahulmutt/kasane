@@ -173,7 +173,11 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                 _ => {}
             },
             Ok(Event::Text(t)) if in_run => {
-                let s = t.unescape().unwrap_or_default().to_string();
+                let s = t
+                    .decode()
+                    .ok()
+                    .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
+                    .unwrap_or_default();
                 if !s.is_empty() {
                     if in_cell {
                         cur_cell.push(styled(s, &fmt));
