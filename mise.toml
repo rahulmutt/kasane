@@ -1,5 +1,6 @@
 [tools]
 rust = "1.97.1"
+"cargo:cargo-deny" = "0.20.2"
 
 [tasks.build]
 run = "cargo build --workspace"
