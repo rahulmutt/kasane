@@ -1,6 +1,7 @@
 mod detect;
 mod epub;
 mod guard;
+mod ziputil;
 
 pub use detect::{detect, Format};
 pub use epub::EpubAdapter;
