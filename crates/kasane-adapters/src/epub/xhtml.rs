@@ -11,9 +11,31 @@ enum BlockFrame {
         ordered: bool,
         items: Vec<Vec<Block>>,
     },
+    Table {
+        header: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
+        has_merged: bool,
+        in_thead: bool,
+        cur_row: Vec<Vec<Inline>>,
+        row_has_td: bool,
+    },
 }
 
-fn emit_block(frames: &mut [BlockFrame], out: &mut Vec<Block>, b: Block) {
+// A block finishing while an inline collection is open (a table cell, later a
+// figcaption) flattens into it instead of escaping the container.
+fn emit_block(
+    frames: &mut [BlockFrame],
+    inline_stack: &mut [Vec<Inline>],
+    out: &mut Vec<Block>,
+    b: Block,
+) {
+    if let Some(top) = inline_stack.last_mut() {
+        if !top.is_empty() {
+            crate::xmltext::push_inline(top, Inline::Text(" ".into()));
+        }
+        flatten_block_inlines(&b, top);
+        return;
+    }
     match frames.last_mut() {
         None => out.push(b),
         Some(BlockFrame::List { items, .. }) => {
@@ -24,15 +46,97 @@ fn emit_block(frames: &mut [BlockFrame], out: &mut Vec<Block>, b: Block) {
             }
             items.last_mut().expect("non-empty").push(b);
         }
+        // A block emitted directly under <table> (stray content between rows)
+        // has nowhere to go; degrade by dropping structure, keeping nothing --
+        // real content inside cells is caught by the inline_stack branch above.
+        Some(BlockFrame::Table { .. }) => {}
     }
 }
 
-fn finish_frame(f: BlockFrame, frames: &mut [BlockFrame], out: &mut Vec<Block>) {
+// Extracts a block's text content as inlines -- used when block markup
+// appears where only inlines fit (inside a table cell). Structure is lost,
+// text is not.
+fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
+    let sep = |dst: &mut Vec<Inline>| {
+        if !dst.is_empty() {
+            crate::xmltext::push_inline(dst, Inline::Text(" ".into()));
+        }
+    };
+    match b {
+        Block::Para(inls) | Block::Heading { inlines: inls, .. } => {
+            dst.extend(inls.iter().cloned())
+        }
+        Block::List { items, .. } => {
+            for item in items {
+                for ib in item {
+                    sep(dst);
+                    flatten_block_inlines(ib, dst);
+                }
+            }
+        }
+        Block::Table(t) => {
+            for row in std::iter::once(&t.header).chain(t.rows.iter()) {
+                for cell in row {
+                    sep(dst);
+                    dst.extend(cell.iter().cloned());
+                }
+            }
+        }
+        Block::Figure { caption, .. } => dst.extend(caption.iter().cloned()),
+        Block::CodeBlock { text, .. } => dst.push(Inline::Code(text.clone())),
+        Block::MathBlock(s) => dst.push(Inline::Math(s.clone())),
+        Block::Footnote { blocks, .. } => {
+            for ib in blocks {
+                sep(dst);
+                flatten_block_inlines(ib, dst);
+            }
+        }
+        Block::Raw { .. } => {}
+    }
+}
+
+fn finish_frame(
+    f: BlockFrame,
+    frames: &mut [BlockFrame],
+    inline_stack: &mut [Vec<Inline>],
+    out: &mut Vec<Block>,
+) {
     match f {
         BlockFrame::List { ordered, items } => {
             if !items.is_empty() {
-                emit_block(frames, out, Block::List { ordered, items });
+                emit_block(frames, inline_stack, out, Block::List { ordered, items });
             }
+        }
+        BlockFrame::Table {
+            mut header,
+            mut rows,
+            has_merged,
+            ..
+        } => {
+            if header.is_empty() && !rows.is_empty() {
+                header = rows.remove(0); // GFM requires a header row
+            }
+            let width = std::iter::once(header.len())
+                .chain(rows.iter().map(Vec::len))
+                .max()
+                .unwrap_or(0);
+            if width == 0 {
+                return;
+            }
+            header.resize(width, Vec::new());
+            for r in &mut rows {
+                r.resize(width, Vec::new());
+            }
+            emit_block(
+                frames,
+                inline_stack,
+                out,
+                Block::Table(kasane_ir::Table {
+                    header,
+                    rows,
+                    has_merged,
+                }),
+            );
         }
     }
 }
@@ -108,7 +212,12 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                 implicit_para = false;
                 let inls = inline_stack.pop().unwrap_or_default();
                 if !inls.is_empty() {
-                    emit_block(&mut frames, &mut blocks, Block::Para(inls));
+                    emit_block(
+                        &mut frames,
+                        &mut inline_stack,
+                        &mut blocks,
+                        Block::Para(inls),
+                    );
                 }
             }
         };
@@ -170,6 +279,46 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                     b"li" => {
                         if let Some(BlockFrame::List { items, .. }) = frames.last_mut() {
                             items.push(Vec::new());
+                        }
+                    }
+                    b"table" => frames.push(BlockFrame::Table {
+                        header: vec![],
+                        rows: vec![],
+                        has_merged: false,
+                        in_thead: false,
+                        cur_row: vec![],
+                        row_has_td: false,
+                    }),
+                    b"thead" => {
+                        if let Some(BlockFrame::Table { in_thead, .. }) = frames.last_mut() {
+                            *in_thead = true;
+                        }
+                    }
+                    b"tr" => {
+                        if let Some(BlockFrame::Table {
+                            cur_row,
+                            row_has_td,
+                            ..
+                        }) = frames.last_mut()
+                        {
+                            cur_row.clear();
+                            *row_has_td = false;
+                        }
+                    }
+                    b"th" | b"td" => {
+                        if let Some(BlockFrame::Table {
+                            has_merged,
+                            row_has_td,
+                            ..
+                        }) = frames.last_mut()
+                        {
+                            let merged = e.attributes().flatten().any(|a| {
+                                matches!(a.key.as_ref(), b"colspan" | b"rowspan")
+                                    && a.value.as_ref() != b"1"
+                            });
+                            *has_merged |= merged;
+                            *row_has_td |= e.local_name().as_ref() == b"td";
+                            inline_stack.push(vec![]);
                         }
                     }
                     _ => {}
@@ -288,6 +437,7 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                         *next_id += 1;
                         emit_block(
                             &mut frames,
+                            &mut inline_stack,
                             &mut blocks,
                             Block::Heading {
                                 level,
@@ -300,12 +450,58 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                         let inls = inline_stack.pop().unwrap_or_default();
                         cur_block = None;
                         if !inls.is_empty() {
-                            emit_block(&mut frames, &mut blocks, Block::Para(inls));
+                            emit_block(
+                                &mut frames,
+                                &mut inline_stack,
+                                &mut blocks,
+                                Block::Para(inls),
+                            );
                         }
                     }
                     b"ul" | b"ol" => {
                         if let Some(f) = frames.pop() {
-                            finish_frame(f, &mut frames, &mut blocks);
+                            finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
+                        }
+                    }
+                    b"thead" => {
+                        if let Some(BlockFrame::Table { in_thead, .. }) = frames.last_mut() {
+                            *in_thead = false;
+                        }
+                    }
+                    b"th" | b"td" => {
+                        if matches!(frames.last(), Some(BlockFrame::Table { .. })) {
+                            let cell = inline_stack.pop().unwrap_or_default();
+                            if let Some(BlockFrame::Table { cur_row, .. }) = frames.last_mut() {
+                                cur_row.push(cell);
+                            }
+                        }
+                    }
+                    b"tr" => {
+                        if let Some(BlockFrame::Table {
+                            header,
+                            rows,
+                            in_thead,
+                            cur_row,
+                            row_has_td,
+                            ..
+                        }) = frames.last_mut()
+                        {
+                            let row = std::mem::take(cur_row);
+                            if row.is_empty() {
+                            } else if header.is_empty()
+                                && rows.is_empty()
+                                && (*in_thead || !*row_has_td)
+                            {
+                                *header = row; // thead row, or an all-<th> first row
+                            } else {
+                                rows.push(row);
+                            }
+                        }
+                    }
+                    b"table" => {
+                        if matches!(frames.last(), Some(BlockFrame::Table { .. })) {
+                            let f = frames.pop().expect("checked");
+                            finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
                     }
                     _ => {}
@@ -321,7 +517,7 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                     close_implicit!();
                 }
                 while let Some(f) = frames.pop() {
-                    finish_frame(f, &mut frames, &mut blocks);
+                    finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                 }
                 break;
             }
@@ -1095,5 +1291,94 @@ mod tests {
             Inline::Emph(x) => assert_eq!(text_of(x), "x"),
             other => panic!("expected Emph, got {other:?}"),
         }
+    }
+
+    // ---- Tables ----
+
+    #[test]
+    fn parses_table_with_thead() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><table><thead><tr><th>H1</th><th>H2</th></tr></thead>\
+             <tbody><tr><td>a</td><td><em>b</em></td></tr></tbody></table></body>",
+            &mut id,
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!("expected Table")
+        };
+        assert!(!t.has_merged);
+        assert_eq!(text_of(&t.header[0]), "H1");
+        assert_eq!(text_of(&t.header[1]), "H2");
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(text_of(&t.rows[0][0]), "a");
+        assert!(matches!(&t.rows[0][1][0], Inline::Emph(_)));
+    }
+
+    #[test]
+    fn th_only_first_row_without_thead_becomes_header() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><table><tr><th>H</th></tr><tr><td>v</td></tr></table></body>",
+            &mut id,
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(text_of(&t.header[0]), "H");
+        assert_eq!(t.rows.len(), 1);
+    }
+
+    #[test]
+    fn headerless_table_promotes_first_row() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><table><tr><td>a</td></tr><tr><td>b</td></tr></table></body>",
+            &mut id,
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(text_of(&t.header[0]), "a"); // GFM requires a header row
+        assert_eq!(t.rows.len(), 1);
+    }
+
+    #[test]
+    fn colspan_sets_merged_flag() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table></body>",
+            &mut id,
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!()
+        };
+        assert!(t.has_merged);
+    }
+
+    #[test]
+    fn short_row_is_padded_to_table_width() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><table><tr><th>A</th><th>B</th></tr><tr><td>only</td></tr></table></body>",
+            &mut id,
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(t.rows[0].len(), 2, "short row padded with an empty cell");
+        assert!(t.rows[0][1].is_empty());
+    }
+
+    #[test]
+    fn paragraph_inside_cell_flattens_to_cell_inlines() {
+        let mut id = 0;
+        let blocks = xhtml_to_blocks(
+            "<body><table><tr><td><p>x</p><p>y</p></td></tr></table></body>",
+            &mut id,
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(text_of(&t.header[0]), "x y"); // promoted headerless row; paras space-joined
     }
 }
