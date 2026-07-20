@@ -11,5 +11,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 thiserror = "1"
 
+[dev-dependencies]
+kasane-core = { path = "../kasane-core" }
+kasane-writer = { path = "../kasane-writer" }
+tempfile = "3"
+
 [lints]
 workspace = true
