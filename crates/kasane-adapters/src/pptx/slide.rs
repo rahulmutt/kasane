@@ -180,9 +180,22 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                     .unwrap_or_default();
                 if !s.is_empty() {
                     if in_cell {
-                        cur_cell.push(styled(s, &fmt));
+                        crate::xmltext::push_inline(&mut cur_cell, styled(s, &fmt));
                     } else if let Some(p) = cur_para.as_mut() {
-                        p.inlines.push(styled(s, &fmt));
+                        crate::xmltext::push_inline(&mut p.inlines, styled(s, &fmt));
+                    }
+                }
+            }
+            // quick-xml 0.41 emits entity/character references in text content as
+            // their own event instead of folding them into Event::Text. Same
+            // in_run guard, same styling and destination as Event::Text above.
+            Ok(Event::GeneralRef(r)) if in_run => {
+                let s = crate::xmltext::resolve_general_ref(&r);
+                if !s.is_empty() {
+                    if in_cell {
+                        crate::xmltext::push_inline(&mut cur_cell, styled(s, &fmt));
+                    } else if let Some(p) = cur_para.as_mut() {
+                        crate::xmltext::push_inline(&mut p.inlines, styled(s, &fmt));
                     }
                 }
             }
@@ -395,6 +408,52 @@ mod tests {
             .expect("a paragraph");
         assert_eq!(text_of(para), "plain bold");
         assert!(para.iter().any(|i| matches!(i, Inline::Strong(_))));
+    }
+
+    #[test]
+    fn unescapes_run_text_entities() {
+        // Exercises the decode() + quick_xml::escape::unescape chain that
+        // replaced t.unescape() in the 0.41 migration: an entity in <a:t>
+        // must come out decoded, not literal. Existing tests only cover
+        // plain runs, never the unescape half.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+            <p:txBody><a:p><a:r><a:t>x &amp; y</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "x & y");
+    }
+
+    #[test]
+    fn resolves_numeric_and_boundary_references_in_runs_without_fragmenting() {
+        // Numeric character references and references at the very start/end of
+        // a run: quick-xml 0.41 emits each as its own GeneralRef event, so a
+        // leading one arrives with no preceding Text and a trailing one with
+        // no following Text.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+            <p:txBody><a:p><a:r><a:t>&amp;caf&#233;&#xE9;&gt;</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "&caféé>");
+        // The four fragments coalesce back into the single text node 0.36 built.
+        assert_eq!(para.len(), 1);
     }
 
     #[test]

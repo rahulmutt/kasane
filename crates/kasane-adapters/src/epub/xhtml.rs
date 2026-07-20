@@ -16,7 +16,7 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
     macro_rules! push_text {
         ($t:expr) => {
             if let Some(top) = inline_stack.last_mut() {
-                top.push(Inline::Text($t));
+                crate::xmltext::push_inline(top, Inline::Text($t));
             }
         };
     }
@@ -51,6 +51,18 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
                     .and_then(|d| quick_xml::escape::unescape(&d).ok().map(|s| s.into_owned()))
                     .unwrap_or_default();
                 if !s.trim().is_empty() && !inline_stack.is_empty() {
+                    push_text!(s);
+                }
+            }
+            // quick-xml 0.41 emits entity/character references in text content as
+            // their own event instead of folding them into Event::Text.
+            Ok(Event::GeneralRef(r)) => {
+                let s = crate::xmltext::resolve_general_ref(&r);
+                // No whitespace guard here, unlike Event::Text. That guard drops
+                // the indentation between tags, which is markup, not content. A
+                // reference is always authored deliberately, so `&#160;` or
+                // `&#32;` is content and must survive.
+                if !s.is_empty() && !inline_stack.is_empty() {
                     push_text!(s);
                 }
             }
@@ -110,4 +122,73 @@ pub fn xhtml_to_blocks(xml: &str, next_id: &mut u32) -> Vec<Block> {
         buf.clear();
     }
     blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_of(inls: &[Inline]) -> String {
+        inls.iter()
+            .map(|i| match i {
+                Inline::Text(t) => t.clone(),
+                _ => String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unescapes_paragraph_text_entities() {
+        // Exercises the decode() + quick_xml::escape::unescape chain that
+        // replaced t.unescape() in the 0.41 migration: an entity in <p> text
+        // must come out decoded, not literal.
+        let xml = "<p>a &lt; b</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "a < b");
+    }
+
+    #[test]
+    fn resolves_numeric_and_boundary_references_without_fragmenting() {
+        // A reference at the leading and trailing edge of the text, plus decimal
+        // and hex character references. Under quick-xml 0.41 the leading `&lt;`
+        // is the paragraph's first event, arriving before any Event::Text.
+        let xml = "<p>&lt;caf&#233;&#xE9;&gt;</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "<caféé>");
+        // The four fragments coalesce back into the single text node 0.36 built.
+        assert_eq!(para.len(), 1);
+    }
+
+    #[test]
+    fn keeps_unresolvable_entity_as_source_text() {
+        // &nbsp; has no XML predefined mapping. Preserving the reference is
+        // lossless; the pre-fix behavior dropped it entirely.
+        let xml = "<p>a&nbsp;b</p>";
+        let mut next_id = 0u32;
+        let blocks = xhtml_to_blocks(xml, &mut next_id);
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "a&nbsp;b");
+    }
 }

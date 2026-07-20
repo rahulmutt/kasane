@@ -47,8 +47,11 @@ pub(crate) fn attr_local(e: &quick_xml::events::BytesStart, local: &[u8]) -> Opt
         .map(unescape_attr)
 }
 
-/// Unescapes an attribute's XML entities (e.g. `&amp;` -> `&`). Falls back to
-/// the raw lossy-UTF8 value if unescaping fails, so malformed/untrusted input
+/// Unescapes an attribute's XML entities (e.g. `&amp;` -> `&`) and normalizes
+/// its whitespace per the XML attribute-value normalization spec: a literal
+/// tab, CR, LF, or CRLF becomes a single space, while whitespace introduced
+/// via a character reference (e.g. `&#9;`) is left intact. Falls back to the
+/// raw lossy-UTF8 value if unescaping fails, so malformed/untrusted input
 /// degrades gracefully instead of panicking or aborting the parse.
 pub(crate) fn unescape_attr(a: quick_xml::events::attributes::Attribute) -> String {
     a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
@@ -192,6 +195,29 @@ mod tests {
         let rels = parse_rels(xml);
         assert_eq!(rels.len(), 1);
         assert_eq!(rels[0].target, "page.html?a=1&b=2");
+    }
+
+    #[test]
+    fn attribute_whitespace_normalized_but_char_refs_preserved() {
+        // 0.41's normalized_value() (replacing 0.36's unescape_value()) folds
+        // a literal tab/CR/LF in an attribute value down to a single space
+        // per the XML spec, but a character reference like `&#9;` names an
+        // exact codepoint and must survive untouched.
+        let xml = "<Relationships>\n\
+          <Relationship Id=\"rId1\" Type=\"http://x/y\" Target=\"a\tb\" TargetMode=\"External\"/>\n\
+          <Relationship Id=\"rId2\" Type=\"http://x/y\" Target=\"a&#9;b\" TargetMode=\"External\"/>\n\
+        </Relationships>";
+        let rels = parse_rels(xml);
+        let literal = rels.iter().find(|r| r.id == "rId1").unwrap();
+        assert_eq!(
+            literal.target, "a b",
+            "literal tab must normalize to a space"
+        );
+        let char_ref = rels.iter().find(|r| r.id == "rId2").unwrap();
+        assert_eq!(
+            char_ref.target, "a\tb",
+            "character reference must be preserved, not normalized"
+        );
     }
 
     #[test]
