@@ -1,7 +1,9 @@
 /// Insert `<a id="{prefix}{offset}"></a>` markers into `raw` at each byte
 /// offset. Marker ids embed the ORIGINAL offset (links carry the same number,
-/// so ids and hrefs meet without a side table). Performs single-pass rebuild
-/// to avoid quadratic cost: O(N + len(raw)) where N = distinct offsets.
+/// so ids and hrefs meet without a side table). Complexity: O(N + len(raw))
+/// where N = distinct offsets. Achieves this via: (1) single-pass rebuild,
+/// (2) shared monotone cursor for forward scan to next `<`, (3) per-digit
+/// memoization for heading close-tag detection.
 pub(crate) fn splice_markers(raw: &mut Vec<u8>, offsets: &[u64], prefix: &str) {
     let mut offs: Vec<u64> = offsets.to_vec();
     offs.sort_unstable();
@@ -9,23 +11,43 @@ pub(crate) fn splice_markers(raw: &mut Vec<u8>, offsets: &[u64], prefix: &str) {
 
     // Compute insertion points for each offset (snap-forward + after_heading logic).
     // Collect as (insertion_point, original_offset) pairs sorted ascending by point.
-    let mut insertions: Vec<(usize, u64)> = offs
-        .iter()
-        .map(|&o| {
-            let start = usize::try_from(o).unwrap_or(raw.len()).min(raw.len());
-            let lt = raw[start..]
+    // Use shared monotone cursor to avoid rescanning tag-free spans.
+    let mut insertions: Vec<(usize, u64)> = Vec::with_capacity(offs.len());
+    let mut prev_lt: Option<usize> = None;
+    let mut heading_memo: [Option<(usize, usize)>; 6] = [None; 6];
+
+    for &o in &offs {
+        let start = usize::try_from(o).unwrap_or(raw.len()).min(raw.len());
+        // Reuse previous scan result if start <= last found `<`, else continue scanning.
+        let lt = if let Some(plt) = prev_lt {
+            if start <= plt {
+                // Offset is before the < we found last time, reuse it
+                plt
+            } else {
+                // Offset is past the < we found last time, scan from start
+                raw[start..]
+                    .iter()
+                    .position(|&b| b == b'<')
+                    .map(|p| start + p)
+                    .unwrap_or(raw.len())
+            }
+        } else {
+            // First iteration, scan normally
+            raw[start..]
                 .iter()
                 .position(|&b| b == b'<')
                 .map(|p| start + p)
-                .unwrap_or(raw.len());
-            let at = after_heading(raw, lt).unwrap_or(lt);
-            (at, o)
-        })
-        .collect();
+                .unwrap_or(raw.len())
+        };
+        prev_lt = Some(lt);
+        let at = after_heading_with_memo(raw, lt, &mut heading_memo).unwrap_or(lt);
+        insertions.push((at, o));
+    }
     insertions.sort_unstable_by_key(|&(point, _)| point);
 
     // Single-pass rebuild: copy spans from raw, emit markers between them.
-    let mut output = Vec::new();
+    let estimate = raw.len() + (insertions.len() * 32);
+    let mut output = Vec::with_capacity(estimate);
     let mut pos = 0;
     for &(at, o) in &insertions {
         if at > pos {
@@ -44,21 +66,44 @@ pub(crate) fn splice_markers(raw: &mut Vec<u8>, offsets: &[u64], prefix: &str) {
 // If raw[lt..] opens <h1>..<h6>, return the position just after its matching
 // closing tag. xhtml_to_blocks assigns a heading's BlockId at its End event
 // and maps other ids to the nearest PRECEDING heading, so only a marker
-// placed after </hN> resolves to that heading.
-fn after_heading(raw: &[u8], lt: usize) -> Option<usize> {
+// placed after </hN> resolves to that heading. Memoizes per-digit close-tag
+// positions to avoid rescanning in nested heading chains.
+fn after_heading_with_memo(
+    raw: &[u8],
+    lt: usize,
+    memo: &mut [Option<(usize, usize)>; 6],
+) -> Option<usize> {
     let d = *raw.get(lt + 2)?;
     if raw.get(lt + 1) != Some(&b'h') || !(b'1'..=b'6').contains(&d) {
         return None;
     }
+    let digit_idx = (d - b'1') as usize;
     let close: [u8; 4] = [b'<', b'/', b'h', d];
-    let cpos = raw[lt..]
+
+    // Check memo: if memoized close position >= current lt, reuse it.
+    if let Some((memoized_close, _)) = memo[digit_idx] {
+        if memoized_close >= lt {
+            return raw[memoized_close..]
+                .iter()
+                .position(|&b| b == b'>')
+                .map(|p| memoized_close + p + 1);
+        }
+    }
+
+    // Scan for close tag starting from where we left off or from lt.
+    let scan_from = memo[digit_idx].map(|(_, end)| end).unwrap_or(lt);
+    let cpos = raw[scan_from..]
         .windows(4)
         .position(|w| w == close)
-        .map(|p| lt + p)?;
-    raw[cpos..]
+        .map(|p| scan_from + p)?;
+
+    let result = raw[cpos..]
         .iter()
         .position(|&b| b == b'>')
-        .map(|p| cpos + p + 1)
+        .map(|p| cpos + p + 1)?;
+
+    memo[digit_idx] = Some((cpos, cpos + 4));
+    Some(result)
 }
 
 #[cfg(test)]
@@ -137,5 +182,60 @@ mod tests {
         let output = String::from_utf8(v).unwrap();
         let marker_count = output.matches("<a id=\"kasane-fp-").count();
         assert_eq!(marker_count, count);
+    }
+
+    #[test]
+    fn large_tag_free_span_with_many_offsets_avoids_quadratic_rescan() {
+        // Adversarial: ~100KB of plain text (no tags) followed by one tag.
+        // 10_000 distinct offsets all inside the text. Without optimization,
+        // each would rescan up to the trailing tag.
+        let mut buffer = String::new();
+        for _ in 0..100_000 {
+            buffer.push('a');
+        }
+        buffer.push_str("</p>");
+        let mut v = buffer.as_bytes().to_vec();
+        let initial_len = v.len();
+
+        // 10_000 distinct offsets inside the tag-free span.
+        let mut offsets: Vec<u64> = (0..10_000)
+            .map(|i| ((i * (initial_len as u64 - 4)) / 10_000).min(initial_len as u64 - 5))
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        let count = offsets.len();
+
+        splice_markers(&mut v, &offsets, "kasane-fp-");
+
+        // All markers should appear before the trailing `</p>`.
+        let output = String::from_utf8(v).unwrap();
+        let marker_count = output.matches("<a id=\"kasane-fp-").count();
+        assert_eq!(marker_count, count);
+        assert!(output.ends_with("</p>"));
+    }
+
+    #[test]
+    fn nested_same_digit_headings_avoids_quadratic_close_scan() {
+        // Adversarial: deeply nested <h1> tags with an offset at each opening.
+        // Without memo per digit, each close-tag scan would run to the far </h1>.
+        let mut buffer = String::new();
+        let depth = 5_000;
+        for _ in 0..depth {
+            buffer.push_str("<h1>");
+        }
+        for _ in 0..depth {
+            buffer.push_str("</h1>");
+        }
+        let mut v = buffer.as_bytes().to_vec();
+
+        // Offset at each <h1> opening.
+        let offsets: Vec<u64> = (0..depth).map(|i| (i * 4) as u64).collect();
+
+        splice_markers(&mut v, &offsets, "kasane-fp-");
+
+        // Should produce exactly `depth` markers, all positioned after their </h1>.
+        let output = String::from_utf8(v).unwrap();
+        let marker_count = output.matches("<a id=\"kasane-fp-").count();
+        assert_eq!(marker_count, depth);
     }
 }
