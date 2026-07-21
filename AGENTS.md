@@ -3,7 +3,7 @@
 Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> Markdown tree.
 
 - `crates/kasane-ir`      Intermediate representation types. Depends on nothing.
-- `crates/kasane-adapters` Format detection + parsers (EPUB, PPTX). Untrusted-input boundary; see `guard.rs` and `ziputil.rs` (every guarded zip read goes through it).
+- `crates/kasane-adapters` Format detection + parsers (EPUB, PPTX, MOBI/AZW3). Untrusted-input boundary; see `guard.rs` and `ziputil.rs` (every guarded zip read goes through it). The MOBI/AZW3 adapter (`mobi/`) normalizes HTML via html5ever and reuses the EPUB XHTML parser; fixtures are hand-built by `tests/fixtures/{mobi,azw3}/make_*.py`.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing.
 - `crates/kasane-cli`     `kasane` binary; wires the pipeline; owns exit codes.

@@ -101,3 +101,209 @@ fn converts_rich_epub_with_full_fidelity() {
         "link target {target} does not exist on disk"
     );
 }
+
+fn read_all_md(out_dir: &std::path::Path) -> String {
+    let mut all = String::new();
+    let mut stack = vec![out_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                all.push_str(&std::fs::read_to_string(&p).unwrap());
+            }
+        }
+    }
+    all
+}
+
+fn read_all_md_with_files(
+    out_dir: &std::path::Path,
+) -> (String, Vec<(std::path::PathBuf, String)>) {
+    let mut all = String::new();
+    let mut files: Vec<(std::path::PathBuf, String)> = vec![];
+    let mut stack = vec![out_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                let s = std::fs::read_to_string(&p).unwrap();
+                all.push_str(&s);
+                files.push((p, s));
+            }
+        }
+    }
+    (all, files)
+}
+
+#[test]
+fn converts_minimal_mobi_to_tree() {
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("book");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/mobi/minimal.mobi")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--min-tokens")
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
+    assert!(idx.contains("title: Minimal Mobi"));
+    let (all, files) = read_all_md_with_files(&out_dir);
+    assert!(all.contains("Chapter One") && all.contains("Chapter Two"));
+    assert!(
+        !all.contains("[]()"),
+        "stray empty anchor-marker link leaked into emitted markdown"
+    );
+    assert!(all.contains("- alpha"), "bullet list missing");
+    assert!(all.contains("beta-one"), "nested list item missing");
+    assert!(
+        all.contains("![The red dot](_assets/"),
+        "figure link missing"
+    );
+    let assets: Vec<_> = std::fs::read_dir(out_dir.join("_assets"))
+        .unwrap()
+        .collect();
+    assert_eq!(assets.len(), 1, "exactly one extracted asset");
+    // Verify asset is real PNG bytes.
+    let asset_path = assets[0].as_ref().unwrap().path();
+    let asset_bytes = std::fs::read(&asset_path).unwrap();
+    assert!(
+        asset_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "extracted asset is not a valid PNG"
+    );
+    // Filepos link resolved: the body cross-reference lives in the
+    // chapter-one file ("...see [Chapter Two](02-chapter-two.md#chapter-two)").
+    // index.md also contains the substring "[Chapter Two](" via its own
+    // auto-generated TOC entry ("- [Chapter Two](02-chapter-two.md)"), and
+    // read_dir enumerates index.md first, so it must be excluded by name to
+    // bind the assertion to the resolved cross-reference rather than the TOC.
+    let (link_file, link_src) = files
+        .iter()
+        .find(|(p, s)| {
+            p.file_name().and_then(|n| n.to_str()) != Some("index.md")
+                && s.contains("[Chapter Two](")
+        })
+        .expect("body cross-reference '[Chapter Two](' missing outside index.md");
+    let href = link_src
+        .split("[Chapter Two](")
+        .nth(1)
+        .and_then(|r| r.split(')').next())
+        .expect("link not in markdown form — was it stripped to text?");
+    let target_path = link_file
+        .parent()
+        .unwrap()
+        .join(href.split('#').next().unwrap());
+    assert!(
+        target_path.exists(),
+        "link target {href} does not exist on disk"
+    );
+    let target_content = std::fs::read_to_string(&target_path).unwrap();
+    assert!(
+        target_content.contains("Chapter Two"),
+        "resolved link target does not contain the expected heading"
+    );
+}
+
+#[test]
+fn converts_minimal_azw3_to_tree() {
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("book");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/azw3/minimal.azw3")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--min-tokens")
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
+    assert!(idx.contains("title: KF8 Minimal"));
+    let (all, files) = read_all_md_with_files(&out_dir);
+    assert!(all.contains("Part One") && all.contains("Part Two"));
+    assert!(
+        !all.contains("[]()"),
+        "stray empty anchor-marker link leaked into emitted markdown"
+    );
+    assert!(all.contains("| Name | Value |"), "GFM table header missing");
+    assert!(all.contains("```rust"), "code block language missing");
+    assert!(
+        all.contains("![The red dot](_assets/"),
+        "kindle:embed figure missing"
+    );
+    let assets: Vec<_> = std::fs::read_dir(out_dir.join("_assets"))
+        .unwrap()
+        .collect();
+    assert_eq!(assets.len(), 1, "exactly one extracted asset");
+    // Verify asset is real PNG bytes.
+    let asset_path = assets[0].as_ref().unwrap().path();
+    let asset_bytes = std::fs::read(&asset_path).unwrap();
+    assert!(
+        asset_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "extracted asset is not a valid PNG"
+    );
+    // Cross-part link resolved: the body cross-reference lives in the
+    // part-one file ("...see [Part Two](02-part-two.md#part-two)"). index.md
+    // also contains the substring "[Part Two](" via its own auto-generated
+    // TOC entry ("- [Part Two](02-part-two.md)"), and read_dir enumerates
+    // index.md first, so it must be excluded by name to bind the assertion
+    // to the resolved cross-reference rather than the TOC.
+    let (link_file, link_src) = files
+        .iter()
+        .find(|(p, s)| {
+            p.file_name().and_then(|n| n.to_str()) != Some("index.md") && s.contains("[Part Two](")
+        })
+        .expect("body cross-reference '[Part Two](' missing outside index.md");
+    let href = link_src
+        .split("[Part Two](")
+        .nth(1)
+        .and_then(|r| r.split(')').next())
+        .expect("link not in markdown form — was it stripped to text?");
+    let target_path = link_file
+        .parent()
+        .unwrap()
+        .join(href.split('#').next().unwrap());
+    assert!(
+        target_path.exists(),
+        "link target {href} does not exist on disk"
+    );
+    let target_content = std::fs::read_to_string(&target_path).unwrap();
+    assert!(
+        target_content.contains("Part Two"),
+        "resolved link target does not contain the expected heading"
+    );
+}
+
+#[test]
+fn drm_mobi_exits_2() {
+    let out = tempfile::tempdir().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/mobi/minimal-drm.mobi")
+        .arg("-o")
+        .arg(out.path().join("x"))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn lying_skel_azw3_still_converts() {
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("book");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/azw3/lying-skel.azw3")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--min-tokens")
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(status.success(), "degrade, don't die");
+    assert!(read_all_md(&out_dir).contains("Part Two"));
+}

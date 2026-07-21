@@ -2,4 +2,9 @@
 # out of scope: they are a policy discussion, and letting one block the other
 # would mean shipping no vulnerability scanning at all.
 [advisories]
-ignore = []
+ignore = [
+    # `encoding` (unmaintained, informational) via `mobi`, our only source of
+    # EXTH metadata + HUFF/CDIC decompression. mobi 0.8.0 is the latest release
+    # and depends on it non-optionally; revisit if mobi ships a release off it.
+    "RUSTSEC-2021-0153",
+]
