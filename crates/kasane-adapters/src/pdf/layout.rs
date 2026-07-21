@@ -35,7 +35,12 @@ pub fn group_lines(mut runs: Vec<TextRun>) -> Vec<Line> {
                 last.size = last.size.max(r.size);
                 last.x = last.x.min(r.x);
             }
-            _ => lines.push(Line { y: r.y, x: r.x, size: r.size, text: r.text.trim().to_string() }),
+            _ => lines.push(Line {
+                y: r.y,
+                x: r.x,
+                size: r.size,
+                text: r.text.trim().to_string(),
+            }),
         }
     }
     for l in &mut lines {
@@ -126,7 +131,12 @@ mod tests {
     use kasane_ir::{Block, Inline};
 
     fn run(x: f32, y: f32, size: f32, t: &str) -> TextRun {
-        TextRun { x, y, size, text: t.into() }
+        TextRun {
+            x,
+            y,
+            size,
+            text: t.into(),
+        }
     }
 
     fn heading_text(b: &Block) -> Option<(u8, String)> {
@@ -137,10 +147,19 @@ mod tests {
         }
     }
     fn para_text(b: &Block) -> Option<String> {
-        if let Block::Para(inlines) = b { Some(inline_text(inlines)) } else { None }
+        if let Block::Para(inlines) = b {
+            Some(inline_text(inlines))
+        } else {
+            None
+        }
     }
     fn inline_text(inls: &[Inline]) -> String {
-        inls.iter().map(|i| match i { Inline::Text(t) => t.clone(), _ => String::new() }).collect()
+        inls.iter()
+            .map(|i| match i {
+                Inline::Text(t) => t.clone(),
+                _ => String::new(),
+            })
+            .collect()
     }
 
     #[test]
@@ -165,13 +184,16 @@ mod tests {
             run(20.0, 146.0, 12.0, "Body line two."),
         ];
         let lines = group_lines(page);
-        let body = modal_body_size(&[lines.clone()]);
+        let body = modal_body_size(std::slice::from_ref(&lines));
         assert!((body - 12.0).abs() < 0.01, "body size {body}");
         let mut id = 0u32;
         let blocks = page_blocks_no_headings(&lines, &mut id, body);
         assert_eq!(heading_text(&blocks[0]), Some((1, "Big Title".into())));
         // The two 12pt lines merge into a single paragraph.
-        assert_eq!(para_text(&blocks[1]).as_deref(), Some("Body line one. Body line two."));
+        assert_eq!(
+            para_text(&blocks[1]).as_deref(),
+            Some("Body line one. Body line two.")
+        );
         assert_eq!(blocks.len(), 2);
     }
 }

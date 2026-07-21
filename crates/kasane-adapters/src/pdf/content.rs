@@ -34,7 +34,10 @@ fn translate(tx: f32, ty: f32) -> Mat {
 }
 
 fn nums(operands: &[Object]) -> Vec<f32> {
-    operands.iter().map(|o| o.as_float().unwrap_or(0.0)).collect()
+    operands
+        .iter()
+        .map(|o| o.as_float().unwrap_or(0.0))
+        .collect()
 }
 
 /// Interpret a page's content stream into positioned, Unicode-decoded text runs.
@@ -86,9 +89,19 @@ pub fn page_text_runs(doc: &Document, page_id: ObjectId) -> Vec<TextRun> {
                 if let Some(name) = op.operands.first().and_then(|o| o.as_name().ok()) {
                     encoding = encodings.get(name);
                 }
-                font_size = op.operands.get(1).and_then(|o| o.as_float().ok()).unwrap_or(font_size);
+                font_size = op
+                    .operands
+                    .get(1)
+                    .and_then(|o| o.as_float().ok())
+                    .unwrap_or(font_size);
             }
-            "TL" => leading = op.operands.first().and_then(|o| o.as_float().ok()).unwrap_or(leading),
+            "TL" => {
+                leading = op
+                    .operands
+                    .first()
+                    .and_then(|o| o.as_float().ok())
+                    .unwrap_or(leading)
+            }
             "Td" => {
                 let n = nums(&op.operands);
                 if n.len() == 2 {
@@ -147,19 +160,30 @@ pub fn page_text_runs(doc: &Document, page_id: ObjectId) -> Vec<TextRun> {
 }
 
 /// Build a TextRun from a show operator's operands at the current matrices.
-fn show(operands: &[Object], enc: &Encoding<'_>, tm: Mat, ctm: Mat, font_size: f32) -> Option<TextRun> {
+fn show(
+    operands: &[Object],
+    enc: &Encoding<'_>,
+    tm: Mat,
+    ctm: Mat,
+    font_size: f32,
+) -> Option<TextRun> {
     let mut text = String::new();
     decode_into(operands, enc, &mut text);
     if text.trim().is_empty() {
         return None;
     }
     let trm = mul(tm, ctm); // text rendering matrix (translation + scale, ignoring rise)
-    // vertical scale magnitude of the composed matrix
+                            // vertical scale magnitude of the composed matrix
     let yscale = (trm[1] * trm[1] + trm[3] * trm[3]).sqrt();
     Some(TextRun {
         x: trm[4],
         y: trm[5],
-        size: font_size * if yscale.is_finite() && yscale > 0.0 { yscale } else { 1.0 },
+        size: font_size
+            * if yscale.is_finite() && yscale > 0.0 {
+                yscale
+            } else {
+                1.0
+            },
         text,
     })
 }

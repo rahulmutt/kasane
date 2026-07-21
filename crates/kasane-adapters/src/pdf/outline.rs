@@ -24,7 +24,9 @@ pub fn outline_by_page(doc: &Document) -> BTreeMap<u32, Vec<OutlineHeading>> {
         }
         // Outline depth is 1-based in lopdf; clamp to the IR heading range 1–6.
         let level = entry.level.clamp(1, 6) as u8;
-        map.entry(page).or_default().push(OutlineHeading { level, title });
+        map.entry(page)
+            .or_default()
+            .push(OutlineHeading { level, title });
     }
     map
 }
