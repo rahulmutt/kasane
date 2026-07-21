@@ -1,14 +1,14 @@
 mod detect;
 mod epub;
 mod guard;
-#[allow(dead_code)]
-mod mobi; // removed in the wiring task
+mod mobi;
 mod pptx;
 mod xmltext;
 mod ziputil;
 
 pub use detect::{detect, Format};
 pub use epub::EpubAdapter;
+pub use mobi::MobiAdapter;
 pub use pptx::PptxAdapter;
 
 use kasane_ir::{AssetBag, Document};
@@ -35,6 +35,7 @@ pub fn adapter_for(fmt: Format) -> Result<Box<dyn Adapter>, ParseError> {
     match fmt {
         Format::Epub => Ok(Box::new(EpubAdapter)),
         Format::Pptx => Ok(Box::new(PptxAdapter)),
+        Format::Mobi | Format::Azw3 => Ok(Box::new(MobiAdapter)),
         _ => Err(ParseError::Unsupported), // other formats land in Plan 2
     }
 }

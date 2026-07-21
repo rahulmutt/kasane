@@ -41,6 +41,8 @@ impl<'a> PalmDb<'a> {
         Ok(Self { bytes, offsets })
     }
 
+    // Not consumed yet: reserved for the record-count guard-limit Task 7 adds.
+    #[allow(dead_code)]
     pub(crate) fn num_records(&self) -> usize {
         self.offsets.len() - 1
     }
@@ -62,12 +64,18 @@ pub(crate) struct MobiHeader {
     pub text_length: u32,
     pub text_records: u16,
     pub encoding: u32, // 65001 UTF-8, 1252 WIN1252
-    pub version: u32,  // >= 8 means KF8
+    // Not read directly yet: MOBI 6 wiring only needs `kf8.is_some()`; the
+    // raw version number is reserved for the KF8 pipeline task.
+    #[allow(dead_code)]
+    pub version: u32, // >= 8 means KF8
     pub extra_flags: u16,
     pub first_image_rec: Option<u32>,
     pub kf8: Option<Kf8Indices>,
 }
 
+// Consumed by the KF8 pipeline task, which resolves `kindle:pos` links via
+// the FRAG/SKEL tables these indices point into.
+#[allow(dead_code)]
 pub(crate) struct Kf8Indices {
     pub frag_index: u32,
     pub skel_index: u32,
@@ -110,6 +118,23 @@ pub(crate) fn parse_header(rec0: &[u8]) -> Result<MobiHeader, ParseError> {
         first_image_rec: none_if_absent(be32(rec0, 0x6C)),
         kf8,
     })
+}
+
+/// The MOBI "full name" (title): offset u32@0x54, length u32@0x58,
+/// record0-relative. Length is capped: this field is attacker-controlled.
+pub(crate) fn full_name(rec0: &[u8]) -> Option<String> {
+    let off = be32(rec0, 0x54)? as usize;
+    let len = be32(rec0, 0x58)? as usize;
+    if len == 0 || len > 1024 {
+        return None;
+    }
+    let raw = rec0.get(off..off.checked_add(len)?)?;
+    let s = String::from_utf8_lossy(raw).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 // Backward base-128 varint at the end of `rec`: 7 data bits per byte,

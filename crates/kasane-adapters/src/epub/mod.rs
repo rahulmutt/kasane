@@ -135,7 +135,7 @@ impl Adapter for EpubAdapter {
 }
 
 // Figures can sit inside lists/footnotes, so walk recursively.
-fn collect_figure_keys(b: &Block, f: &mut impl FnMut(&str)) {
+pub(crate) fn collect_figure_keys(b: &Block, f: &mut impl FnMut(&str)) {
     match b {
         Block::Figure { image, .. } => f(&image.key),
         Block::List { items, .. } => {
@@ -154,7 +154,7 @@ fn collect_figure_keys(b: &Block, f: &mut impl FnMut(&str)) {
     }
 }
 
-fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<String>) {
+pub(crate) fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<String>) {
     match b {
         Block::Figure { image, caption, .. } if failed.contains(&image.key) => {
             *b = if caption.is_empty() {
@@ -188,7 +188,7 @@ fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<Stri
 // plain text with a warning rather than routed through the core's
 // dangling-ref degradation -- see the Step 4 comment in the task brief for
 // why this is an intentional, output-identical deviation from the spec.
-fn fix_links(
+pub(crate) fn fix_links(
     nodes: &mut [Node],
     map: &std::collections::HashMap<(String, String), BlockId>,
     footnote_map: &std::collections::HashMap<(String, String), NoteId>,

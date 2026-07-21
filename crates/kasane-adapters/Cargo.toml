@@ -14,6 +14,7 @@ quick-xml = "0.41"
 thiserror = "1"
 html5ever = "0.33"
 markup5ever_rcdom = "0.5.4-unofficial"
+mobi = "0.8"
 
 [dev-dependencies]
 kasane-core.workspace = true
