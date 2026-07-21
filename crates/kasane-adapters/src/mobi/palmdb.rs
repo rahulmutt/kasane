@@ -73,9 +73,8 @@ pub(crate) struct MobiHeader {
     pub kf8: Option<Kf8Indices>,
 }
 
-// Consumed by the KF8 pipeline task, which resolves `kindle:pos` links via
-// the FRAG/SKEL tables these indices point into.
-#[allow(dead_code)]
+// Consumed by the KF8 pipeline, which resolves `kindle:pos` links via
+// the FRAG/SKEL tables these indices point into (see `parse_kf8` in mod.rs).
 pub(crate) struct Kf8Indices {
     pub frag_index: u32,
     pub skel_index: u32,

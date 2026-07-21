@@ -141,7 +141,8 @@ fn parse_mobi6(
 
     let mut next_id = 0u32;
     let mut next_note = 1u32;
-    let fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
+    let mut fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
+    strip_empty_anchor_links(&mut fp.blocks);
 
     let mut anchor_map = std::collections::HashMap::new();
     for (aid, bid) in &fp.anchors {
@@ -243,7 +244,8 @@ fn parse_kf8(
         // xhtml_to_blocks parser flattens it into plain text and drops its
         // AssetRef. See unwrap_solo_images's doc comment for the full story.
         let xhtml = unwrap_solo_images(&xhtml);
-        let fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
+        let mut fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
+        strip_empty_anchor_links(&mut fp.blocks);
         for (aid, bid) in &fp.anchors {
             anchor_map.insert((part.name.clone(), aid.clone()), *bid);
         }
@@ -321,6 +323,67 @@ fn unwrap_solo_images(xhtml: &str) -> String {
         rest = body;
     }
     out
+}
+
+/// `splice::splice_markers` inserts bare `<a id="kasane-fp-N"></a>` /
+/// `<a id="kasane-kp-N"></a>` anchor markers so filepos/kindle:pos targets
+/// land in `fp.anchors`. The shared `epub::xhtml::xhtml_to_blocks` parser
+/// has no way to distinguish those synthetic markers from a real (if
+/// pointless) empty anchor tag, so it also emits each one as an
+/// `Inline::Link { target: External(""), inlines: [] }` -- which the
+/// writer renders as a bare `[]()`. That's loss-free to drop: the anchor
+/// id the marker exists for is already captured in `fp.anchors`, not in
+/// the inline itself. Recurses through every nested block/inline shape
+/// that can carry inlines (list items, table cells, figure captions,
+/// footnote bodies, emphasis/strong/link nesting) rather than
+/// special-casing the top-level-or-after-heading positions the splice
+/// actually uses, since that's cheap and future-proofs against the
+/// marker position changing.
+fn strip_empty_anchor_links(blocks: &mut Vec<Block>) {
+    for block in blocks.iter_mut() {
+        match block {
+            Block::Heading { inlines, .. } | Block::Para(inlines) => {
+                strip_empty_anchor_links_in_inlines(inlines);
+            }
+            Block::List { items, .. } => {
+                for item in items.iter_mut() {
+                    strip_empty_anchor_links(item);
+                }
+            }
+            Block::Table(t) => {
+                for cell in t.header.iter_mut() {
+                    strip_empty_anchor_links_in_inlines(cell);
+                }
+                for row in t.rows.iter_mut() {
+                    for cell in row.iter_mut() {
+                        strip_empty_anchor_links_in_inlines(cell);
+                    }
+                }
+            }
+            Block::Figure { caption, .. } => strip_empty_anchor_links_in_inlines(caption),
+            Block::Footnote { blocks, .. } => strip_empty_anchor_links(blocks),
+            Block::CodeBlock { .. } | Block::MathBlock(_) | Block::Raw { .. } => {}
+        }
+    }
+    // A paragraph whose only content was the marker link is now empty;
+    // drop it rather than emit a blank block.
+    blocks.retain(|b| !matches!(b, Block::Para(inls) if inls.is_empty()));
+}
+
+fn strip_empty_anchor_links_in_inlines(inlines: &mut Vec<Inline>) {
+    for inline in inlines.iter_mut() {
+        match inline {
+            Inline::Emph(x) | Inline::Strong(x) => strip_empty_anchor_links_in_inlines(x),
+            Inline::Link { inlines: x, .. } => strip_empty_anchor_links_in_inlines(x),
+            Inline::Text(_) | Inline::Code(_) | Inline::Math(_) | Inline::FootnoteRef(_) => {}
+        }
+    }
+    inlines.retain(|i| {
+        !matches!(
+            i,
+            Inline::Link { target: RefTarget::External(t), inlines } if t.is_empty() && inlines.is_empty()
+        )
+    });
 }
 
 fn parse_digits(s: &str) -> Option<u64> {
@@ -661,5 +724,61 @@ mod tests {
         assert!(doc.nodes.iter().any(
             |n| matches!(&n.block, Block::Heading { inlines, .. } if text_of(inlines) == "Part Two")
         ));
+    }
+
+    // An empty-text, empty-target `Inline::Link` is exactly what the shared
+    // XHTML parser emits for a bare `<a id="..."></a>` anchor marker -- the
+    // writer renders it as a stray `[]()`. The anchor id itself is captured
+    // separately in `fp.anchors`, so no such link should ever survive into
+    // the emitted document. Walks every nested shape that can carry inlines.
+    fn any_empty_anchor_link_in_inlines(inls: &[Inline]) -> bool {
+        inls.iter().any(|i| match i {
+            Inline::Link { target, inlines } => {
+                (matches!(target, RefTarget::External(t) if t.is_empty()) && inlines.is_empty())
+                    || any_empty_anchor_link_in_inlines(inlines)
+            }
+            Inline::Emph(x) | Inline::Strong(x) => any_empty_anchor_link_in_inlines(x),
+            Inline::Text(_) | Inline::Code(_) | Inline::Math(_) | Inline::FootnoteRef(_) => false,
+        })
+    }
+
+    fn any_empty_anchor_link_in_blocks(blocks: &[Block]) -> bool {
+        blocks.iter().any(|b| match b {
+            Block::Heading { inlines, .. } | Block::Para(inlines) => {
+                any_empty_anchor_link_in_inlines(inlines)
+            }
+            Block::List { items, .. } => items.iter().any(|i| any_empty_anchor_link_in_blocks(i)),
+            Block::Table(t) => {
+                t.header.iter().any(|c| any_empty_anchor_link_in_inlines(c))
+                    || t.rows
+                        .iter()
+                        .any(|r| r.iter().any(|c| any_empty_anchor_link_in_inlines(c)))
+            }
+            Block::Figure { caption, .. } => any_empty_anchor_link_in_inlines(caption),
+            Block::Footnote { blocks, .. } => any_empty_anchor_link_in_blocks(blocks),
+            Block::CodeBlock { .. } | Block::MathBlock(_) | Block::Raw { .. } => false,
+        })
+    }
+
+    #[test]
+    fn minimal_mobi_has_no_stray_anchor_marker_links() {
+        let bytes = std::fs::read("../../tests/fixtures/mobi/minimal.mobi").unwrap();
+        let (doc, _assets) = MobiAdapter.parse(&bytes, "minimal.mobi").unwrap();
+        let blocks: Vec<Block> = doc.nodes.into_iter().map(|n| n.block).collect();
+        assert!(
+            !any_empty_anchor_link_in_blocks(&blocks),
+            "no block should contain an empty-text empty-target anchor-marker link"
+        );
+    }
+
+    #[test]
+    fn minimal_azw3_has_no_stray_anchor_marker_links() {
+        let bytes = std::fs::read("../../tests/fixtures/azw3/minimal.azw3").unwrap();
+        let (doc, _assets) = MobiAdapter.parse(&bytes, "minimal.azw3").unwrap();
+        let blocks: Vec<Block> = doc.nodes.into_iter().map(|n| n.block).collect();
+        assert!(
+            !any_empty_anchor_link_in_blocks(&blocks),
+            "no block should contain an empty-text empty-target anchor-marker link"
+        );
     }
 }

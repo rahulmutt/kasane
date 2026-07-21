@@ -156,6 +156,10 @@ fn converts_minimal_mobi_to_tree() {
     assert!(idx.contains("title: Minimal Mobi"));
     let (all, files) = read_all_md_with_files(&out_dir);
     assert!(all.contains("Chapter One") && all.contains("Chapter Two"));
+    assert!(
+        !all.contains("[]()"),
+        "stray empty anchor-marker link leaked into emitted markdown"
+    );
     assert!(all.contains("- alpha"), "bullet list missing");
     assert!(all.contains("beta-one"), "nested list item missing");
     assert!(
@@ -223,6 +227,10 @@ fn converts_minimal_azw3_to_tree() {
     assert!(idx.contains("title: KF8 Minimal"));
     let (all, files) = read_all_md_with_files(&out_dir);
     assert!(all.contains("Part One") && all.contains("Part Two"));
+    assert!(
+        !all.contains("[]()"),
+        "stray empty anchor-marker link leaked into emitted markdown"
+    );
     assert!(all.contains("| Name | Value |"), "GFM table header missing");
     assert!(all.contains("```rust"), "code block language missing");
     assert!(
