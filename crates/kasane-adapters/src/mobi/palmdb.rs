@@ -41,7 +41,7 @@ impl<'a> PalmDb<'a> {
         Ok(Self { bytes, offsets })
     }
 
-    // Not consumed yet: reserved for the record-count guard-limit Task 7 adds.
+    // Not consumed yet: kept for later tasks (INDX record iteration in the KF8 pipeline).
     #[allow(dead_code)]
     pub(crate) fn num_records(&self) -> usize {
         self.offsets.len() - 1
