@@ -6,6 +6,7 @@ mod outline;
 
 use crate::{Adapter, ParseError};
 use content::page_text_runs;
+use image::extract_page_images;
 use kasane_ir::*;
 use layout::{group_lines, modal_body_size, page_blocks_no_headings, Line};
 use outline::outline_by_page;
@@ -21,7 +22,15 @@ impl Adapter for PdfAdapter {
         // First pass: group each page's text into lines (needed for the doc-wide body size).
         let page_lines: Vec<(u32, Line0)> = page_list
             .iter()
-            .map(|&(num, id)| (num, Line0 { id, lines: group_lines(page_text_runs(&pdf, id)) }))
+            .map(|&(num, id)| {
+                (
+                    num,
+                    Line0 {
+                        id,
+                        lines: group_lines(page_text_runs(&pdf, id)),
+                    },
+                )
+            })
             .collect();
         let all_lines: Vec<Vec<Line>> = page_lines.iter().map(|(_, p)| p.lines.clone()).collect();
         let body_size = modal_body_size(&all_lines);
@@ -29,11 +38,14 @@ impl Adapter for PdfAdapter {
 
         let mut nodes = Vec::new();
         let mut next_id = 0u32;
+        let mut assets = AssetBag::default();
 
         for (num, page) in &page_lines {
-            let prov = Provenance { source_pages: Some((*num, *num)), source_href: None };
+            let prov = Provenance {
+                source_pages: Some((*num, *num)),
+                source_href: None,
+            };
 
-            // Outline headings for this page come first, at page granularity.
             if let Some(hs) = outline.get(num) {
                 for h in hs {
                     let id = BlockId(next_id);
@@ -49,17 +61,50 @@ impl Adapter for PdfAdapter {
                 }
             }
 
-            // Body blocks. Suppress the font-size heading fallback when the
-            // document has a real outline (avoid double headings).
             let effective_body = if has_outline { f32::MAX } else { body_size };
-            let blocks = page_blocks_no_headings(&page.lines, &mut next_id, effective_body);
-            if blocks.is_empty() && !outline.contains_key(num) {
-                // Nothing extracted for this page yet (may be image-only; Task 8
-                // adds figures/scanned notes). Keep the page represented.
-                nodes.push(Node { block: Block::Raw { note: raw_empty_note(*num) }, prov: prov.clone() });
+            let text_blocks = page_blocks_no_headings(&page.lines, &mut next_id, effective_body);
+            let has_text = !text_blocks.is_empty();
+            for b in text_blocks {
+                nodes.push(Node {
+                    block: b,
+                    prov: prov.clone(),
+                });
             }
-            for b in blocks {
-                nodes.push(Node { block: b, prov: prov.clone() });
+
+            // Images, and a scanned-page note for text-less image pages.
+            let imgs = extract_page_images(&pdf, page.id, &mut assets);
+            for f in imgs.figures {
+                nodes.push(Node {
+                    block: f,
+                    prov: prov.clone(),
+                });
+            }
+            if imgs.had_image && !has_text {
+                nodes.push(Node {
+                    block: Block::Raw {
+                        note: "scanned page: no text layer; OCR not enabled".into(),
+                    },
+                    prov: prov.clone(),
+                });
+            }
+            for filter in imgs.skipped {
+                nodes.push(Node {
+                    block: Block::Raw {
+                        note: format!("image not extracted (filter: {filter})"),
+                    },
+                    prov: prov.clone(),
+                });
+            }
+
+            // Fully empty page (no heading, text, or image) still gets represented.
+            let page_has_heading = outline.contains_key(num);
+            if !has_text && !imgs.had_image && !page_has_heading {
+                nodes.push(Node {
+                    block: Block::Raw {
+                        note: raw_empty_note(*num),
+                    },
+                    prov: prov.clone(),
+                });
             }
         }
 
@@ -73,13 +118,12 @@ impl Adapter for PdfAdapter {
             },
             nodes,
         };
-        Ok((doc_out, AssetBag::default()))
+        Ok((doc_out, assets))
     }
 }
 
 /// Per-page grouped lines plus the page object id.
 struct Line0 {
-    #[allow(dead_code)]
     id: lopdf::ObjectId,
     lines: Vec<Line>,
 }
@@ -129,25 +173,42 @@ mod tests {
         PdfAdapter.parse(&bytes, &format!("{name}.pdf")).unwrap().0
     }
     fn text(inls: &[Inline]) -> String {
-        inls.iter().map(|i| match i { Inline::Text(t) => t.clone(), _ => String::new() }).collect()
+        inls.iter()
+            .map(|i| match i {
+                Inline::Text(t) => t.clone(),
+                _ => String::new(),
+            })
+            .collect()
     }
     fn headings(doc: &Document) -> Vec<(u8, String)> {
-        doc.nodes.iter().filter_map(|n| match &n.block {
-            Block::Heading { level, inlines, .. } => Some((*level, text(inlines))),
-            _ => None,
-        }).collect()
+        doc.nodes
+            .iter()
+            .filter_map(|n| match &n.block {
+                Block::Heading { level, inlines, .. } => Some((*level, text(inlines))),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
     fn outline_headings_in_order_with_page_provenance() {
         let doc = parse("minimal");
         assert_eq!(doc.meta.source_format, "pdf");
-        assert_eq!(headings(&doc), vec![(1, "Chapter One".into()), (1, "Section Two".into())]);
+        assert_eq!(
+            headings(&doc),
+            vec![(1, "Chapter One".into()), (1, "Section Two".into())]
+        );
         // Every node carries a source page.
         assert!(doc.nodes.iter().all(|n| n.prov.source_pages.is_some()));
         // "Section Two" heading is provenanced to page 2.
-        let sec = doc.nodes.iter().find(|n| matches!(&n.block,
-            Block::Heading { inlines, .. } if text(inlines) == "Section Two")).unwrap();
+        let sec = doc
+            .nodes
+            .iter()
+            .find(|n| {
+                matches!(&n.block,
+            Block::Heading { inlines, .. } if text(inlines) == "Section Two")
+            })
+            .unwrap();
         assert_eq!(sec.prov.source_pages, Some((2, 2)));
     }
 
@@ -155,5 +216,18 @@ mod tests {
     fn font_size_fallback_when_no_outline() {
         let doc = parse("no-outline");
         assert_eq!(headings(&doc), vec![(1, "Big Title".into())]);
+    }
+
+    #[test]
+    fn scanned_page_yields_figure_and_note() {
+        let bytes = std::fs::read("../../tests/fixtures/pdf/scanned.pdf").unwrap();
+        let (doc, assets) = PdfAdapter.parse(&bytes, "scanned.pdf").unwrap();
+        assert_eq!(assets.items.len(), 1);
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Raw { note } if note.contains("scanned page"))));
     }
 }
