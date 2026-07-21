@@ -101,3 +101,110 @@ fn converts_rich_epub_with_full_fidelity() {
         "link target {target} does not exist on disk"
     );
 }
+
+fn read_all_md(out_dir: &std::path::Path) -> String {
+    let mut all = String::new();
+    let mut stack = vec![out_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                all.push_str(&std::fs::read_to_string(&p).unwrap());
+            }
+        }
+    }
+    all
+}
+
+#[test]
+fn converts_minimal_mobi_to_tree() {
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("book");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/mobi/minimal.mobi")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--min-tokens")
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
+    assert!(idx.contains("title: Minimal Mobi"));
+    let all = read_all_md(&out_dir);
+    assert!(all.contains("Chapter One") && all.contains("Chapter Two"));
+    assert!(all.contains("- alpha"), "bullet list missing");
+    assert!(all.contains("beta-one"), "nested list item missing");
+    assert!(
+        all.contains("![The red dot](_assets/"),
+        "figure link missing"
+    );
+    assert!(
+        std::fs::read_dir(out_dir.join("_assets")).unwrap().count() == 1,
+        "extracted asset missing"
+    );
+    // the filepos link rendered as a relative markdown link, not raw text
+    assert!(
+        all.contains("](") && all.contains("chapter-two"),
+        "resolved link missing"
+    );
+}
+
+#[test]
+fn converts_minimal_azw3_to_tree() {
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("book");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/azw3/minimal.azw3")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--min-tokens")
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
+    assert!(idx.contains("title: KF8 Minimal"));
+    let all = read_all_md(&out_dir);
+    assert!(all.contains("Part One") && all.contains("Part Two"));
+    assert!(all.contains("| Name | Value |"), "GFM table header missing");
+    assert!(all.contains("```rust"), "code block language missing");
+    assert!(
+        all.contains("![The red dot](_assets/"),
+        "kindle:embed figure missing"
+    );
+    assert!(
+        all.contains("part-two"),
+        "cross-part link target file missing"
+    );
+}
+
+#[test]
+fn drm_mobi_exits_2() {
+    let out = tempfile::tempdir().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/mobi/minimal-drm.mobi")
+        .arg("-o")
+        .arg(out.path().join("x"))
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn lying_skel_azw3_still_converts() {
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("book");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../tests/fixtures/azw3/lying-skel.azw3")
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("--min-tokens")
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(status.success(), "degrade, don't die");
+    assert!(read_all_md(&out_dir).contains("Part Two"));
+}
