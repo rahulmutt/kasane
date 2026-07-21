@@ -2,6 +2,7 @@ mod detect;
 mod epub;
 mod guard;
 mod mobi;
+mod pdf;
 mod pptx;
 mod xmltext;
 mod ziputil;
@@ -9,6 +10,7 @@ mod ziputil;
 pub use detect::{detect, Format};
 pub use epub::EpubAdapter;
 pub use mobi::MobiAdapter;
+pub use pdf::PdfAdapter;
 pub use pptx::PptxAdapter;
 
 use kasane_ir::{AssetBag, Document};
@@ -36,7 +38,8 @@ pub fn adapter_for(fmt: Format) -> Result<Box<dyn Adapter>, ParseError> {
         Format::Epub => Ok(Box::new(EpubAdapter)),
         Format::Pptx => Ok(Box::new(PptxAdapter)),
         Format::Mobi | Format::Azw3 => Ok(Box::new(MobiAdapter)),
-        _ => Err(ParseError::Unsupported), // other formats land in Plan 2
+        Format::Pdf => Ok(Box::new(PdfAdapter)),
+        Format::Djvu => Err(ParseError::Unsupported),
     }
 }
 
@@ -108,5 +111,10 @@ mod tests {
                 }
             })
             .collect()
+    }
+    #[test]
+    fn pdf_format_has_an_adapter() {
+        // Regression: Pdf used to fall into the `_ => Unsupported` arm.
+        assert!(adapter_for(Format::Pdf).is_ok());
     }
 }
