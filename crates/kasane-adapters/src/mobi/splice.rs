@@ -91,7 +91,8 @@ fn after_heading_with_memo(
     }
 
     // Scan for close tag starting from where we left off or from lt.
-    let scan_from = memo[digit_idx].map(|(_, end)| end).unwrap_or(lt);
+    // Clamp to lt to avoid matching orphan closing tags before this heading's open.
+    let scan_from = memo[digit_idx].map(|(_, end)| end).unwrap_or(lt).max(lt);
     let cpos = raw[scan_from..]
         .windows(4)
         .position(|w| w == close)
@@ -237,5 +238,55 @@ mod tests {
         let output = String::from_utf8(v).unwrap();
         let marker_count = output.matches("<a id=\"kasane-fp-").count();
         assert_eq!(marker_count, depth);
+    }
+
+    #[test]
+    fn regression_memoized_close_scan_does_not_match_orphan_tags() {
+        // Critical regression test for Fix round 2 memoization bug.
+        // Buffer with orphan closing tag: <h1>A</h1>X</h1><h1>B</h1>
+        // When processing offset 16 (second <h1>), memoized close from first heading
+        // must not cause rescan to match the orphan </h1> at position 11.
+        // Marker for offset 16 must land after the real </h1> at position 25.
+        let input = "<h1>A</h1>X</h1><h1>B</h1>";
+        let output = splice(input, &[0, 16]);
+
+        // Marker for offset 0 should be before the text between headings.
+        // Marker for offset 16 should be after the second heading's closing tag.
+        assert!(output.contains("<h1>A</h1><a id=\"kasane-fp-0\"></a>"));
+        assert!(output.contains("</h1><a id=\"kasane-fp-16\"></a>"));
+        // Verify marker for offset 16 is NOT before the heading.
+        assert!(!output.contains("<h1><a id=\"kasane-fp-16\"></a>"));
+    }
+
+    #[test]
+    fn mixed_digit_interleaving_markers_land_after_correct_heading() {
+        // Test interleaving of h1 and h2 tags: <h1>A</h1><h2>B</h2><h1>C</h1>
+        // with offsets at each opening tag.
+        // Each marker should land after its own heading's closing tag.
+        let input = "<h1>A</h1><h2>B</h2><h1>C</h1>";
+        let output = splice(input, &[0, 10, 20]);
+
+        // Extract the positions of all markers.
+        let h1_marker_0_pos = output.find("</h1><a id=\"kasane-fp-0\"></a>");
+        let h2_marker_1_pos = output.find("</h2><a id=\"kasane-fp-10\"></a>");
+        let h1_marker_2_pos = output.find("</h1><a id=\"kasane-fp-20\"></a>");
+
+        // All markers should be found (not None).
+        assert!(
+            h1_marker_0_pos.is_some(),
+            "Marker for offset 0 not after first </h1>"
+        );
+        assert!(
+            h2_marker_1_pos.is_some(),
+            "Marker for offset 10 not after </h2>"
+        );
+        assert!(
+            h1_marker_2_pos.is_some(),
+            "Marker for offset 20 not after second </h1>"
+        );
+
+        // Verify we have exactly 3 markers.
+        let marker_count = output.matches("<a id=\"kasane-fp-").count();
+        assert_eq!(marker_count, 3);
     }
 }
