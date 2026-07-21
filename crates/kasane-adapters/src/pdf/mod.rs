@@ -5,7 +5,8 @@ mod doc; // removed in the wiring task
 mod image;
 #[allow(dead_code)]
 mod layout; // removed in the wiring task
-mod outline;
+#[allow(dead_code)]
+mod outline; // removed in the wiring task
 
 use crate::{Adapter, ParseError};
 use kasane_ir::{AssetBag, Document};
