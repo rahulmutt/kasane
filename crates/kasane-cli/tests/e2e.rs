@@ -173,25 +173,36 @@ fn converts_minimal_mobi_to_tree() {
         asset_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "extracted asset is not a valid PNG"
     );
-    // Filepos link rendered as a relative markdown link to chapter-two file.
-    // Find a file that has links and references chapter-two.
-    let has_chapter_two_link = files
+    // Filepos link resolved: the body cross-reference lives in the
+    // chapter-one file ("...see [Chapter Two](02-chapter-two.md#chapter-two)").
+    // index.md also contains the substring "[Chapter Two](" via its own
+    // auto-generated TOC entry ("- [Chapter Two](02-chapter-two.md)"), and
+    // read_dir enumerates index.md first, so it must be excluded by name to
+    // bind the assertion to the resolved cross-reference rather than the TOC.
+    let (link_file, link_src) = files
         .iter()
-        .find(|(_, s)| s.contains("](") && s.contains("chapter-two"))
-        .map(|(link_file, link_src)| {
-            // Extract all link targets from this file and verify at least one points to chapter-two.
-            let has_target = link_src.contains("chapter-two.md");
-            let target_exists = if has_target {
-                let chapter_two = link_file.parent().unwrap().join("02-chapter-two.md");
-                chapter_two.exists()
-            } else {
-                false
-            };
-            has_target && target_exists
-        });
+        .find(|(p, s)| {
+            p.file_name().and_then(|n| n.to_str()) != Some("index.md")
+                && s.contains("[Chapter Two](")
+        })
+        .expect("body cross-reference '[Chapter Two](' missing outside index.md");
+    let href = link_src
+        .split("[Chapter Two](")
+        .nth(1)
+        .and_then(|r| r.split(')').next())
+        .expect("link not in markdown form — was it stripped to text?");
+    let target_path = link_file
+        .parent()
+        .unwrap()
+        .join(href.split('#').next().unwrap());
     assert!(
-        has_chapter_two_link.unwrap_or(false),
-        "link to chapter-two file missing or invalid"
+        target_path.exists(),
+        "link target {href} does not exist on disk"
+    );
+    let target_content = std::fs::read_to_string(&target_path).unwrap();
+    assert!(
+        target_content.contains("Chapter Two"),
+        "resolved link target does not contain the expected heading"
     );
 }
 
@@ -229,25 +240,35 @@ fn converts_minimal_azw3_to_tree() {
         asset_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "extracted asset is not a valid PNG"
     );
-    // Cross-part link resolved to a real relative .md path.
-    // Find a file that has links and references part-two.
-    let has_part_two_link = files
+    // Cross-part link resolved: the body cross-reference lives in the
+    // part-one file ("...see [Part Two](02-part-two.md#part-two)"). index.md
+    // also contains the substring "[Part Two](" via its own auto-generated
+    // TOC entry ("- [Part Two](02-part-two.md)"), and read_dir enumerates
+    // index.md first, so it must be excluded by name to bind the assertion
+    // to the resolved cross-reference rather than the TOC.
+    let (link_file, link_src) = files
         .iter()
-        .find(|(_, s)| s.contains("](") && s.contains("part-two"))
-        .map(|(link_file, link_src)| {
-            // Extract all link targets from this file and verify at least one points to part-two.
-            let has_target = link_src.contains("part-two.md") || link_src.contains("02-part-two");
-            let target_exists = if has_target {
-                let part_two = link_file.parent().unwrap().join("02-part-two.md");
-                part_two.exists()
-            } else {
-                false
-            };
-            has_target && target_exists
-        });
+        .find(|(p, s)| {
+            p.file_name().and_then(|n| n.to_str()) != Some("index.md") && s.contains("[Part Two](")
+        })
+        .expect("body cross-reference '[Part Two](' missing outside index.md");
+    let href = link_src
+        .split("[Part Two](")
+        .nth(1)
+        .and_then(|r| r.split(')').next())
+        .expect("link not in markdown form — was it stripped to text?");
+    let target_path = link_file
+        .parent()
+        .unwrap()
+        .join(href.split('#').next().unwrap());
     assert!(
-        has_part_two_link.unwrap_or(false),
-        "link to part-two file missing or invalid"
+        target_path.exists(),
+        "link target {href} does not exist on disk"
+    );
+    let target_content = std::fs::read_to_string(&target_path).unwrap();
+    assert!(
+        target_content.contains("Part Two"),
+        "resolved link target does not contain the expected heading"
     );
 }
 
