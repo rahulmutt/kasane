@@ -3,7 +3,8 @@ mod content; // removed in the wiring task
 #[allow(dead_code)]
 mod doc; // removed in the wiring task
 mod image;
-mod layout;
+#[allow(dead_code)]
+mod layout; // removed in the wiring task
 mod outline;
 
 use crate::{Adapter, ParseError};
