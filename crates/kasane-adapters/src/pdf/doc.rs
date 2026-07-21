@@ -27,8 +27,49 @@ pub fn pages(doc: &Document) -> Vec<(u32, ObjectId)> {
 mod tests {
     use super::*;
 
+    use lopdf::{EncryptionState, EncryptionVersion, Permissions};
+
     fn read(name: &str) -> Vec<u8> {
         std::fs::read(format!("../../tests/fixtures/pdf/{name}.pdf")).unwrap()
+    }
+
+    fn encrypt_minimal(owner: &str, user: &str) -> Vec<u8> {
+        let mut doc = lopdf::Document::load_mem(&read("minimal")).unwrap();
+        // The fixture has no trailer /ID; lopdf's key-derivation algorithm
+        // requires one (`EncryptionError::MissingFileID` otherwise), so add one.
+        doc.trailer.set(
+            "ID",
+            lopdf::Object::Array(vec![
+                lopdf::Object::string_literal(b"0123456789ABCDEF"),
+                lopdf::Object::string_literal(b"0123456789ABCDEF"),
+            ]),
+        );
+        let version = EncryptionVersion::V1 {
+            document: &doc,
+            owner_password: owner,
+            user_password: user,
+            permissions: Permissions::all(),
+        };
+        let state = EncryptionState::try_from(version).unwrap();
+        doc.encrypt(&state).unwrap();
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn decrypts_empty_user_password() {
+        // Owner and user passwords both empty: the "permissions only" case.
+        let bytes = encrypt_minimal("", "");
+        let doc = open(&bytes).unwrap();
+        assert_eq!(pages(&doc).len(), 2);
+    }
+
+    #[test]
+    fn rejects_real_user_password() {
+        // A non-empty owner AND user password => empty-password auth must fail.
+        let bytes = encrypt_minimal("owner-secret", "user-secret");
+        assert!(matches!(open(&bytes), Err(ParseError::Encrypted)));
     }
 
     #[test]
