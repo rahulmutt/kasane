@@ -23,9 +23,18 @@ impl Adapter for MobiAdapter {
         if h.encryption != 0 {
             return Err(ParseError::Drm);
         }
+        // Bomb guard on the DECLARED size, before any decompression work.
+        if !crate::guard::check_expansion(bytes.len() as u64, h.text_length as u64) {
+            return Err(ParseError::Bomb);
+        }
         let fmt = if h.kf8.is_some() { "azw3" } else { "mobi" };
         let meta = doc_meta(bytes, rec0, source_path, fmt);
         let raw = raw_text(bytes, &db, &h)?;
+        // Belt-and-suspenders: re-check ACTUAL output (covers lying headers
+        // and the HUFF fallback, whose decompression we don't control).
+        if !crate::guard::check_expansion(bytes.len() as u64, raw.0.len() as u64) {
+            return Err(ParseError::Bomb);
+        }
         if h.kf8.is_some() {
             // Replaced by the KF8 pipeline in the KF8 task.
             return Err(ParseError::Malformed(
@@ -54,6 +63,9 @@ fn raw_text(bytes: &[u8], db: &PalmDb, h: &MobiHeader) -> Result<(Vec<u8>, bool)
                     out.extend_from_slice(body);
                 } else {
                     out.extend(palmdoc::decompress(body));
+                }
+                if out.len() as u64 > crate::guard::MAX_TOTAL_BYTES {
+                    return Err(ParseError::Bomb);
                 }
             }
             // Declared length trims zero padding in the final record.
@@ -460,5 +472,17 @@ mod tests {
             unwrap_solo_images("a<p><img src=\"1.png\"/></p>b<p><img src=\"2.png\"/></p>c"),
             "a<img src=\"1.png\"/>b<img src=\"2.png\"/>c"
         );
+    }
+
+    #[test]
+    fn lying_declared_text_length_is_a_bomb() {
+        let mut bytes = std::fs::read("../../tests/fixtures/mobi/minimal.mobi").unwrap();
+        // record 0 starts after the 78-byte header, 3 table entries, 2 pad bytes
+        let rec0 = 78 + 3 * 8 + 2;
+        bytes[rec0 + 4..rec0 + 8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(
+            MobiAdapter.parse(&bytes, "x.mobi"),
+            Err(ParseError::Bomb)
+        ));
     }
 }
