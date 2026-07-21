@@ -12,6 +12,8 @@ kasane-ir.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.41"
 thiserror = "1"
+html5ever = "0.29.1"
+markup5ever_rcdom = "0.5.0-unofficial"
 
 [dev-dependencies]
 kasane-core.workspace = true

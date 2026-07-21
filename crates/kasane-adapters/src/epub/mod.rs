@@ -1,5 +1,5 @@
 mod opf;
-mod xhtml;
+pub(crate) mod xhtml;
 
 use crate::guard::safe_entry_name;
 use crate::{Adapter, ParseError};
