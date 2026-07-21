@@ -3,14 +3,12 @@ use crate::ParseError;
 use std::collections::HashMap;
 
 /// One parsed index entry: raw name plus tag -> values.
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) struct IndexEntry {
     pub name: Vec<u8>,
     pub tags: HashMap<u8, Vec<u64>>,
 }
 
 /// Forward base-128 varint: big-endian 7-bit groups, final byte carries 0x80.
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 fn fwd_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
     let mut v: u64 = 0;
     for _ in 0..8 {
@@ -26,7 +24,6 @@ fn fwd_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
 
 /// Kindle base-32: digits then A..V, case-insensitive (used by
 /// kindle:pos fid/off and kindle:embed indexes).
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) fn base32(s: &str) -> Option<u64> {
     let mut v: u64 = 0;
     for c in s.chars() {
@@ -45,7 +42,6 @@ pub(crate) fn base32(s: &str) -> Option<u64> {
 /// the following `data-record count` records hold the entries, addressed
 /// through their IDXT offset tables. Every offset is bounds-checked; a lying
 /// table is a Malformed error for the caller to degrade on.
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) fn read_index(
     db: &super::palmdb::PalmDb,
     first: usize,
@@ -104,7 +100,6 @@ pub(crate) fn read_index(
 
 // Entry = name_len u8, name, `ctrl_count` control bytes, then forward-varint
 // values per the TAGX table (KindleUnpack's getTagMap).
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 fn parse_entry(
     rec: &[u8],
     off: usize,
@@ -150,7 +145,6 @@ fn parse_entry(
 }
 
 /// SKEL table row: tag 1 = fragment count, tag 6 = (start, length).
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) struct SkelEntry {
     pub frag_count: u64,
     pub start: u64,
@@ -160,13 +154,11 @@ pub(crate) struct SkelEntry {
 /// FRAG table row: name = decimal insert position, tag 6.1 = length.
 /// (tag 6.0 is the fragment's start, unused: fragments are consumed
 /// sequentially from the stream right after their skeleton.)
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) struct FragEntry {
     pub insert_pos: u64,
     pub len: u64,
 }
 
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) fn skel_entries(idx: &[IndexEntry]) -> Vec<SkelEntry> {
     idx.iter()
         .filter_map(|e| {
@@ -181,7 +173,6 @@ pub(crate) fn skel_entries(idx: &[IndexEntry]) -> Vec<SkelEntry> {
         .collect()
 }
 
-#[allow(dead_code)] // consumed by Task 10 (KF8 pipeline)
 pub(crate) fn frag_entries(idx: &[IndexEntry]) -> Vec<FragEntry> {
     idx.iter()
         .filter_map(|e| {

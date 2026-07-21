@@ -1,4 +1,5 @@
 pub(crate) mod indx;
+pub(crate) mod kf8;
 pub(crate) mod normalize;
 pub(crate) mod palmdb;
 pub(crate) mod palmdoc;
@@ -36,13 +37,10 @@ impl Adapter for MobiAdapter {
         if !crate::guard::check_expansion(bytes.len() as u64, raw.0.len() as u64) {
             return Err(ParseError::Bomb);
         }
-        if h.kf8.is_some() {
-            // Replaced by the KF8 pipeline in the KF8 task.
-            return Err(ParseError::Malformed(
-                "KF8/AZW3 parsing not yet wired".into(),
-            ));
+        match &h.kf8 {
+            Some(k) => parse_kf8(raw, &db, &h, k, meta),
+            None => parse_mobi6(raw, &db, &h, meta),
         }
-        parse_mobi6(raw, &db, &h, meta)
     }
 }
 
@@ -168,6 +166,115 @@ fn parse_mobi6(
     crate::epub::fix_links(&mut nodes, &anchor_map, &no_footnotes, &no_norefs);
     let assets = collect_assets(db, h, &mut nodes);
     Ok((Document { meta, nodes }, assets))
+}
+
+/// KF8/AZW3 pipeline: reassemble skeleton+fragment parts, resolve every
+/// kindle:pos href to a (part, offset) target, splice anchor markers at
+/// those exact byte offsets, then parse each part through the same
+/// xhtml_to_blocks + fix_links machinery the EPUB adapter uses for its
+/// spine. Mirrors parse_mobi6's shape, but per-part instead of whole-book.
+fn parse_kf8(
+    (raw, _already_utf8): (Vec<u8>, bool), // KF8 text is always UTF-8
+    db: &PalmDb,
+    h: &MobiHeader,
+    k: &palmdb::Kf8Indices,
+    meta: DocMeta,
+) -> Result<(Document, AssetBag), ParseError> {
+    // An unreadable index is an unreadable container (per spec); a *lying*
+    // index inside a readable one degrades per part in assemble().
+    let skels = indx::skel_entries(&indx::read_index(db, k.skel_index as usize)?);
+    let frags = indx::frag_entries(&indx::read_index(db, k.frag_index as usize)?);
+    if skels.is_empty() {
+        return Err(ParseError::Malformed("kf8: empty skeleton table".into()));
+    }
+    let mut asm = kf8::assemble(&raw, &skels, &frags);
+
+    // Resolve every kindle:pos href, then splice target markers per part.
+    // Marker ids embed the part-local offset, so hrefs rewrite to
+    // "partNNNN.xhtml#kasane-kp-{off}" and meet their markers through the
+    // ordinary (file, id) anchor map.
+    let mut per_part: Vec<Vec<u64>> = vec![vec![]; asm.parts.len()];
+    let mut href_map: std::collections::HashMap<String, String> = Default::default();
+    for href in kf8::collect_kindle_pos(&asm) {
+        if let Some((pi, off)) = kf8::resolve_kindle_pos(&href, &asm) {
+            per_part[pi].push(off as u64);
+            href_map.insert(
+                href.clone(),
+                format!("{}#kasane-kp-{off}", asm.parts[pi].name),
+            );
+        }
+    }
+    for (pi, offs) in per_part.iter().enumerate() {
+        splice::splice_markers(&mut asm.parts[pi].html, offs, "kasane-kp-");
+    }
+
+    // Per-part parse: mirrors the EPUB spine loop in epub/mod.rs.
+    let mut nodes: Vec<Node> = vec![];
+    let mut anchor_map = std::collections::HashMap::new();
+    let mut next_id = 0u32;
+    let mut next_note = 1u32;
+    for part in &asm.parts {
+        let hook = |tag: &str, attrs: &mut Vec<(String, String)>| {
+            if tag == "a" {
+                if let Some(i) = attrs.iter().position(|(kk, _)| kk == "href") {
+                    let v = attrs[i].1.clone();
+                    if v.starts_with("kindle:") {
+                        // Unresolvable kindle: URIs must not leak as external
+                        // links; a fragment that misses the anchor map strips
+                        // to plain text with a warning in fix_links.
+                        attrs[i].1 = href_map
+                            .get(&v)
+                            .cloned()
+                            .unwrap_or_else(|| "#kasane-unresolved".into());
+                    }
+                }
+            } else if tag == "img" {
+                if let Some(i) = attrs.iter().position(|(kk, _)| kk == "src") {
+                    if let Some(n) = parse_kindle_embed(&attrs[i].1) {
+                        attrs[i].1 = format!("kasane-rec-{n}");
+                    }
+                }
+            }
+        };
+        let text = String::from_utf8_lossy(&part.html).into_owned();
+        let xhtml = normalize::normalize_html(&text, &hook);
+        // Same Mobipocket/KF8-ism as parse_mobi6: a solo `<img>` inside its
+        // own `<p>` must be promoted to a standalone sibling, or the shared
+        // xhtml_to_blocks parser flattens it into plain text and drops its
+        // AssetRef. See unwrap_solo_images's doc comment for the full story.
+        let xhtml = unwrap_solo_images(&xhtml);
+        let fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
+        for (aid, bid) in &fp.anchors {
+            anchor_map.insert((part.name.clone(), aid.clone()), *bid);
+        }
+        if let Some(fh) = fp.first_heading {
+            anchor_map.insert((part.name.clone(), String::new()), fh);
+        }
+        for b in fp.blocks {
+            nodes.push(Node {
+                block: b,
+                prov: Provenance {
+                    source_pages: None,
+                    source_href: Some(part.name.clone()),
+                },
+            });
+        }
+    }
+    let no_footnotes: std::collections::HashMap<(String, String), NoteId> = Default::default();
+    let no_norefs: std::collections::HashSet<(String, String)> = Default::default();
+    crate::epub::fix_links(&mut nodes, &anchor_map, &no_footnotes, &no_norefs);
+    let assets = collect_assets(db, h, &mut nodes);
+    Ok((Document { meta, nodes }, assets))
+}
+
+/// "kindle:embed:XXXX?mime=..." -> 1-based resource number (base 32).
+fn parse_kindle_embed(src: &str) -> Option<u64> {
+    let rest = src.strip_prefix("kindle:embed:")?;
+    let idx: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    indx::base32(&idx).filter(|&n| n > 0)
 }
 
 /// Rewrites `<p ...><img .../></p>` -- a `<p>` whose entire content is
@@ -484,6 +591,75 @@ mod tests {
         assert!(matches!(
             MobiAdapter.parse(&bytes, "x.mobi"),
             Err(ParseError::Bomb)
+        ));
+    }
+
+    #[test]
+    fn minimal_azw3_full_fidelity() {
+        let bytes = std::fs::read("../../tests/fixtures/azw3/minimal.azw3").unwrap();
+        let (doc, assets) = MobiAdapter.parse(&bytes, "minimal.azw3").unwrap();
+        assert_eq!(doc.meta.title, "KF8 Minimal");
+        assert_eq!(doc.meta.source_format, "azw3");
+
+        let heads: Vec<String> = doc
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.block {
+                Block::Heading { inlines, .. } => Some(text_of(inlines)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heads, vec!["Part One", "Part Two"]);
+
+        // table with detected header row
+        assert!(doc.nodes.iter().any(|n| matches!(
+            &n.block,
+            Block::Table(t) if text_of(&t.header[0]) == "Name" && t.rows.len() == 1
+        )));
+
+        // code block with language
+        assert!(doc.nodes.iter().any(|n| matches!(
+            &n.block,
+            Block::CodeBlock { lang: Some(l), text } if l == "rust" && text.contains("fn main")
+        )));
+
+        // kindle:embed image extracted
+        assert_eq!(assets.items.len(), 1);
+        assert!(assets.items[0].bytes.starts_with(b"\x89PNG"));
+
+        // the kindle:pos link resolved to Part Two's heading, across parts
+        let ch2 = doc
+            .nodes
+            .iter()
+            .find_map(|n| match &n.block {
+                Block::Heading { id, inlines, .. } if text_of(inlines) == "Part Two" => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        let link = doc
+            .nodes
+            .iter()
+            .find_map(|n| match &n.block {
+                Block::Para(inls) => inls.iter().find_map(|i| match i {
+                    Inline::Link { target, .. } => Some(target.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("kindle:pos link must survive as a Link");
+        assert!(
+            matches!(link, RefTarget::Internal(b) if b == ch2),
+            "kindle:pos link must resolve to Part Two, got {link:?}"
+        );
+    }
+
+    #[test]
+    fn lying_skel_azw3_degrades_not_dies() {
+        let bytes = std::fs::read("../../tests/fixtures/azw3/lying-skel.azw3").unwrap();
+        let (doc, _assets) = MobiAdapter.parse(&bytes, "lying.azw3").unwrap();
+        // part 0 degraded to a Raw-ish note; part 1 still parsed fully
+        assert!(doc.nodes.iter().any(
+            |n| matches!(&n.block, Block::Heading { inlines, .. } if text_of(inlines) == "Part Two")
         ));
     }
 }
