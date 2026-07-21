@@ -1,6 +1,8 @@
 mod detect;
 mod epub;
 mod guard;
+#[allow(dead_code)]
+mod mobi; // removed in the wiring task
 mod pptx;
 mod xmltext;
 mod ziputil;
