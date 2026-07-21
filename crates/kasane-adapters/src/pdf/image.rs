@@ -151,7 +151,11 @@ fn flate_to_png(doc: &Document, stream: &lopdf::Stream) -> Result<Vec<u8>, Strin
     let raw = stream
         .decompressed_content_with_limit(MAX_TOTAL_BYTES as usize)
         .map_err(|_| "FlateDecode(decompress)".to_string())?;
-    let expected = (width as usize) * (height as usize) * color.samples();
+    let expected = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|n| n.checked_mul(color.samples() as u64))
+        .filter(|&n| n <= MAX_TOTAL_BYTES)
+        .ok_or_else(|| "FlateDecode(dims)".to_string())? as usize;
     if raw.len() < expected {
         return Err("FlateDecode(short)".to_string());
     }
@@ -208,5 +212,32 @@ mod tests {
         let (pi, assets) = extract("scanned");
         assert!(pi.had_image);
         assert_eq!(assets.items.len(), 1);
+    }
+
+    /// A corrupt/malicious PDF can declare near-u32::MAX `/Width` and
+    /// `/Height`. `width * height * samples` must not overflow (or silently
+    /// wrap) the `usize` multiply used for the short-buffer guard: it must be
+    /// rejected with an `Err`, not panic and not sail past the guard.
+    #[test]
+    fn flate_to_png_rejects_overflowing_dimensions_instead_of_panicking() {
+        let doc = Document::new();
+
+        let mut dict = lopdf::Dictionary::new();
+        dict.set("Type", "XObject");
+        dict.set("Subtype", "Image");
+        dict.set("Width", u32::MAX as i64);
+        dict.set("Height", u32::MAX as i64);
+        dict.set("BitsPerComponent", 8_i64);
+        dict.set("ColorSpace", "DeviceRGB");
+        dict.set("Filter", "FlateDecode");
+
+        // A valid (tiny) zlib stream that decompresses to zero bytes, so the
+        // decompress step succeeds and we actually reach the dimension guard
+        // rather than short-circuiting on a decompress error.
+        let content = vec![0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let stream = lopdf::Stream::new(dict, content);
+
+        let result = flate_to_png(&doc, &stream);
+        assert_eq!(result, Err("FlateDecode(dims)".to_string()));
     }
 }
