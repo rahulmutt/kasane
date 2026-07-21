@@ -1,7 +1,7 @@
 # kasane
 
-Convert documents and ebooks (EPUB today; PDF, DJVU, MOBI, AZW3, PPTX coming)
-into an AI-agent-friendly, progressively-disclosed Markdown file tree.
+Convert documents and ebooks (EPUB, PPTX, MOBI, AZW3 today; PDF and DJVU
+coming) into an AI-agent-friendly, progressively-disclosed Markdown file tree.
 
 ## Quick start
     mise install
@@ -20,9 +20,8 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Internal in-document EPUB links (`#frag` and `file.xhtml#frag`) are passed
-  through unresolved as external references, not yet turned into working
-  cross-file links. Resolving them to real block targets is deferred to
-  Plan 2's XHTML-fidelity task.
-- EPUB tables, math, figures, footnotes, and lists are not yet parsed
-  (Plan 2).
+- DRM-protected MOBI/AZW3 files are detected and rejected (exit code 2);
+  kasane never breaks DRM.
+- MathML (EPUB) and OMML (PPTX) math are not yet converted to LaTeX.
+- HUFF/CDIC-compressed MOBI books decode through the `mobi` crate; their
+  in-book `filepos` links may resolve approximately.
