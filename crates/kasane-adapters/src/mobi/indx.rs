@@ -366,4 +366,19 @@ mod tests {
         assert_eq!(base32("0W"), None); // outside alphabet
         assert_eq!(base32(""), Some(0));
     }
+
+    #[test]
+    fn azw3_fixture_indexes_round_trip() {
+        let bytes = std::fs::read("../../tests/fixtures/azw3/minimal.azw3").unwrap();
+        let db = PalmDb::parse(&bytes).unwrap();
+        let h = crate::mobi::palmdb::parse_header(db.record(0).unwrap()).unwrap();
+        let k = h.kf8.expect("fixture must be KF8");
+        let skels = skel_entries(&read_index(&db, k.skel_index as usize).unwrap());
+        let frags = frag_entries(&read_index(&db, k.frag_index as usize).unwrap());
+        assert_eq!(skels.len(), 2);
+        assert_eq!(frags.len(), 2);
+        assert_eq!(skels[0].frag_count, 1);
+        assert_eq!(skels[0].start, 0);
+        assert!(frags[0].insert_pos > 0 && frags[0].len > 0);
+    }
 }
