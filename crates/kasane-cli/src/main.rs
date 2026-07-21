@@ -9,7 +9,7 @@ use std::process::ExitCode;
     about = "Convert documents to progressive-disclosure Markdown"
 )]
 struct Args {
-    /// Input document (EPUB, PPTX supported in this build)
+    /// Input document (EPUB, PPTX, MOBI, AZW3, PDF supported in this build)
     input: PathBuf,
     /// Output root directory (default: ./<input-stem>/)
     #[arg(short, long)]
