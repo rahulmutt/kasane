@@ -118,6 +118,27 @@ fn read_all_md(out_dir: &std::path::Path) -> String {
     all
 }
 
+fn read_all_md_with_files(
+    out_dir: &std::path::Path,
+) -> (String, Vec<(std::path::PathBuf, String)>) {
+    let mut all = String::new();
+    let mut files: Vec<(std::path::PathBuf, String)> = vec![];
+    let mut stack = vec![out_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                let s = std::fs::read_to_string(&p).unwrap();
+                all.push_str(&s);
+                files.push((p, s));
+            }
+        }
+    }
+    (all, files)
+}
+
 #[test]
 fn converts_minimal_mobi_to_tree() {
     let out = tempfile::tempdir().unwrap();
@@ -133,7 +154,7 @@ fn converts_minimal_mobi_to_tree() {
     assert!(status.success());
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
     assert!(idx.contains("title: Minimal Mobi"));
-    let all = read_all_md(&out_dir);
+    let (all, files) = read_all_md_with_files(&out_dir);
     assert!(all.contains("Chapter One") && all.contains("Chapter Two"));
     assert!(all.contains("- alpha"), "bullet list missing");
     assert!(all.contains("beta-one"), "nested list item missing");
@@ -141,14 +162,36 @@ fn converts_minimal_mobi_to_tree() {
         all.contains("![The red dot](_assets/"),
         "figure link missing"
     );
+    let assets: Vec<_> = std::fs::read_dir(out_dir.join("_assets"))
+        .unwrap()
+        .collect();
+    assert_eq!(assets.len(), 1, "exactly one extracted asset");
+    // Verify asset is real PNG bytes.
+    let asset_path = assets[0].as_ref().unwrap().path();
+    let asset_bytes = std::fs::read(&asset_path).unwrap();
     assert!(
-        std::fs::read_dir(out_dir.join("_assets")).unwrap().count() == 1,
-        "extracted asset missing"
+        asset_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "extracted asset is not a valid PNG"
     );
-    // the filepos link rendered as a relative markdown link, not raw text
+    // Filepos link rendered as a relative markdown link to chapter-two file.
+    // Find a file that has links and references chapter-two.
+    let has_chapter_two_link = files
+        .iter()
+        .find(|(_, s)| s.contains("](") && s.contains("chapter-two"))
+        .map(|(link_file, link_src)| {
+            // Extract all link targets from this file and verify at least one points to chapter-two.
+            let has_target = link_src.contains("chapter-two.md");
+            let target_exists = if has_target {
+                let chapter_two = link_file.parent().unwrap().join("02-chapter-two.md");
+                chapter_two.exists()
+            } else {
+                false
+            };
+            has_target && target_exists
+        });
     assert!(
-        all.contains("](") && all.contains("chapter-two"),
-        "resolved link missing"
+        has_chapter_two_link.unwrap_or(false),
+        "link to chapter-two file missing or invalid"
     );
 }
 
@@ -167,7 +210,7 @@ fn converts_minimal_azw3_to_tree() {
     assert!(status.success());
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
     assert!(idx.contains("title: KF8 Minimal"));
-    let all = read_all_md(&out_dir);
+    let (all, files) = read_all_md_with_files(&out_dir);
     assert!(all.contains("Part One") && all.contains("Part Two"));
     assert!(all.contains("| Name | Value |"), "GFM table header missing");
     assert!(all.contains("```rust"), "code block language missing");
@@ -175,9 +218,36 @@ fn converts_minimal_azw3_to_tree() {
         all.contains("![The red dot](_assets/"),
         "kindle:embed figure missing"
     );
+    let assets: Vec<_> = std::fs::read_dir(out_dir.join("_assets"))
+        .unwrap()
+        .collect();
+    assert_eq!(assets.len(), 1, "exactly one extracted asset");
+    // Verify asset is real PNG bytes.
+    let asset_path = assets[0].as_ref().unwrap().path();
+    let asset_bytes = std::fs::read(&asset_path).unwrap();
     assert!(
-        all.contains("part-two"),
-        "cross-part link target file missing"
+        asset_bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "extracted asset is not a valid PNG"
+    );
+    // Cross-part link resolved to a real relative .md path.
+    // Find a file that has links and references part-two.
+    let has_part_two_link = files
+        .iter()
+        .find(|(_, s)| s.contains("](") && s.contains("part-two"))
+        .map(|(link_file, link_src)| {
+            // Extract all link targets from this file and verify at least one points to part-two.
+            let has_target = link_src.contains("part-two.md") || link_src.contains("02-part-two");
+            let target_exists = if has_target {
+                let part_two = link_file.parent().unwrap().join("02-part-two.md");
+                part_two.exists()
+            } else {
+                false
+            };
+            has_target && target_exists
+        });
+    assert!(
+        has_part_two_link.unwrap_or(false),
+        "link to part-two file missing or invalid"
     );
 }
 
