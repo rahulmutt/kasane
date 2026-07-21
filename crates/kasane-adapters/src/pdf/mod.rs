@@ -1,4 +1,5 @@
-mod content;
+#[allow(dead_code)]
+mod content; // removed in the wiring task
 #[allow(dead_code)]
 mod doc; // removed in the wiring task
 mod image;
