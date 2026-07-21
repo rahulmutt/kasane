@@ -262,4 +262,37 @@ mod tests {
         // never underflows on hostile sizes
         assert_eq!(strip_trailing(b"\xFF", 0b10), b"");
     }
+
+    #[test]
+    fn fixture_roundtrip_container_header_and_text() {
+        let bytes = std::fs::read("../../tests/fixtures/mobi/minimal.mobi").unwrap();
+        assert!(matches!(
+            crate::detect(&bytes, Some("mobi")),
+            Some(crate::Format::Mobi)
+        ));
+        let db = PalmDb::parse(&bytes).unwrap();
+        let h = parse_header(db.record(0).unwrap()).unwrap();
+        assert_eq!(h.compression, 1);
+        assert_eq!(h.encryption, 0);
+        assert_eq!(h.version, 6);
+        assert_eq!(h.encoding, 65001);
+        let text: Vec<u8> = (1..=h.text_records as usize)
+            .flat_map(|i| strip_trailing(db.record(i).unwrap(), h.extra_flags).to_vec())
+            .collect();
+        assert_eq!(text.len(), h.text_length as usize);
+        let s = String::from_utf8(text).unwrap();
+        assert!(s.contains("<h1>Chapter Two"));
+        assert!(s.contains("filepos="));
+        // image record present where the header says
+        let img = db.record(h.first_image_rec.unwrap() as usize).unwrap();
+        assert!(img.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn drm_fixture_reports_encryption() {
+        let bytes = std::fs::read("../../tests/fixtures/mobi/minimal-drm.mobi").unwrap();
+        let db = PalmDb::parse(&bytes).unwrap();
+        let h = parse_header(db.record(0).unwrap()).unwrap();
+        assert_eq!(h.encryption, 2);
+    }
 }
