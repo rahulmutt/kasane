@@ -2,6 +2,7 @@ mod detect;
 mod epub;
 mod guard;
 mod mobi;
+mod pdf;
 mod pptx;
 mod xmltext;
 mod ziputil;
@@ -9,6 +10,7 @@ mod ziputil;
 pub use detect::{detect, Format};
 pub use epub::EpubAdapter;
 pub use mobi::MobiAdapter;
+pub use pdf::PdfAdapter;
 pub use pptx::PptxAdapter;
 
 use kasane_ir::{AssetBag, Document};
@@ -36,7 +38,8 @@ pub fn adapter_for(fmt: Format) -> Result<Box<dyn Adapter>, ParseError> {
         Format::Epub => Ok(Box::new(EpubAdapter)),
         Format::Pptx => Ok(Box::new(PptxAdapter)),
         Format::Mobi | Format::Azw3 => Ok(Box::new(MobiAdapter)),
-        _ => Err(ParseError::Unsupported), // other formats land in Plan 2
+        Format::Pdf => Ok(Box::new(PdfAdapter)),
+        Format::Djvu => Err(ParseError::Unsupported),
     }
 }
 
@@ -98,6 +101,22 @@ mod tests {
         assert!(out.join("index.md").exists());
         assert!(out.join("_assets").read_dir().unwrap().next().is_some());
     }
+    #[test]
+    fn end_to_end_pdf_fixture_to_sitetree() {
+        let bytes = std::fs::read("../../tests/fixtures/pdf/image.pdf").unwrap();
+        assert!(matches!(detect(&bytes, Some("pdf")), Some(Format::Pdf)));
+
+        let (doc, assets) = PdfAdapter.parse(&bytes, "image.pdf").unwrap();
+        assert_eq!(doc.meta.source_format, "pdf");
+
+        let site = kasane_core::structure(doc, &kasane_core::Options::default());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("pdfout");
+        kasane_writer::write_tree(&site, &assets, &out, false).unwrap();
+        assert!(out.join("index.md").exists());
+        // The FlateDecode image was flushed to _assets/.
+        assert!(out.join("_assets").read_dir().unwrap().next().is_some());
+    }
     fn kasane_ir_text(inls: &[kasane_ir::Inline]) -> String {
         inls.iter()
             .map(|i| {
@@ -108,5 +127,10 @@ mod tests {
                 }
             })
             .collect()
+    }
+    #[test]
+    fn pdf_format_has_an_adapter() {
+        // Regression: Pdf used to fall into the `_ => Unsupported` arm.
+        assert!(adapter_for(Format::Pdf).is_ok());
     }
 }

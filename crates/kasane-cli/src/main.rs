@@ -9,7 +9,7 @@ use std::process::ExitCode;
     about = "Convert documents to progressive-disclosure Markdown"
 )]
 struct Args {
-    /// Input document (EPUB, PPTX supported in this build)
+    /// Input document (EPUB, PPTX, MOBI, AZW3, PDF supported in this build)
     input: PathBuf,
     /// Output root directory (default: ./<input-stem>/)
     #[arg(short, long)]
@@ -25,18 +25,21 @@ struct Args {
     min_tokens: usize,
 }
 
+/// Map an error message to an exit code: 2 for unsupported/DRM/encrypted, else 1.
+fn exit_code_for(msg: &str) -> u8 {
+    if msg.contains("unsupported") || msg.contains("DRM") || msg.contains("encrypted") {
+        2
+    } else {
+        1
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
-            // Distinguish unsupported/DRM for exit code 2.
-            let msg = format!("{e:#}");
-            if msg.contains("unsupported") || msg.contains("DRM") {
-                ExitCode::from(2)
-            } else {
-                ExitCode::FAILURE
-            }
+            ExitCode::from(exit_code_for(&format!("{e:#}")))
         }
     }
 }
@@ -72,4 +75,16 @@ fn run() -> Result<()> {
     kasane_writer::write_tree(&site, &assets, &out, args.force)?;
     eprintln!("wrote {} files to {}", site.files.len(), out.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_code_for;
+
+    #[test]
+    fn encrypted_maps_to_exit_two() {
+        assert_eq!(exit_code_for("encrypted content"), 2);
+        assert_eq!(exit_code_for("DRM-protected content is not supported"), 2);
+        assert_eq!(exit_code_for("malformed input: bad xref"), 1);
+    }
 }
