@@ -1,4 +1,5 @@
 mod detect;
+mod djvu;
 mod epub;
 mod guard;
 mod mobi;
