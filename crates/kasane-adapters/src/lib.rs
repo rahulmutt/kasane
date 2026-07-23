@@ -127,6 +127,16 @@ mod tests {
         let (doc, assets) = DjvuAdapter.parse(&bytes, "sample.djvu").unwrap();
         assert_eq!(doc.meta.source_format, "djvu");
 
+        // The fixture has a real text layer on every page, so any `Block::Raw`
+        // here is a spurious "no text"/"empty text" note on a good page.
+        let raws: Vec<&kasane_ir::Block> = doc
+            .nodes
+            .iter()
+            .map(|n| &n.block)
+            .filter(|b| matches!(b, kasane_ir::Block::Raw { .. }))
+            .collect();
+        assert!(raws.is_empty(), "unexpected Raw notes: {raws:?}");
+
         let site = kasane_core::structure(doc, &kasane_core::Options::default());
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("djvuout");

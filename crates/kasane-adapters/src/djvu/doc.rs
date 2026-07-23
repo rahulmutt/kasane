@@ -127,6 +127,8 @@ pub fn open(bytes: &[u8]) -> Result<DjvuDoc, ParseError> {
 }
 
 pub fn page_count(doc: &DjvuDoc) -> u32 {
+    // Deliberately the one `djvu-rs` call outside `guard_panic`: upstream this is
+    // `pages.len()`, which is infallible and cannot panic. Do not "fix" it.
     doc.inner.page_count() as u32
 }
 
@@ -394,7 +396,7 @@ mod tests {
         assert!(texts[1].contains("First body line."), "got: {texts:?}");
         assert!(texts[2].contains("Second body line."), "got: {texts:?}");
 
-        // Heading inference (Task 5/6) keys off line height: the heading line
+        // Heading inference keys off line height: the heading line
         // must be strictly taller than the body lines.
         let h: Vec<f32> = lines.iter().map(|l| l.bbox.height()).collect();
         assert!(h[0] > h[1], "heading height {} vs body {}", h[0], h[1]);
@@ -412,6 +414,30 @@ mod tests {
         assert_eq!(bm.len(), 1);
         assert_eq!(bm[0].title, "Chapter One");
         assert_eq!(bm[0].page, 1);
+    }
+
+    /// The CLI (`kasane-cli::exit_code_for`) routes an error message to exit 2
+    /// when it contains "unsupported", "DRM" or "encrypted", and to exit 1
+    /// otherwise. `exit_code_for` is private to that binary, so we pin the
+    /// property on the exact string it is handed: the rendered `Display` of the
+    /// `ParseError`. Asserting here (rather than in `kasane-cli`) keeps the check
+    /// honest — the CLI has no access to `INDIRECT_MSG` and could only re-type
+    /// the literal, which would drift silently.
+    #[test]
+    fn indirect_message_routes_to_exit_one_not_two() {
+        let rendered = format!("{}", ParseError::Malformed(INDIRECT_MSG.into()));
+        for keyword in ["unsupported", "DRM", "encrypted"] {
+            assert!(
+                !rendered.contains(keyword),
+                "indirect rejection must route to exit 1, but the CLI's exit-2 \
+                 keyword {keyword:?} appears in: {rendered}"
+            );
+        }
+        // Sanity: the exit-2 variants really do carry those keywords, so the
+        // assertion above is testing a live property and not a tautology.
+        assert!(format!("{}", ParseError::Unsupported).contains("unsupported"));
+        assert!(format!("{}", ParseError::Drm).contains("DRM"));
+        assert!(format!("{}", ParseError::Encrypted).contains("encrypted"));
     }
 
     fn tz(
