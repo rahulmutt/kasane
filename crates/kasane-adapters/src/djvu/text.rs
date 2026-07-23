@@ -171,4 +171,76 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Direct");
     }
+
+    #[test]
+    fn line_at_max_zone_depth_boundary_is_emitted() {
+        // Build a chain to place the line at exactly MAX_ZONE_DEPTH.
+        // We need MAX_ZONE_DEPTH - 1 Region zones wrapping the Line,
+        // since Page is at depth 0, first Region at depth 1, etc.
+        let mut zone = z(ZoneKind::Line, 12.0, "at_boundary", vec![]);
+
+        for _ in 0..(MAX_ZONE_DEPTH - 1) {
+            zone = z(ZoneKind::Region, 0.0, "", vec![zone]);
+        }
+
+        let page = z(ZoneKind::Page, 0.0, "", vec![zone]);
+        let lines = page_lines(&page);
+        assert_eq!(lines.len(), 1, "line at MAX_ZONE_DEPTH should be emitted");
+        assert_eq!(lines[0].text, "at_boundary");
+    }
+
+    #[test]
+    fn line_beyond_max_zone_depth_is_not_emitted() {
+        // Build a chain to place the line at depth MAX_ZONE_DEPTH + 1.
+        // We need MAX_ZONE_DEPTH Region zones wrapping the Line.
+        // The depth check is `if depth > MAX_ZONE_DEPTH { return; }`,
+        // so depth 65 is rejected while depth 64 is accepted.
+        let mut zone = z(ZoneKind::Line, 12.0, "beyond", vec![]);
+
+        for _ in 0..MAX_ZONE_DEPTH {
+            zone = z(ZoneKind::Region, 0.0, "", vec![zone]);
+        }
+
+        let page = z(ZoneKind::Page, 0.0, "", vec![zone]);
+        let lines = page_lines(&page);
+        assert_eq!(
+            lines.len(),
+            0,
+            "line beyond MAX_ZONE_DEPTH should not be emitted"
+        );
+    }
+
+    #[test]
+    fn empty_and_whitespace_lines_are_skipped() {
+        // Test that a paragraph containing [real line, blank line, real line]
+        // emits exactly 2 lines (the blank is skipped) in order, with correct para_start flags.
+        let page = z(
+            ZoneKind::Page,
+            0.0,
+            "",
+            vec![z(
+                ZoneKind::Para,
+                0.0,
+                "",
+                vec![
+                    line(12.0, &["first"]),
+                    // Line with only whitespace: direct text is spaces,
+                    // and word child is also only spaces.
+                    z(ZoneKind::Line, 12.0, "   ", vec![word("   ", 12.0)]),
+                    line(12.0, &["third"]),
+                ],
+            )],
+        );
+
+        let lines = page_lines(&page);
+        assert_eq!(lines.len(), 2, "only non-empty lines should be emitted");
+        assert_eq!(lines[0].text, "first");
+        assert_eq!(lines[1].text, "third");
+
+        // The first emitted line (at paragraph start) should have para_start=true,
+        // the second should have para_start=false (even though a blank was skipped
+        // in between, the flag was not consumed).
+        assert!(lines[0].para_start);
+        assert!(!lines[1].para_start);
+    }
 }
