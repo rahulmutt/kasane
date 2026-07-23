@@ -152,7 +152,6 @@ fn heading_level(height: f32, body: f32) -> u8 {
 mod tests {
     use super::*;
     use crate::djvu::doc::{BBox, Zone, ZoneKind};
-    use kasane_ir::{Block, Inline};
 
     fn z(kind: ZoneKind, h: f32, text: &str, children: Vec<Zone>) -> Zone {
         Zone {
@@ -512,6 +511,44 @@ mod tests {
         }];
         let mut id = 0u32;
         let blocks = page_blocks(&lines, &mut id, 12.0, true);
+        match &blocks[0] {
+            Block::Heading { level, .. } => assert_eq!(*level, 3),
+            _ => panic!("expected heading"),
+        }
+    }
+
+    #[test]
+    fn heading_level_2_between_1_4_and_1_8() {
+        // body = 10.0, height = 17.9 (ratio 1.79)
+        // Strictly between 1.4 and 1.8, should be level 2.
+        // Height 17.9 >= 10.0 * 1.15 = 11.5, qualifies as heading.
+        // This test fails if the 1.8 threshold is mutated downward below 1.79.
+        let lines = vec![Line {
+            text: "H2-between".into(),
+            height: 17.9,
+            para_start: true,
+        }];
+        let mut id = 0u32;
+        let blocks = page_blocks(&lines, &mut id, 10.0, true);
+        match &blocks[0] {
+            Block::Heading { level, .. } => assert_eq!(level, &2),
+            _ => panic!("expected heading"),
+        }
+    }
+
+    #[test]
+    fn heading_level_3_between_1_15_and_1_4() {
+        // body = 10.0, height = 13.9 (ratio 1.39)
+        // Strictly between 1.15 and 1.4, should be level 3.
+        // Height 13.9 >= 10.0 * 1.15 = 11.5, qualifies as heading.
+        // This test fails if the 1.4 threshold is mutated downward below 1.39.
+        let lines = vec![Line {
+            text: "H3-between".into(),
+            height: 13.9,
+            para_start: true,
+        }];
+        let mut id = 0u32;
+        let blocks = page_blocks(&lines, &mut id, 10.0, true);
         match &blocks[0] {
             Block::Heading { level, .. } => assert_eq!(*level, 3),
             _ => panic!("expected heading"),
