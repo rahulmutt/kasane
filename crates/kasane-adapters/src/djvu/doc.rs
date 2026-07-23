@@ -7,15 +7,21 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Recursion cap for the zone and bookmark trees; deeper nodes are dropped
 /// rather than blowing the stack on a hostile file. `text.rs` imports this same
-/// constant so the conversion cap and the flattening cap cannot drift apart.
+/// constant so the two caps share one value. Their *effective* depths can still
+/// differ by one: `root_zone` wraps multiple top-level zones in a synthetic
+/// `Page`, so a node kept here at conversion-depth 64 is seen by `text.rs` at
+/// flatten-depth 65 and dropped there. That is the safe direction — the
+/// flattening cap is the stricter of the two, so nothing slips past a guard.
 pub(crate) const MAX_ZONE_DEPTH: usize = 64;
 
 /// Node budget for one page's zone tree. A depth cap alone does not bound a
 /// *wide* tree: a 256 MB `TXTz` can encode on the order of 10^7 zones, all of
 /// which we would otherwise clone into a parallel `Zone` tree before the
 /// downstream byte guard ever sees them. Two million nodes is far past any real
-/// scanned page (a dense page is ~10^4 zones) while capping the clone at tens of
-/// MB. Exhausting the budget truncates the tree — degrade, don't die.
+/// scanned page (a dense page is ~10^4 zones) while bounding the clone at a few
+/// hundred MB of `Zone` structs plus their text — held for one page at a time,
+/// with cumulative text separately capped against `MAX_TOTAL_BYTES`. Exhausting
+/// the budget truncates the tree — degrade, don't die.
 const MAX_ZONE_NODES: usize = 2_000_000;
 
 /// Node budget for the document outline, same rationale. Outlines are orders of

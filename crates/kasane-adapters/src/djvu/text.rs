@@ -64,7 +64,10 @@ fn fallback_walk(
     }
     // Only a line-like zone may draw on its children's text; a container whose
     // subtree produced nothing (because it was cut off by the depth cap, say)
-    // falls back to its OWN covering text and never reaches past the cap.
+    // falls back to its OWN covering text. That is what stops a container at the
+    // cap from resurrecting text the cap just rejected. A line-like zone at the
+    // cap does still join its Word/Char children one level past it — the same as
+    // `walk` does for a `Line`, and safe because `line_text` is a flat loop.
     let text = if is_line_like(z) {
         line_text(z)
     } else {
