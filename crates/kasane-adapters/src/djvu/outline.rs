@@ -77,6 +77,37 @@ mod tests {
     }
 
     #[test]
+    fn dropped_parent_does_not_prune_valid_children() {
+        // Parent has empty title (dropped), but child has real page and title (kept).
+        // Verify the child still appears and its level reflects true depth (depth increments even if parent dropped).
+        let tree = vec![bm("", 1, vec![bm("Valid Child", 2, vec![])])];
+        let map = outline_by_page(&tree);
+
+        // Page 1 should have no headings (parent was dropped).
+        assert!(
+            !map.contains_key(&1) || map[&1].is_empty(),
+            "empty-title parent should be dropped"
+        );
+
+        // Page 2 should have the child heading.
+        let page_2_headings = map
+            .get(&2)
+            .expect("child with valid page should appear in map");
+        assert_eq!(
+            page_2_headings.len(),
+            1,
+            "exactly one child heading for page 2"
+        );
+        assert_eq!(page_2_headings[0].title, "Valid Child");
+
+        // Child is at depth 2 (parent was depth 1; depth increments unconditionally even if parent dropped).
+        assert_eq!(
+            page_2_headings[0].level, 2,
+            "child at depth 2 should have level 2"
+        );
+    }
+
+    #[test]
     fn deep_tree_is_bounded_not_infinite() {
         // Build a chain deeper than the cap; must terminate and clamp level to 6.
         let mut node = bm("leaf", 1, vec![]);
@@ -84,10 +115,19 @@ mod tests {
             node = bm("x", 1, vec![node]);
         }
         let map = outline_by_page(&[node]);
-        assert!(map
-            .get(&1)
-            .unwrap()
-            .iter()
-            .all(|h| (1..=6).contains(&h.level)));
+        let headings = map.get(&1).expect("page 1 should have headings");
+
+        // Should have exactly MAX_OUTLINE_DEPTH headings (one per depth 1..=MAX_OUTLINE_DEPTH);
+        // depth > MAX_OUTLINE_DEPTH causes early return without processing.
+        assert_eq!(
+            headings.len(),
+            MAX_OUTLINE_DEPTH,
+            "all depths 1..={} should be pushed; depth > {} returns early",
+            MAX_OUTLINE_DEPTH,
+            MAX_OUTLINE_DEPTH
+        );
+
+        // All levels should be clamped to 1..=6.
+        assert!(headings.iter().all(|h| (1..=6).contains(&h.level)));
     }
 }
