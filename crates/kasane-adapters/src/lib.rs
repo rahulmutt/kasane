@@ -1,4 +1,5 @@
 mod detect;
+mod djvu;
 mod epub;
 mod guard;
 mod mobi;
@@ -8,6 +9,7 @@ mod xmltext;
 mod ziputil;
 
 pub use detect::{detect, Format};
+pub use djvu::DjvuAdapter;
 pub use epub::EpubAdapter;
 pub use mobi::MobiAdapter;
 pub use pdf::PdfAdapter;
@@ -39,7 +41,7 @@ pub fn adapter_for(fmt: Format) -> Result<Box<dyn Adapter>, ParseError> {
         Format::Pptx => Ok(Box::new(PptxAdapter)),
         Format::Mobi | Format::Azw3 => Ok(Box::new(MobiAdapter)),
         Format::Pdf => Ok(Box::new(PdfAdapter)),
-        Format::Djvu => Err(ParseError::Unsupported),
+        Format::Djvu => Ok(Box::new(DjvuAdapter)),
     }
 }
 
@@ -117,6 +119,30 @@ mod tests {
         // The FlateDecode image was flushed to _assets/.
         assert!(out.join("_assets").read_dir().unwrap().next().is_some());
     }
+    #[test]
+    fn end_to_end_djvu_fixture_to_sitetree() {
+        let bytes = std::fs::read("../../tests/fixtures/djvu/sample.djvu").unwrap();
+        assert!(matches!(detect(&bytes, Some("djvu")), Some(Format::Djvu)));
+
+        let (doc, assets) = DjvuAdapter.parse(&bytes, "sample.djvu").unwrap();
+        assert_eq!(doc.meta.source_format, "djvu");
+
+        // The fixture has a real text layer on every page, so any `Block::Raw`
+        // here is a spurious "no text"/"empty text" note on a good page.
+        let raws: Vec<&kasane_ir::Block> = doc
+            .nodes
+            .iter()
+            .map(|n| &n.block)
+            .filter(|b| matches!(b, kasane_ir::Block::Raw { .. }))
+            .collect();
+        assert!(raws.is_empty(), "unexpected Raw notes: {raws:?}");
+
+        let site = kasane_core::structure(doc, &kasane_core::Options::default());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("djvuout");
+        kasane_writer::write_tree(&site, &assets, &out, false).unwrap();
+        assert!(out.join("index.md").exists());
+    }
     fn kasane_ir_text(inls: &[kasane_ir::Inline]) -> String {
         inls.iter()
             .map(|i| {
@@ -127,6 +153,11 @@ mod tests {
                 }
             })
             .collect()
+    }
+    #[test]
+    fn djvu_format_has_an_adapter() {
+        // Regression: Djvu used to return `Unsupported` from `adapter_for`.
+        assert!(adapter_for(Format::Djvu).is_ok());
     }
     #[test]
     fn pdf_format_has_an_adapter() {

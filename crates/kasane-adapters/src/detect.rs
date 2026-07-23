@@ -80,4 +80,11 @@ mod tests {
     fn detects_pdf_by_magic() {
         assert!(matches!(detect(b"%PDF-1.7\n...", None), Some(Format::Pdf)));
     }
+    #[test]
+    fn detects_djvu_by_magic_and_ext() {
+        let bytes = std::fs::read("../../tests/fixtures/djvu/sample.djvu").unwrap();
+        assert!(matches!(detect(&bytes, Some("djvu")), Some(Format::Djvu)));
+        // Magic alone (AT&T preamble) is enough, no hint.
+        assert!(matches!(detect(&bytes, None), Some(Format::Djvu)));
+    }
 }

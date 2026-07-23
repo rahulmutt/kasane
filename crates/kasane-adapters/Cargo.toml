@@ -17,6 +17,7 @@ markup5ever_rcdom = "0.5.4-unofficial"
 mobi = "0.8"
 lopdf = { version = "0.44", default-features = false }
 png = "0.17"
+djvu-rs = "0.27"
 
 [dev-dependencies]
 kasane-core.workspace = true
