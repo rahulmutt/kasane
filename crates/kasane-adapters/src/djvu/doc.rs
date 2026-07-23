@@ -5,6 +5,9 @@ use crate::guard::MAX_TOTAL_BYTES;
 use crate::ParseError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// Re-exported so `image.rs` consumes only port types, never `djvu_rs` directly.
+pub use djvu_rs::{Bitmap, Pixmap};
+
 /// Recursion cap for the zone and bookmark trees; deeper nodes are dropped
 /// rather than blowing the stack on a hostile file. `text.rs` imports this same
 /// constant so the two caps share one value. Their *effective* depths can still
@@ -27,6 +30,12 @@ const MAX_ZONE_NODES: usize = 2_000_000;
 /// Node budget for the document outline, same rationale. Outlines are orders of
 /// magnitude smaller than text layers, so the bound is correspondingly tighter.
 const MAX_BOOKMARK_NODES: usize = 100_000;
+
+/// Decoded-pixel budget for a rendered page image. A hostile file can declare
+/// enormous dimensions; the input-size guard (`MAX_TOTAL_BYTES`) does not bound
+/// decoded pixels. ~25 MP ≈ a 300-dpi tabloid page. Larger pages are downscaled
+/// by the caller, not rejected — degrade, don't die.
+pub(crate) const MAX_RENDER_PIXELS: u64 = 25_000_000;
 
 /// Spec-mandated rejection text for indirect (multi-file) documents. It must
 /// not read as "unsupported"/"DRM"/"encrypted" — those map to other exit codes.
@@ -152,6 +161,56 @@ pub fn page_text(doc: &DjvuDoc, page: u32) -> Option<Zone> {
             return Ok(None);
         };
         Ok(root_zone(&layer))
+    })
+    .ok()
+    .flatten()
+}
+
+/// Pixel `(width, height)` of a 1-based page; `None` if missing or on panic.
+pub fn page_dims(doc: &DjvuDoc, page: u32) -> Option<(u32, u32)> {
+    if page == 0 {
+        return None;
+    }
+    guard_panic(|| {
+        let Ok(p) = doc.inner.page((page - 1) as usize) else {
+            return Ok(None);
+        };
+        // djvu-rs reports page dimensions as u16; widen to u32 to match the
+        // port's return type (a widening cast, so no precision is lost).
+        Ok(Some((p.width() as u32, p.height() as u32)))
+    })
+    .ok()
+    .flatten()
+}
+
+/// The page's bilevel JB2/G4 mask, or `None` for a pure-IW44 (photographic)
+/// page, a missing page, or a decode panic.
+pub fn page_mask(doc: &DjvuDoc, page: u32) -> Option<Bitmap> {
+    if page == 0 {
+        return None;
+    }
+    guard_panic(|| {
+        let Ok(p) = doc.inner.page((page - 1) as usize) else {
+            return Ok(None);
+        };
+        Ok(p.extract_mask().unwrap_or(None))
+    })
+    .ok()
+    .flatten()
+}
+
+/// A full RGBA render scaled to fit within `target_w x target_h` (aspect
+/// preserved); `None` on missing page or render failure/panic.
+pub fn page_pixmap(doc: &DjvuDoc, page: u32, target_w: u32, target_h: u32) -> Option<Pixmap> {
+    if page == 0 {
+        return None;
+    }
+    guard_panic(|| {
+        let Ok(p) = doc.inner.page((page - 1) as usize) else {
+            return Ok(None);
+        };
+        let opts = djvu_rs::djvu_render::RenderOptions::fit_to_box(p, target_w, target_h);
+        Ok(djvu_rs::djvu_render::render_pixmap(p, &opts).ok())
     })
     .ok()
     .flatten()
@@ -412,6 +471,29 @@ mod tests {
     #[test]
     fn page_text_is_none_for_out_of_range_page() {
         assert!(page_text(&sample(), 99).is_none());
+    }
+
+    #[test]
+    fn page_dims_reports_fixture_page_size() {
+        let doc = sample();
+        assert_eq!(page_dims(&doc, 1), Some((64, 64)));
+        assert_eq!(page_dims(&doc, 0), None);
+        assert_eq!(page_dims(&doc, 99), None);
+    }
+
+    #[test]
+    fn page_mask_decodes_bilevel_layer() {
+        let doc = sample();
+        let mask = page_mask(&doc, 1).expect("fixture page has a JB2 mask");
+        assert_eq!((mask.width, mask.height), (64, 64));
+    }
+
+    #[test]
+    fn page_pixmap_renders_to_requested_size() {
+        let doc = sample();
+        let px = page_pixmap(&doc, 1, 64, 64).expect("fixture page renders");
+        assert_eq!((px.width, px.height), (64, 64));
+        assert_eq!(px.data.len(), 64 * 64 * 4); // RGBA
     }
 
     #[test]

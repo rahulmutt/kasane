@@ -128,4 +128,29 @@ fn main() {
         parsed.page_count(),
         bms.len(),
     );
+
+    // --- Second fixture: a text-less scanned page (mask only, no TXTz, no NAVM).
+    //     Exercises the page-image code path: no recoverable text, no outline.
+    let scanned_page = PageEncoder::from_bitmap(&bm)
+        .with_dpi(100)
+        .encode()
+        .expect("encode text-less FORM:DJVU");
+    // A bare single-page FORM:DJVU is bundled by construction (no DIRM), which is
+    // what the adapter requires; no DJVM merge or NAVM attachment needed.
+    let scanned_parsed = DjVuDocument::parse(&scanned_page).expect("re-parse scanned fixture");
+    assert_eq!(scanned_parsed.page_count(), 1, "scanned fixture: one page");
+    assert!(
+        scanned_parsed
+            .page(0)
+            .expect("scanned page 0")
+            .text_layer()
+            .expect("text layer decode ok")
+            .is_none(),
+        "scanned fixture must have NO text layer"
+    );
+    std::fs::write("tests/fixtures/djvu/scanned.djvu", &scanned_page).expect("write scanned.djvu");
+    println!(
+        "wrote tests/fixtures/djvu/scanned.djvu ({} bytes): 1 page, no text layer, no outline",
+        scanned_page.len(),
+    );
 }

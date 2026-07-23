@@ -46,10 +46,14 @@ See AGENTS.md for the codebase map.
   spliced in as the heading *and* the matching text-layer line still appears in
   the body text below it, so a chapter title can appear twice in the output —
   a known cosmetic limitation shared with the PDF adapter's outline handling.
-- Scanned page images (JB2/IW44) are not rendered in this build. A page with no
-  text layer at all becomes a placeholder note ("no text layer; OCR not
-  enabled"); a page whose text layer is present but decodes to nothing gets a
-  different note ("text layer present but empty; no recoverable text").
+- Text-less pages now emit the rendered page image: the bilevel JB2 mask as a
+  compact 1-bit PNG, or a full IW44 render (RGB PNG) when the page has no mask.
+  A rendered page carries a marker that its text is un-OCR'd — "page image only;
+  no text layer, OCR not enabled" when there was no text layer, or "page image
+  only; text layer present but empty" when the layer decoded to nothing. If a
+  page fails to render, the bare placeholder note is emitted instead. Pages that
+  recovered text get no image. Text recovery still depends on the embedded OCR
+  text layer; kasane does not run its own OCR (see the `-F ocr` roadmap).
 - Only bundled (single-file) DjVu documents are supported; indirect
   (multi-file) documents are rejected with a clear message (exit code 1, not
   2 — this is a format-support gap, not DRM). Tables become paragraphs; DjVu

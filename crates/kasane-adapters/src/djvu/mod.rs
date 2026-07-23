@@ -2,6 +2,7 @@
 //! 1-based page it came from.
 
 mod doc;
+mod image;
 mod outline;
 mod text;
 
@@ -16,6 +17,10 @@ const NO_TEXT_NOTE: &str = "no text layer; OCR not enabled";
 /// Emitted for a page whose text layer is present but yielded no recoverable
 /// lines (distinct from `NO_TEXT_NOTE`: the layer exists, it's just empty).
 const EMPTY_TEXT_NOTE: &str = "text layer present but empty; no recoverable text";
+/// Emitted with a rendered page image when the page had no text layer.
+const IMG_NO_TEXT_NOTE: &str = "page image only; no text layer, OCR not enabled";
+/// Emitted with a rendered page image when the text layer was present but empty.
+const IMG_EMPTY_TEXT_NOTE: &str = "page image only; text layer present but empty";
 
 pub struct DjvuAdapter;
 
@@ -44,11 +49,25 @@ impl Adapter for DjvuAdapter {
         let body_height =
             modal_body_height(&pages.iter().map(|(_, _, l)| l.clone()).collect::<Vec<_>>());
 
+        let mut assets = AssetBag::default();
         let mut nodes = Vec::new();
         let mut next_id = 0u32;
         let empty: Vec<OutlineHeading> = Vec::new();
         for (p, has_text, lines) in &pages {
             let headings = outline.get(p).unwrap_or(&empty);
+            // A page is text-less iff it has no outline heading and its lines
+            // yield no blocks. Probe with a throwaway id counter so this trial
+            // run allocates no BlockIds (text-less pages produce zero blocks, so
+            // nothing is consumed anyway) and does not perturb `next_id`.
+            let text_less = headings.is_empty() && {
+                let mut probe = next_id;
+                page_blocks(lines, &mut probe, body_height, !has_outline).is_empty()
+            };
+            let page_image = if text_less {
+                image::render_page_image(&djvu, *p, &mut assets)
+            } else {
+                None
+            };
             nodes.extend(page_nodes_from_lines(
                 *p,
                 lines,
@@ -57,6 +76,7 @@ impl Adapter for DjvuAdapter {
                 body_height,
                 !has_outline,
                 *has_text,
+                page_image,
             ));
         }
 
@@ -70,12 +90,17 @@ impl Adapter for DjvuAdapter {
             },
             nodes,
         };
-        Ok((out, AssetBag::default()))
+        Ok((out, assets))
     }
 }
 
 /// Build the nodes for one page from its lines. `has_text` distinguishes a page
-/// with an (empty-after-filtering) text layer from one with none.
+/// with an (empty-after-filtering) text layer from one with none. When
+/// `page_image` is `Some`, a text-less page emits that `Figure` alongside a
+/// trimmed "page image only" note instead of the bare no-text note.
+// Eight plain params, each threaded straight through from `parse`'s per-page
+// loop with no natural sub-grouping; a struct would just relocate the noise.
+#[allow(clippy::too_many_arguments)]
 fn page_nodes_from_lines(
     page: u32,
     lines: &[Line],
@@ -84,6 +109,7 @@ fn page_nodes_from_lines(
     body_height: f32,
     infer_headings: bool,
     has_text: bool,
+    page_image: Option<Block>,
 ) -> Vec<Node> {
     let prov = Provenance {
         source_pages: Some((page, page)),
@@ -114,19 +140,39 @@ fn page_nodes_from_lines(
         });
     }
 
-    // No outline heading, nothing recovered -> honest note. Every such page must
-    // leave a trace, but the wording distinguishes "no text layer at all" from
-    // "text layer present but empty after filtering".
+    // No outline heading, nothing recovered. If we rendered a page image, emit
+    // it and a trimmed note that still records text was not recovered; otherwise
+    // fall back to the bare note. The wording keeps "no text layer at all"
+    // distinct from "text layer present but empty after filtering".
     if headings.is_empty() && !had_blocks {
-        let note = if has_text {
-            EMPTY_TEXT_NOTE
-        } else {
-            NO_TEXT_NOTE
-        };
-        out.push(Node {
-            block: Block::Raw { note: note.into() },
-            prov,
-        });
+        match page_image {
+            Some(figure) => {
+                out.push(Node {
+                    block: figure,
+                    prov: prov.clone(),
+                });
+                let note = if has_text {
+                    IMG_EMPTY_TEXT_NOTE
+                } else {
+                    IMG_NO_TEXT_NOTE
+                };
+                out.push(Node {
+                    block: Block::Raw { note: note.into() },
+                    prov,
+                });
+            }
+            None => {
+                let note = if has_text {
+                    EMPTY_TEXT_NOTE
+                } else {
+                    NO_TEXT_NOTE
+                };
+                out.push(Node {
+                    block: Block::Raw { note: note.into() },
+                    prov,
+                });
+            }
+        }
     }
     out
 }
@@ -151,6 +197,7 @@ fn page_nodes(
         body_height,
         infer_headings,
         text_root.is_some(),
+        None,
     )
 }
 
@@ -380,5 +427,48 @@ mod tests {
         assert!(matches!(err, ParseError::Bomb));
         let err = accumulate_text_bytes(u64::MAX, 1).unwrap_err();
         assert!(matches!(err, ParseError::Bomb));
+    }
+
+    #[test]
+    fn scanned_page_emits_figure_and_trimmed_note() {
+        let bytes = std::fs::read("../../tests/fixtures/djvu/scanned.djvu").unwrap();
+        let (doc, assets) = DjvuAdapter.parse(&bytes, "scanned.djvu").unwrap();
+
+        // A page image was emitted as a Figure + asset.
+        assert_eq!(assets.items.len(), 1, "one page image asset");
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+
+        // The note is the trimmed "page image only" form, not the bare note.
+        let notes: Vec<&str> = doc
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.block {
+                Block::Raw { note } => Some(note.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.contains("page image only")),
+            "notes: {notes:?}"
+        );
+        assert!(
+            !notes.contains(&"no text layer; OCR not enabled"),
+            "bare note must be replaced when an image is emitted: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn text_page_emits_no_figure() {
+        // Regression pin: pages that recovered text never get a page image.
+        let doc = sample();
+        assert!(
+            !doc.nodes
+                .iter()
+                .any(|n| matches!(&n.block, Block::Figure { .. })),
+            "text-bearing fixture must not produce a page image"
+        );
     }
 }
