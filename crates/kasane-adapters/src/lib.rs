@@ -9,6 +9,7 @@ mod xmltext;
 mod ziputil;
 
 pub use detect::{detect, Format};
+pub use djvu::DjvuAdapter;
 pub use epub::EpubAdapter;
 pub use mobi::MobiAdapter;
 pub use pdf::PdfAdapter;
@@ -40,7 +41,7 @@ pub fn adapter_for(fmt: Format) -> Result<Box<dyn Adapter>, ParseError> {
         Format::Pptx => Ok(Box::new(PptxAdapter)),
         Format::Mobi | Format::Azw3 => Ok(Box::new(MobiAdapter)),
         Format::Pdf => Ok(Box::new(PdfAdapter)),
-        Format::Djvu => Err(ParseError::Unsupported),
+        Format::Djvu => Ok(Box::new(DjvuAdapter)),
     }
 }
 
@@ -128,6 +129,11 @@ mod tests {
                 }
             })
             .collect()
+    }
+    #[test]
+    fn djvu_format_has_an_adapter() {
+        // Regression: Djvu used to return `Unsupported` from `adapter_for`.
+        assert!(adapter_for(Format::Djvu).is_ok());
     }
     #[test]
     fn pdf_format_has_an_adapter() {

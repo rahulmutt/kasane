@@ -4,11 +4,9 @@
 use super::doc::Bookmark;
 use std::collections::BTreeMap;
 
-#[allow(dead_code)]
 const MAX_OUTLINE_DEPTH: usize = 64;
 
 /// A heading derived from one NAVM bookmark.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct OutlineHeading {
     pub level: u8,
@@ -18,14 +16,12 @@ pub struct OutlineHeading {
 /// Map each 1-based page to the outline headings targeting it, in outline order.
 /// Depth (1-based) becomes the heading level, clamped to the IR range 1–6.
 /// An empty slice yields an empty map (never an error).
-#[allow(dead_code)]
 pub fn outline_by_page(bookmarks: &[Bookmark]) -> BTreeMap<u32, Vec<OutlineHeading>> {
     let mut map: BTreeMap<u32, Vec<OutlineHeading>> = BTreeMap::new();
     walk(bookmarks, 1, &mut map);
     map
 }
 
-#[allow(dead_code)]
 fn walk(nodes: &[Bookmark], depth: usize, map: &mut BTreeMap<u32, Vec<OutlineHeading>>) {
     if depth > MAX_OUTLINE_DEPTH {
         return;

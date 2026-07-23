@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! The sole seam over the `djvu-rs` crate. Everything else in `djvu/` consumes
 //! the port types defined here, never `djvu-rs` directly.
 
@@ -40,6 +39,8 @@ pub enum ZoneKind {
     Line,
     Word,
     Char,
+    /// No `djvu-rs` kind maps here today; kept so the port covers the format.
+    #[allow(dead_code)]
     Other,
 }
 

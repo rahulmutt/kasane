@@ -7,7 +7,6 @@ use kasane_ir::{Block, BlockId, Inline};
 /// One visual line of recovered text plus a font-size proxy (zone height) and
 /// whether it opens a paragraph (first line under a Para/Region/Column zone).
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Line {
     pub text: String,
     pub height: f32,
@@ -19,7 +18,6 @@ const MAX_ZONE_DEPTH: usize = 64;
 /// Flatten a page's zone tree into lines in document (reading) order. The zone
 /// hierarchy already encodes columns/regions, so honoring its order yields
 /// correct multi-column reading order without geometric re-sorting.
-#[allow(dead_code)]
 pub fn page_lines(root: &Zone) -> Vec<Line> {
     let mut lines = Vec::new();
     walk(root, 0, &mut true, &mut lines);
@@ -76,7 +74,6 @@ fn line_text(line: &Zone) -> String {
 const HEADING_RATIO: f32 = 1.15;
 
 /// Most common rounded line height across all pages — the document body height.
-#[allow(dead_code)]
 pub fn modal_body_height(pages: &[Vec<Line>]) -> f32 {
     use std::collections::HashMap;
     let mut counts: HashMap<i32, usize> = HashMap::new();
@@ -96,7 +93,6 @@ pub fn modal_body_height(pages: &[Vec<Line>]) -> f32 {
 /// body height becomes a heading (level bucketed 1–3); otherwise every line is
 /// body text. Consecutive body lines merge into a paragraph, split on
 /// `para_start`.
-#[allow(dead_code)]
 pub fn page_blocks(
     lines: &[Line],
     next_id: &mut u32,
