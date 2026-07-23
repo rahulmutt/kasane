@@ -10,6 +10,18 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// constant so the conversion cap and the flattening cap cannot drift apart.
 pub(crate) const MAX_ZONE_DEPTH: usize = 64;
 
+/// Node budget for one page's zone tree. A depth cap alone does not bound a
+/// *wide* tree: a 256 MB `TXTz` can encode on the order of 10^7 zones, all of
+/// which we would otherwise clone into a parallel `Zone` tree before the
+/// downstream byte guard ever sees them. Two million nodes is far past any real
+/// scanned page (a dense page is ~10^4 zones) while capping the clone at tens of
+/// MB. Exhausting the budget truncates the tree — degrade, don't die.
+const MAX_ZONE_NODES: usize = 2_000_000;
+
+/// Node budget for the document outline, same rationale. Outlines are orders of
+/// magnitude smaller than text layers, so the bound is correspondingly tighter.
+const MAX_BOOKMARK_NODES: usize = 100_000;
+
 /// Spec-mandated rejection text for indirect (multi-file) documents. It must
 /// not read as "unsupported"/"DRM"/"encrypted" — those map to other exit codes.
 const INDIRECT_MSG: &str = "indirect multi-file DjVu not supported; provide the bundled document";
@@ -141,10 +153,11 @@ pub fn page_text(doc: &DjvuDoc, page: u32) -> Option<Zone> {
 /// the adapter expects: a lone zone is used as-is, several are wrapped in a
 /// synthetic `Page` spanning their union.
 fn root_zone(layer: &djvu_rs::text::TextLayer) -> Option<Zone> {
+    let mut budget = MAX_ZONE_NODES;
     let mut children: Vec<Zone> = layer
         .zones
         .iter()
-        .filter_map(|z| convert_zone(z, 0))
+        .filter_map(|z| convert_zone(z, 0, &mut budget))
         .collect();
     match children.len() {
         0 => None,
@@ -175,17 +188,20 @@ fn root_zone(layer: &djvu_rs::text::TextLayer) -> Option<Zone> {
     }
 }
 
-/// Map a `djvu-rs` text zone into our `Zone`, bounding recursion depth.
-fn convert_zone(z: &djvu_rs::text::TextZone, depth: usize) -> Option<Zone> {
-    if depth > MAX_ZONE_DEPTH {
+/// Map a `djvu-rs` text zone into our `Zone`, bounding recursion depth and the
+/// total node count. `budget` is decremented per converted node; once it hits
+/// zero the remaining nodes are dropped and what was built so far is returned.
+fn convert_zone(z: &djvu_rs::text::TextZone, depth: usize, budget: &mut usize) -> Option<Zone> {
+    if depth > MAX_ZONE_DEPTH || *budget == 0 {
         return None;
     }
+    *budget -= 1;
     // `Rect` is top-left origin, width/height in page pixels.
     let r = &z.rect;
     let children = z
         .children
         .iter()
-        .filter_map(|c| convert_zone(c, depth + 1))
+        .filter_map(|c| convert_zone(c, depth + 1, budget))
         .collect();
     Some(Zone {
         kind: map_kind(z.kind),
@@ -216,20 +232,28 @@ fn map_kind(k: djvu_rs::text::TextZoneKind) -> ZoneKind {
 /// NAVM outline roots; empty when the document has none.
 pub fn bookmarks(doc: &DjvuDoc) -> Vec<Bookmark> {
     guard_panic(|| {
+        let mut budget = MAX_BOOKMARK_NODES;
         Ok(doc
             .inner
             .bookmarks()
             .iter()
-            .filter_map(|b| convert_bookmark(b, 0))
+            .filter_map(|b| convert_bookmark(b, 0, &mut budget))
             .collect())
     })
     .unwrap_or_default()
 }
 
-fn convert_bookmark(b: &djvu_rs::DjVuBookmark, depth: usize) -> Option<Bookmark> {
-    if depth > MAX_ZONE_DEPTH {
+/// Same contract as `convert_zone`: depth-capped, node-budgeted, and truncating
+/// (not erroring) when the budget runs out.
+fn convert_bookmark(
+    b: &djvu_rs::DjVuBookmark,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<Bookmark> {
+    if depth > MAX_ZONE_DEPTH || *budget == 0 {
         return None;
     }
+    *budget -= 1;
     let title = b.title.trim().to_string();
     if title.is_empty() {
         return None;
@@ -237,7 +261,7 @@ fn convert_bookmark(b: &djvu_rs::DjVuBookmark, depth: usize) -> Option<Bookmark>
     let children = b
         .children
         .iter()
-        .filter_map(|c| convert_bookmark(c, depth + 1))
+        .filter_map(|c| convert_bookmark(c, depth + 1, budget))
         .collect();
     Some(Bookmark {
         title,
@@ -388,6 +412,87 @@ mod tests {
         assert_eq!(bm.len(), 1);
         assert_eq!(bm[0].title, "Chapter One");
         assert_eq!(bm[0].page, 1);
+    }
+
+    fn tz(
+        kind: djvu_rs::text::TextZoneKind,
+        children: Vec<djvu_rs::text::TextZone>,
+    ) -> djvu_rs::text::TextZone {
+        djvu_rs::text::TextZone {
+            kind,
+            rect: djvu_rs::text::Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            text: "x".into(),
+            children,
+        }
+    }
+
+    fn count_zones(z: &Zone) -> usize {
+        1 + z.children.iter().map(count_zones).sum::<usize>()
+    }
+
+    #[test]
+    fn zone_conversion_truncates_at_the_node_budget() {
+        // A wide, shallow tree: one Page with 1000 Word children (1001 nodes),
+        // well inside the depth cap but past a deliberately small budget.
+        let wide = tz(
+            djvu_rs::text::TextZoneKind::Page,
+            (0..1000)
+                .map(|_| tz(djvu_rs::text::TextZoneKind::Word, vec![]))
+                .collect(),
+        );
+
+        let mut budget = 10usize;
+        let converted = convert_zone(&wide, 0, &mut budget).expect("root fits in the budget");
+        assert_eq!(
+            count_zones(&converted),
+            10,
+            "conversion must stop at budget"
+        );
+        assert_eq!(budget, 0, "budget must be fully consumed");
+
+        // A zero budget yields nothing at all, and returns rather than recursing.
+        let mut none_left = 0usize;
+        assert!(convert_zone(&wide, 0, &mut none_left).is_none());
+
+        // With the production budget the same tree converts in full.
+        let mut prod = MAX_ZONE_NODES;
+        let full = convert_zone(&wide, 0, &mut prod).unwrap();
+        assert_eq!(count_zones(&full), 1001);
+    }
+
+    #[test]
+    fn bookmark_conversion_truncates_at_the_node_budget() {
+        fn rb(children: Vec<djvu_rs::DjVuBookmark>) -> djvu_rs::DjVuBookmark {
+            djvu_rs::DjVuBookmark {
+                title: "t".into(),
+                url: "#1".into(),
+                children,
+            }
+        }
+        fn count_bm(b: &Bookmark) -> usize {
+            1 + b.children.iter().map(count_bm).sum::<usize>()
+        }
+
+        let wide = rb((0..1000).map(|_| rb(vec![])).collect());
+
+        let mut budget = 7usize;
+        let converted = convert_bookmark(&wide, 0, &mut budget).expect("root fits");
+        assert_eq!(count_bm(&converted), 7, "conversion must stop at budget");
+        assert_eq!(budget, 0);
+
+        let mut none_left = 0usize;
+        assert!(convert_bookmark(&wide, 0, &mut none_left).is_none());
+
+        let mut prod = MAX_BOOKMARK_NODES;
+        assert_eq!(
+            count_bm(&convert_bookmark(&wide, 0, &mut prod).unwrap()),
+            1001
+        );
     }
 
     #[test]
