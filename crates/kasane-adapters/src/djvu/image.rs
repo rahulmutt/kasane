@@ -29,9 +29,11 @@ pub fn render_page_image(doc: &doc::DjvuDoc, page: u32, assets: &mut AssetBag) -
 
 /// `None` when `(nw, nh)` is within the pixel budget (render at native size);
 /// otherwise the largest same-aspect `(w, h)` whose area is within budget.
-/// The `.max(1)` floor is safe because real dimensions come from a `u16` page
-/// size, so the extreme-aspect-ratio case that could otherwise exceed the
-/// budget is unreachable.
+/// The `.max(1)` floor is safe on both call sites: the pixmap path's `nw, nh`
+/// come from a `u16` page size, and the mask path's come from JB2 decode
+/// (capped at ~262K per dimension). Either way each source dimension is far
+/// below `MAX_RENDER_PIXELS`, so the extreme-aspect-ratio case that could
+/// otherwise scale a dimension below 1 is unreachable.
 fn capped_target(nw: u32, nh: u32) -> Option<(u32, u32)> {
     let pixels = (nw as u64).saturating_mul(nh as u64);
     if nw == 0 || nh == 0 || pixels <= MAX_RENDER_PIXELS {

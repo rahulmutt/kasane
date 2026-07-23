@@ -95,7 +95,9 @@ impl Adapter for DjvuAdapter {
 }
 
 /// Build the nodes for one page from its lines. `has_text` distinguishes a page
-/// with an (empty-after-filtering) text layer from one with none.
+/// with an (empty-after-filtering) text layer from one with none. When
+/// `page_image` is `Some`, a text-less page emits that `Figure` alongside a
+/// trimmed "page image only" note instead of the bare no-text note.
 // Eight plain params, each threaded straight through from `parse`'s per-page
 // loop with no natural sub-grouping; a struct would just relocate the noise.
 #[allow(clippy::too_many_arguments)]

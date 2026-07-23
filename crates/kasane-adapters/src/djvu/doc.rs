@@ -35,8 +35,6 @@ const MAX_BOOKMARK_NODES: usize = 100_000;
 /// enormous dimensions; the input-size guard (`MAX_TOTAL_BYTES`) does not bound
 /// decoded pixels. ~25 MP ≈ a 300-dpi tabloid page. Larger pages are downscaled
 /// by the caller, not rejected — degrade, don't die.
-// Not consumed yet: kept for later tasks (image.rs render sizing).
-#[allow(dead_code)]
 pub(crate) const MAX_RENDER_PIXELS: u64 = 25_000_000;
 
 /// Spec-mandated rejection text for indirect (multi-file) documents. It must
@@ -169,8 +167,6 @@ pub fn page_text(doc: &DjvuDoc, page: u32) -> Option<Zone> {
 }
 
 /// Pixel `(width, height)` of a 1-based page; `None` if missing or on panic.
-// Not consumed yet: kept for later tasks (image.rs render sizing).
-#[allow(dead_code)]
 pub fn page_dims(doc: &DjvuDoc, page: u32) -> Option<(u32, u32)> {
     if page == 0 {
         return None;
@@ -189,8 +185,6 @@ pub fn page_dims(doc: &DjvuDoc, page: u32) -> Option<(u32, u32)> {
 
 /// The page's bilevel JB2/G4 mask, or `None` for a pure-IW44 (photographic)
 /// page, a missing page, or a decode panic.
-// Not consumed yet: kept for later tasks (image.rs render compositing).
-#[allow(dead_code)]
 pub fn page_mask(doc: &DjvuDoc, page: u32) -> Option<Bitmap> {
     if page == 0 {
         return None;
@@ -207,8 +201,6 @@ pub fn page_mask(doc: &DjvuDoc, page: u32) -> Option<Bitmap> {
 
 /// A full RGBA render scaled to fit within `target_w x target_h` (aspect
 /// preserved); `None` on missing page or render failure/panic.
-// Not consumed yet: kept for later tasks (image.rs render pipeline).
-#[allow(dead_code)]
 pub fn page_pixmap(doc: &DjvuDoc, page: u32, target_w: u32, target_h: u32) -> Option<Pixmap> {
     if page == 0 {
         return None;
