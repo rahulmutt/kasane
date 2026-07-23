@@ -1,5 +1,7 @@
 //! Pure: NAVM `Bookmark` tree -> per-page headings. No `djvu-rs`, no files.
-//! Functions are added in Task 3.
+//! `outline_by_page` walks the bookmark tree once and buckets each entry under
+//! the page it targets, so the adapter can splice outline headings onto that
+//! page's own text-layer blocks in outline order.
 
 use super::doc::Bookmark;
 use std::collections::BTreeMap;

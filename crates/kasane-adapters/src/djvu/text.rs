@@ -1,5 +1,9 @@
 //! Pure: DjVu text-layer zones -> IR blocks. No `djvu-rs`, no files.
-//! Functions are added in Tasks 5 (page_lines) and 6 (page_blocks).
+//! `page_lines` flattens a page's zone tree into reading-order lines, honoring
+//! the hierarchy's own column/region/paragraph order so multi-column text comes
+//! out correctly without geometric re-sorting. `page_blocks` groups those lines
+//! into paragraphs and, when no NAVM outline exists for the document, infers
+//! headings from lines that are taller than the modal body-line height.
 
 use super::doc::{Zone, ZoneKind};
 use kasane_ir::{Block, BlockId, Inline};

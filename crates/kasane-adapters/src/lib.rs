@@ -119,6 +119,20 @@ mod tests {
         // The FlateDecode image was flushed to _assets/.
         assert!(out.join("_assets").read_dir().unwrap().next().is_some());
     }
+    #[test]
+    fn end_to_end_djvu_fixture_to_sitetree() {
+        let bytes = std::fs::read("../../tests/fixtures/djvu/sample.djvu").unwrap();
+        assert!(matches!(detect(&bytes, Some("djvu")), Some(Format::Djvu)));
+
+        let (doc, assets) = DjvuAdapter.parse(&bytes, "sample.djvu").unwrap();
+        assert_eq!(doc.meta.source_format, "djvu");
+
+        let site = kasane_core::structure(doc, &kasane_core::Options::default());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("djvuout");
+        kasane_writer::write_tree(&site, &assets, &out, false).unwrap();
+        assert!(out.join("index.md").exists());
+    }
     fn kasane_ir_text(inls: &[kasane_ir::Inline]) -> String {
         inls.iter()
             .map(|i| {
