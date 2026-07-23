@@ -2,6 +2,7 @@
 //! 1-based page it came from.
 
 mod doc;
+mod image;
 mod outline;
 mod text;
 
