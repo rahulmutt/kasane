@@ -5,7 +5,7 @@
 //! into paragraphs and, when no NAVM outline exists for the document, infers
 //! headings from lines that are taller than the modal body-line height.
 
-use super::doc::{Zone, ZoneKind};
+use super::doc::{Zone, ZoneKind, MAX_ZONE_DEPTH};
 use kasane_ir::{Block, BlockId, Inline};
 
 /// One visual line of recovered text plus a font-size proxy (zone height) and
@@ -17,15 +17,76 @@ pub struct Line {
     pub para_start: bool,
 }
 
-const MAX_ZONE_DEPTH: usize = 64;
-
 /// Flatten a page's zone tree into lines in document (reading) order. The zone
 /// hierarchy already encodes columns/regions, so honoring its order yields
 /// correct multi-column reading order without geometric re-sorting.
+///
+/// Not every producer emits `Line` zones: a minimal `djvused '(page ... "text")'`
+/// text layer bottoms out at `Page`/`Para`/`Word`. Since every DjVu zone carries
+/// the text its subtree covers, such a page still holds all of its text — so when
+/// the `Line`-based walk finds nothing we fall back to the deepest text-bearing
+/// zones rather than reporting an empty page.
 pub fn page_lines(root: &Zone) -> Vec<Line> {
     let mut lines = Vec::new();
     walk(root, 0, &mut true, &mut lines);
+    if lines.is_empty() {
+        fallback_walk(root, 0, &mut true, &mut lines);
+    }
     lines
+}
+
+/// Fallback for zone trees with no `Line` zones. Emits one line per *deepest*
+/// text-bearing zone: a zone's own text is used only when no descendant produced
+/// a line, so a parent's covering text is never counted alongside its children's.
+/// Returns whether this subtree emitted anything.
+fn fallback_walk(
+    z: &Zone,
+    depth: usize,
+    pending_para_start: &mut bool,
+    out: &mut Vec<Line>,
+) -> bool {
+    if depth > MAX_ZONE_DEPTH {
+        return false;
+    }
+    if matches!(z.kind, ZoneKind::Para | ZoneKind::Region | ZoneKind::Column) {
+        *pending_para_start = true;
+    }
+    // A zone whose children are all Word/Char is itself the line-like unit; its
+    // words are joined rather than emitted one line apiece.
+    if !is_line_like(z) {
+        let mut emitted = false;
+        for c in &z.children {
+            emitted |= fallback_walk(c, depth + 1, pending_para_start, out);
+        }
+        if emitted {
+            return true;
+        }
+    }
+    // Only a line-like zone may draw on its children's text; a container whose
+    // subtree produced nothing (because it was cut off by the depth cap, say)
+    // falls back to its OWN covering text and never reaches past the cap.
+    let text = if is_line_like(z) {
+        line_text(z)
+    } else {
+        z.text.trim().to_string()
+    };
+    if text.is_empty() {
+        return false;
+    }
+    out.push(Line {
+        text,
+        height: z.bbox.height(),
+        para_start: std::mem::replace(pending_para_start, false),
+    });
+    true
+}
+
+/// `true` when `z` has no children, or only Word/Char leaves — i.e. it plays the
+/// role a `Line` zone would in a fully-structured text layer.
+fn is_line_like(z: &Zone) -> bool {
+    z.children
+        .iter()
+        .all(|c| matches!(c.kind, ZoneKind::Word | ZoneKind::Char))
 }
 
 /// `pending_para_start` is set when we cross into a new paragraph container and
@@ -320,7 +381,135 @@ mod tests {
         assert!(!lines[1].para_start);
     }
 
-    // --- Task 6 tests ---
+    #[test]
+    fn para_zones_without_line_zones_still_yield_their_text() {
+        // A minimal `djvused '(page ... "text")'` layer bottoms out at Para:
+        // there is no Line zone anywhere, but the text is fully present.
+        let page = z(
+            ZoneKind::Page,
+            0.0,
+            "First para. Second para.",
+            vec![
+                z(ZoneKind::Para, 12.0, "First para.", vec![]),
+                z(ZoneKind::Para, 12.0, "Second para.", vec![]),
+            ],
+        );
+        let lines = page_lines(&page);
+        assert_eq!(lines.len(), 2, "lines: {lines:?}");
+        assert_eq!(lines[0].text, "First para.");
+        assert_eq!(lines[1].text, "Second para.");
+        assert!((lines[0].height - 12.0).abs() < 0.01);
+        // Each Para opens a paragraph.
+        assert!(lines[0].para_start && lines[1].para_start);
+    }
+
+    #[test]
+    fn page_with_only_its_own_text_yields_one_line() {
+        let page = z(ZoneKind::Page, 20.0, "Just the page text.", vec![]);
+        let lines = page_lines(&page);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Just the page text.");
+        assert!((lines[0].height - 20.0).abs() < 0.01);
+        assert!(lines[0].para_start);
+    }
+
+    #[test]
+    fn word_zones_without_line_zones_join_into_one_line() {
+        // Page -> Para -> Word*: the Para is the line-like unit, so its words
+        // join into a single line rather than one line per word.
+        let page = z(
+            ZoneKind::Page,
+            0.0,
+            "",
+            vec![z(
+                ZoneKind::Para,
+                14.0,
+                "",
+                vec![word("Hello", 14.0), word("world", 14.0)],
+            )],
+        );
+        let lines = page_lines(&page);
+        assert_eq!(lines.len(), 1, "lines: {lines:?}");
+        assert_eq!(lines[0].text, "Hello world");
+        assert!((lines[0].height - 14.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn covering_parent_text_is_never_emitted_alongside_descendants() {
+        // Every DjVu zone carries the text its subtree covers. The fallback must
+        // emit only the deepest text-bearing zones, never the parent as well.
+        let page = z(
+            ZoneKind::Page,
+            30.0,
+            "one two",
+            vec![z(
+                ZoneKind::Region,
+                20.0,
+                "one two",
+                vec![
+                    z(ZoneKind::Para, 12.0, "one", vec![]),
+                    z(ZoneKind::Para, 12.0, "two", vec![]),
+                ],
+            )],
+        );
+        let texts: Vec<String> = page_lines(&page).into_iter().map(|l| l.text).collect();
+        assert_eq!(texts, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn fallback_does_not_run_when_line_zones_exist() {
+        // A Page carrying covering text AND real Line zones: only the Lines are
+        // emitted; the parents' covering text must not be duplicated.
+        let page = z(
+            ZoneKind::Page,
+            30.0,
+            "one two",
+            vec![z(
+                ZoneKind::Para,
+                20.0,
+                "one two",
+                vec![line(12.0, &["one"]), line(12.0, &["two"])],
+            )],
+        );
+        let texts: Vec<String> = page_lines(&page).into_iter().map(|l| l.text).collect();
+        assert_eq!(texts, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn fallback_respects_the_depth_cap() {
+        // Text-bearing zone one level past the cap: dropped, not rescued.
+        let mut zone = z(ZoneKind::Para, 12.0, "too deep", vec![]);
+        for _ in 0..MAX_ZONE_DEPTH {
+            zone = z(ZoneKind::Region, 0.0, "", vec![zone]);
+        }
+        let page = z(ZoneKind::Page, 0.0, "", vec![zone]);
+        assert!(page_lines(&page).is_empty());
+
+        // One level shallower it is recovered.
+        let mut zone = z(ZoneKind::Para, 12.0, "at boundary", vec![]);
+        for _ in 0..(MAX_ZONE_DEPTH - 1) {
+            zone = z(ZoneKind::Region, 0.0, "", vec![zone]);
+        }
+        let page = z(ZoneKind::Page, 0.0, "", vec![zone]);
+        let lines = page_lines(&page);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "at boundary");
+    }
+
+    #[test]
+    fn empty_zone_tree_still_yields_no_lines() {
+        // The fallback must not manufacture lines: an empty layer stays empty so
+        // `mod.rs` can still emit its "present but empty" note.
+        let page = z(ZoneKind::Page, 0.0, "", vec![]);
+        assert!(page_lines(&page).is_empty());
+        let page = z(
+            ZoneKind::Page,
+            0.0,
+            "   ",
+            vec![z(ZoneKind::Para, 0.0, "  ", vec![])],
+        );
+        assert!(page_lines(&page).is_empty());
+    }
 
     fn body_line(t: &str) -> Line {
         Line {

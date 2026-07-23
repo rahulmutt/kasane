@@ -6,8 +6,9 @@ use crate::ParseError;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Recursion cap for the zone and bookmark trees; deeper nodes are dropped
-/// rather than blowing the stack on a hostile file.
-const MAX_ZONE_DEPTH: usize = 64;
+/// rather than blowing the stack on a hostile file. `text.rs` imports this same
+/// constant so the conversion cap and the flattening cap cannot drift apart.
+pub(crate) const MAX_ZONE_DEPTH: usize = 64;
 
 /// Spec-mandated rejection text for indirect (multi-file) documents. It must
 /// not read as "unsupported"/"DRM"/"encrypted" — those map to other exit codes.
