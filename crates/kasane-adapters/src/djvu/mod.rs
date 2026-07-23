@@ -13,6 +13,9 @@ use text::{modal_body_height, page_blocks, page_lines, Line};
 
 /// Emitted for a page that has no text layer at all and nothing else to say.
 const NO_TEXT_NOTE: &str = "no text layer; OCR not enabled";
+/// Emitted for a page whose text layer is present but yielded no recoverable
+/// lines (distinct from `NO_TEXT_NOTE`: the layer exists, it's just empty).
+const EMPTY_TEXT_NOTE: &str = "text layer present but empty; no recoverable text";
 
 pub struct DjvuAdapter;
 
@@ -34,10 +37,7 @@ impl Adapter for DjvuAdapter {
             let lines = root.as_ref().map(page_lines).unwrap_or_default();
             // Bomb guard over recovered text, cumulative across pages.
             let page_bytes: u64 = lines.iter().map(|l| l.text.len() as u64).sum();
-            total_text_bytes = total_text_bytes.saturating_add(page_bytes);
-            if total_text_bytes > MAX_TOTAL_BYTES {
-                return Err(ParseError::Bomb);
-            }
+            total_text_bytes = accumulate_text_bytes(total_text_bytes, page_bytes)?;
             pages.push((p, root.is_some(), lines));
         }
 
@@ -114,12 +114,17 @@ fn page_nodes_from_lines(
         });
     }
 
-    // No text layer, no outline heading, nothing recovered -> honest note.
-    if !has_text && headings.is_empty() && !had_blocks {
+    // No outline heading, nothing recovered -> honest note. Every such page must
+    // leave a trace, but the wording distinguishes "no text layer at all" from
+    // "text layer present but empty after filtering".
+    if headings.is_empty() && !had_blocks {
+        let note = if has_text {
+            EMPTY_TEXT_NOTE
+        } else {
+            NO_TEXT_NOTE
+        };
         out.push(Node {
-            block: Block::Raw {
-                note: NO_TEXT_NOTE.into(),
-            },
+            block: Block::Raw { note: note.into() },
             prov,
         });
     }
@@ -147,6 +152,18 @@ fn page_nodes(
         infer_headings,
         text_root.is_some(),
     )
+}
+
+/// Cumulative bomb guard over recovered text bytes: adds `page_bytes` to `total`
+/// and rejects once the running total exceeds `MAX_TOTAL_BYTES`. Saturating so a
+/// pathological `page_bytes` (or an already-huge `total`) cannot wrap around to a
+/// small value and slip past the check.
+fn accumulate_text_bytes(total: u64, page_bytes: u64) -> Result<u64, ParseError> {
+    let new_total = total.saturating_add(page_bytes);
+    if new_total > MAX_TOTAL_BYTES {
+        return Err(ParseError::Bomb);
+    }
+    Ok(new_total)
 }
 
 /// Title from the source filename stem (DjVu metadata title handled in `doc.rs`).
@@ -261,11 +278,20 @@ mod tests {
     #[test]
     fn present_but_empty_text_layer_is_not_a_no_text_page() {
         // A text layer that exists but yields no lines is distinct from `None`:
-        // it must NOT claim "no text layer".
+        // it must NOT claim "no text layer" -- but the page must still be
+        // represented in the output, not silently dropped.
         let mut id = 0u32;
         let root = page_zone(vec![]);
         let nodes = page_nodes(2, Some(&root), &[], &mut id, 0.0, true);
-        assert!(nodes.is_empty(), "nodes: {nodes:?}");
+        assert_eq!(nodes.len(), 1, "nodes: {nodes:?}");
+        match &nodes[0].block {
+            Block::Raw { note } => {
+                assert_eq!(note, EMPTY_TEXT_NOTE);
+                assert!(!note.contains("no text layer"), "note: {note}");
+            }
+            other => panic!("expected a Raw note, got {other:?}"),
+        }
+        assert_eq!(nodes[0].prov.source_pages, Some((2, 2)));
     }
 
     #[test]
@@ -325,5 +351,34 @@ mod tests {
         assert_eq!(derive_title("a/b/sample.djvu"), "sample");
         assert_eq!(derive_title("sample.djv"), "sample");
         assert_eq!(derive_title("noext"), "noext");
+    }
+
+    #[test]
+    fn accumulate_text_bytes_allows_exactly_at_the_cap() {
+        // Landing exactly on MAX_TOTAL_BYTES must NOT trip: the guard is `>`, not `>=`.
+        let total = accumulate_text_bytes(0, MAX_TOTAL_BYTES).unwrap();
+        assert_eq!(total, MAX_TOTAL_BYTES);
+        // Building up to the cap across multiple pages must also not trip.
+        let total = accumulate_text_bytes(MAX_TOTAL_BYTES - 1, 1).unwrap();
+        assert_eq!(total, MAX_TOTAL_BYTES);
+    }
+
+    #[test]
+    fn accumulate_text_bytes_trips_one_byte_past_the_cap() {
+        let err = accumulate_text_bytes(0, MAX_TOTAL_BYTES + 1).unwrap_err();
+        assert!(matches!(err, ParseError::Bomb));
+        let err = accumulate_text_bytes(MAX_TOTAL_BYTES, 1).unwrap_err();
+        assert!(matches!(err, ParseError::Bomb));
+    }
+
+    #[test]
+    fn accumulate_text_bytes_saturates_instead_of_wrapping() {
+        // A huge running total plus a huge page contribution must saturate to
+        // u64::MAX (and thus trip Bomb), never wrap around to a small value that
+        // would slip back under the cap.
+        let err = accumulate_text_bytes(u64::MAX, u64::MAX).unwrap_err();
+        assert!(matches!(err, ParseError::Bomb));
+        let err = accumulate_text_bytes(u64::MAX, 1).unwrap_err();
+        assert!(matches!(err, ParseError::Bomb));
     }
 }
