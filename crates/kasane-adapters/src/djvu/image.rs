@@ -7,8 +7,6 @@ use kasane_ir::{AssetBag, AssetItem, AssetRef, Block};
 
 /// Render page `page` (1-based) to a PNG and return the `Figure` referencing the
 /// appended asset. `None` when the page has no dimensions or nothing decodes.
-// Wired into parse() in Task 4; remove the allow then.
-#[allow(dead_code)]
 pub fn render_page_image(doc: &doc::DjvuDoc, page: u32, assets: &mut AssetBag) -> Option<Block> {
     let (nw, nh) = doc::page_dims(doc, page)?;
     if nw == 0 || nh == 0 {
@@ -31,11 +29,9 @@ pub fn render_page_image(doc: &doc::DjvuDoc, page: u32, assets: &mut AssetBag) -
 
 /// `None` when `(nw, nh)` is within the pixel budget (render at native size);
 /// otherwise the largest same-aspect `(w, h)` whose area is within budget.
-// Wired into parse() in Task 4; remove the allow then.
-#[allow(dead_code)]
-// The casts are intentional and bounded: `scale` in [0, 1], and both operands
-// are already validated on-disk page dimensions well under u32/f64 precision.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+/// The `.max(1)` floor is safe because real dimensions come from a `u16` page
+/// size, so the extreme-aspect-ratio case that could otherwise exceed the
+/// budget is unreachable.
 fn capped_target(nw: u32, nh: u32) -> Option<(u32, u32)> {
     let pixels = (nw as u64).saturating_mul(nh as u64);
     if nw == 0 || nh == 0 || pixels <= MAX_RENDER_PIXELS {
@@ -50,8 +46,6 @@ fn capped_target(nw: u32, nh: u32) -> Option<(u32, u32)> {
 /// Downscale a bilevel bitmap to `tw x th` by "any black in the source block":
 /// an output pixel is black if any covered source pixel is black. Preserves thin
 /// strokes better than point sampling.
-// Wired into parse() in Task 4; remove the allow then.
-#[allow(dead_code)]
 fn downscale_mask(bm: &Bitmap, tw: u32, th: u32) -> Bitmap {
     let mut out = Bitmap::new(tw, th);
     if tw == 0 || th == 0 || bm.width == 0 || bm.height == 0 {
@@ -81,8 +75,6 @@ fn downscale_mask(bm: &Bitmap, tw: u32, th: u32) -> Bitmap {
 /// 1-bit grayscale PNG. `Bitmap` uses bit 1 = black; PNG grayscale uses sample
 /// 0 = black, so every packed byte is inverted. Padding bits in each row's last
 /// byte are ignored by decoders. `None` on a zero dimension or encoder error.
-// Wired into parse() in Task 4; remove the allow then.
-#[allow(dead_code)]
 fn mask_to_png(bm: &Bitmap) -> Option<Vec<u8>> {
     if bm.width == 0 || bm.height == 0 {
         return None;
@@ -100,8 +92,6 @@ fn mask_to_png(bm: &Bitmap) -> Option<Vec<u8>> {
 }
 
 /// 8-bit RGB PNG from an RGBA pixmap (DjVu pages are opaque; drop alpha).
-// Wired into parse() in Task 4; remove the allow then.
-#[allow(dead_code)]
 fn pixmap_to_png(px: &Pixmap) -> Option<Vec<u8>> {
     if px.width == 0 || px.height == 0 {
         return None;
@@ -123,8 +113,6 @@ fn pixmap_to_png(px: &Pixmap) -> Option<Vec<u8>> {
 }
 
 /// Append the PNG as an asset and build the `Figure` referencing it.
-// Wired into parse() in Task 4; remove the allow then.
-#[allow(dead_code)]
 fn push_page_asset(assets: &mut AssetBag, page: u32, bytes: Vec<u8>) -> Block {
     let key = format!("djvu-page-{page}");
     let idx = assets.items.len();
