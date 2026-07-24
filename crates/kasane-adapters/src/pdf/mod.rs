@@ -88,9 +88,10 @@ impl Adapter for PdfAdapter {
             let asset_mark = assets.items.len();
             let imgs = extract_page_images(&pdf, page.id, &mut assets);
             let had_image = imgs.had_image;
+            let skipped = imgs.skipped;
 
             // OCR only a text-less page that produced a decoded raster.
-            let outcome = if !has_text && imgs.had_image {
+            let outcome = if !has_text && !imgs.figures.is_empty() {
                 opts.ocr.map(|ex| {
                     let mut lines = Vec::new();
                     for f in &imgs.figures {
@@ -135,7 +136,7 @@ impl Adapter for PdfAdapter {
                             prov: prov.clone(),
                         });
                     }
-                    if imgs.had_image && !has_text {
+                    if had_image && !has_text {
                         let note = if ocr_fell_back {
                             OCR_IMG_NOTE
                         } else {
@@ -146,15 +147,16 @@ impl Adapter for PdfAdapter {
                             prov: prov.clone(),
                         });
                     }
-                    for filter in imgs.skipped {
-                        nodes.push(Node {
-                            block: Block::Raw {
-                                note: format!("image not extracted (filter: {filter})"),
-                            },
-                            prov: prov.clone(),
-                        });
-                    }
                 }
+            }
+
+            for filter in skipped {
+                nodes.push(Node {
+                    block: Block::Raw {
+                        note: format!("image not extracted (filter: {filter})"),
+                    },
+                    prov: prov.clone(),
+                });
             }
 
             // Fully empty page (no heading, text, or image) still gets represented.
