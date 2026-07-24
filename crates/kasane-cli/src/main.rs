@@ -23,6 +23,15 @@ struct Args {
     /// Size-guard merge threshold (estimated tokens)
     #[arg(long, default_value_t = 200)]
     min_tokens: usize,
+    /// Run OCR on text-less pages (requires a build compiled with `-F ocr`)
+    #[arg(long)]
+    ocr: bool,
+    /// OCR language(s), e.g. "eng" or "eng+deu" (used with --ocr)
+    #[arg(long, default_value = "eng")]
+    ocr_lang: String,
+    /// With --ocr, emit OCR text even at low confidence and never a page image
+    #[arg(long)]
+    ocr_no_image: bool,
 }
 
 /// Map an error message to an exit code: 2 for unsupported/DRM/encrypted, else 1.
@@ -44,6 +53,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// On a build without the `ocr` feature, reject `--ocr` with a clear, exit-2
+/// error (the message contains "unsupported" so `exit_code_for` maps it to 2).
+#[cfg(not(feature = "ocr"))]
+fn ensure_ocr_available(ocr_requested: bool) -> Result<()> {
+    if ocr_requested {
+        bail!("OCR is unsupported in this build; rebuild with `-F ocr` (requires Tesseract + Leptonica)");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "ocr")]
+fn ensure_ocr_available(_ocr_requested: bool) -> Result<()> {
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let args = Args::parse();
     let bytes =
@@ -51,8 +75,40 @@ fn run() -> Result<()> {
     let ext = args.input.extension().and_then(|s| s.to_str());
     let fmt = kasane_adapters::detect(&bytes, ext).context("unsupported or unrecognized format")?;
     let adapter = kasane_adapters::adapter_for(fmt).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    ensure_ocr_available(args.ocr)?;
+
+    #[cfg(feature = "ocr")]
+    let extractor = if args.ocr {
+        Some(
+            kasane_adapters::ocr::TesseractExtractor::new(&args.ocr_lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        )
+    } else {
+        None
+    };
+
+    let ocr_opts = kasane_adapters::ocr::OcrOptions {
+        lang: args.ocr_lang.clone(),
+        force_text: args.ocr_no_image,
+        ..Default::default()
+    };
+
+    #[cfg(feature = "ocr")]
+    let parse_opts = kasane_adapters::ParseOptions {
+        ocr: extractor
+            .as_ref()
+            .map(|e| e as &dyn kasane_adapters::ocr::TextExtractor),
+        ocr_opts,
+    };
+    #[cfg(not(feature = "ocr"))]
+    let parse_opts = kasane_adapters::ParseOptions {
+        ocr: None,
+        ocr_opts,
+    };
+
     let (doc, assets) = adapter
-        .parse(&bytes, &args.input.to_string_lossy())
+        .parse_with(&bytes, &args.input.to_string_lossy(), &parse_opts)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let opts = kasane_core::Options {
@@ -79,12 +135,27 @@ fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::exit_code_for;
+    use super::*;
 
     #[test]
     fn encrypted_maps_to_exit_two() {
         assert_eq!(exit_code_for("encrypted content"), 2);
         assert_eq!(exit_code_for("DRM-protected content is not supported"), 2);
         assert_eq!(exit_code_for("malformed input: bad xref"), 1);
+    }
+
+    #[cfg(not(feature = "ocr"))]
+    #[test]
+    fn ocr_flag_rejected_without_feature() {
+        let err = ensure_ocr_available(true).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unsupported"), "msg was: {msg}");
+        assert_eq!(exit_code_for(&msg), 2);
+    }
+
+    #[cfg(not(feature = "ocr"))]
+    #[test]
+    fn no_ocr_flag_is_fine_without_feature() {
+        assert!(ensure_ocr_available(false).is_ok());
     }
 }

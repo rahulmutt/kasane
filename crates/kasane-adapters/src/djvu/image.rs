@@ -5,25 +5,28 @@
 use super::doc::{self, Bitmap, Pixmap, MAX_RENDER_PIXELS};
 use kasane_ir::{AssetBag, AssetItem, AssetRef, Block};
 
-/// Render page `page` (1-based) to a PNG and return the `Figure` referencing the
-/// appended asset. `None` when the page has no dimensions or nothing decodes.
-pub fn render_page_image(doc: &doc::DjvuDoc, page: u32, assets: &mut AssetBag) -> Option<Block> {
+/// Render page `page` (1-based) to PNG bytes, without touching the asset bag.
+/// `None` when the page has no dimensions or nothing decodes.
+pub(super) fn render_page_png(doc: &doc::DjvuDoc, page: u32) -> Option<Vec<u8>> {
     let (nw, nh) = doc::page_dims(doc, page)?;
     if nw == 0 || nh == 0 {
         return None;
     }
-
-    let png = if let Some(mut mask) = doc::page_mask(doc, page) {
+    if let Some(mut mask) = doc::page_mask(doc, page) {
         if let Some((tw, th)) = capped_target(mask.width, mask.height) {
             mask = downscale_mask(&mask, tw, th);
         }
-        mask_to_png(&mask)?
+        mask_to_png(&mask)
     } else {
         let (tw, th) = capped_target(nw, nh).unwrap_or((nw, nh));
         let px = doc::page_pixmap(doc, page, tw, th)?;
-        pixmap_to_png(&px)?
-    };
+        pixmap_to_png(&px)
+    }
+}
 
+/// Render page `page` to a PNG asset and return the `Figure` referencing it.
+pub fn render_page_image(doc: &doc::DjvuDoc, page: u32, assets: &mut AssetBag) -> Option<Block> {
+    let png = render_page_png(doc, page)?;
     Some(push_page_asset(assets, page, png))
 }
 
@@ -115,7 +118,7 @@ fn pixmap_to_png(px: &Pixmap) -> Option<Vec<u8>> {
 }
 
 /// Append the PNG as an asset and build the `Figure` referencing it.
-fn push_page_asset(assets: &mut AssetBag, page: u32, bytes: Vec<u8>) -> Block {
+pub(super) fn push_page_asset(assets: &mut AssetBag, page: u32, bytes: Vec<u8>) -> Block {
     let key = format!("djvu-page-{page}");
     let idx = assets.items.len();
     assets.items.push(AssetItem {

@@ -18,11 +18,15 @@ mobi = "0.8"
 lopdf = { version = "0.44", default-features = false }
 png = "0.17"
 djvu-rs = "0.27"
+leptess = { version = "0.14", optional = true }
 
 [dev-dependencies]
 kasane-core.workspace = true
 kasane-writer.workspace = true
 tempfile = "3"
+
+[features]
+ocr = ["dep:leptess"]
 
 [lints]
 workspace = true

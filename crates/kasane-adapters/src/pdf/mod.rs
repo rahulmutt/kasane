@@ -4,6 +4,7 @@ mod image;
 mod layout;
 mod outline;
 
+use crate::ocr::{self, OcrOutcome};
 use crate::{Adapter, ParseError};
 use content::page_text_runs;
 use image::extract_page_images;
@@ -11,10 +12,22 @@ use kasane_ir::*;
 use layout::{group_lines, modal_body_size, page_blocks_no_headings, Line};
 use outline::outline_by_page;
 
+/// Page image kept because OCR ran but produced nothing confident.
+const OCR_IMG_NOTE: &str = "page image only; OCR found no confident text";
+/// `--ocr-no-image` and OCR recovered nothing: note only, no image.
+const OCR_NO_TEXT_NOTE: &str = "no text recovered by OCR";
+/// Legacy note for a scanned page on a build/run without OCR.
+const SCANNED_NOTE: &str = "scanned page: no text layer; OCR not enabled";
+
 pub struct PdfAdapter;
 
 impl Adapter for PdfAdapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        opts: &crate::ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError> {
         let pdf = doc::open(bytes)?;
         let page_list = doc::pages(&pdf);
         let outline = outline_by_page(&pdf);
@@ -71,23 +84,73 @@ impl Adapter for PdfAdapter {
                 });
             }
 
-            // Images, and a scanned-page note for text-less image pages.
+            // Images, then OCR / scanned-page handling for text-less image pages.
+            let asset_mark = assets.items.len();
             let imgs = extract_page_images(&pdf, page.id, &mut assets);
-            for f in imgs.figures {
-                nodes.push(Node {
-                    block: f,
-                    prov: prov.clone(),
-                });
+            let had_image = imgs.had_image;
+            let skipped = imgs.skipped;
+
+            // OCR only a text-less page that produced a decoded raster.
+            let outcome = if !has_text && !imgs.figures.is_empty() {
+                opts.ocr.map(|ex| {
+                    let mut lines = Vec::new();
+                    for f in &imgs.figures {
+                        if let Block::Figure { image, .. } = f {
+                            let bytes = assets.items[image.bytes_ref].bytes.clone();
+                            lines.extend(ocr::extract_guarded(ex, &bytes, &opts.ocr_opts));
+                        }
+                    }
+                    (ocr::decide(&lines, &opts.ocr_opts), lines)
+                })
+            } else {
+                None
+            };
+
+            let ocr_fell_back = matches!(&outcome, Some((OcrOutcome::ImageFallback, _)));
+            match outcome {
+                Some((OcrOutcome::Text, lines)) => {
+                    assets.items.truncate(asset_mark); // drop the page images
+                    let mapped: Vec<Line> = lines.iter().map(map_ocr_line).collect();
+                    let bs = modal_body_size(std::slice::from_ref(&mapped));
+                    for b in page_blocks_no_headings(&mapped, &mut next_id, bs) {
+                        nodes.push(Node {
+                            block: b,
+                            prov: prov.clone(),
+                        });
+                    }
+                }
+                Some((OcrOutcome::NoteOnly, _)) => {
+                    assets.items.truncate(asset_mark);
+                    nodes.push(Node {
+                        block: Block::Raw {
+                            note: OCR_NO_TEXT_NOTE.into(),
+                        },
+                        prov: prov.clone(),
+                    });
+                }
+                _ => {
+                    // ImageFallback, or OCR disabled: emit figures + a note.
+                    for f in imgs.figures {
+                        nodes.push(Node {
+                            block: f,
+                            prov: prov.clone(),
+                        });
+                    }
+                    if had_image && !has_text {
+                        let note = if ocr_fell_back {
+                            OCR_IMG_NOTE
+                        } else {
+                            SCANNED_NOTE
+                        };
+                        nodes.push(Node {
+                            block: Block::Raw { note: note.into() },
+                            prov: prov.clone(),
+                        });
+                    }
+                }
             }
-            if imgs.had_image && !has_text {
-                nodes.push(Node {
-                    block: Block::Raw {
-                        note: "scanned page: no text layer; OCR not enabled".into(),
-                    },
-                    prov: prov.clone(),
-                });
-            }
-            for filter in imgs.skipped {
+
+            for filter in skipped {
                 nodes.push(Node {
                     block: Block::Raw {
                         note: format!("image not extracted (filter: {filter})"),
@@ -98,7 +161,7 @@ impl Adapter for PdfAdapter {
 
             // Fully empty page (no heading, text, or image) still gets represented.
             let page_has_heading = outline.contains_key(num);
-            if !has_text && !imgs.had_image && !page_has_heading {
+            if !has_text && !had_image && !page_has_heading {
                 nodes.push(Node {
                     block: Block::Raw {
                         note: raw_empty_note(*num),
@@ -130,6 +193,18 @@ struct Line0 {
 
 fn raw_empty_note(page: u32) -> String {
     format!("page {page}: no extractable text")
+}
+
+/// Map an OCR line into PDF's line type. PDF `Line.y` is bottom-up (larger =
+/// higher); OCR `bbox.y` is top-down, so negate it to keep reading order under
+/// `page_blocks_no_headings`'s gap logic. `bbox.h` is the heading-size proxy.
+fn map_ocr_line(l: &ocr::OcrLine) -> Line {
+    Line {
+        x: l.bbox.x,
+        y: -l.bbox.y,
+        size: l.bbox.h,
+        text: l.text.clone(),
+    }
 }
 
 /// Title from the document Info dictionary, falling back to the file stem.
@@ -166,6 +241,8 @@ fn info_string(pdf: &lopdf::Document, key: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocr::{OcrBBox, OcrLine, StubExtractor};
+    use crate::ParseOptions;
     use kasane_ir::{Block, Inline};
 
     fn parse(name: &str) -> Document {
@@ -229,5 +306,90 @@ mod tests {
             .any(|n| matches!(&n.block, Block::Figure { .. })));
         assert!(doc.nodes.iter().any(|n| matches!(&n.block,
             Block::Raw { note } if note.contains("scanned page"))));
+    }
+
+    fn pdf_ocr_line(text: &str, h: f32, conf: f32) -> OcrLine {
+        OcrLine {
+            text: text.into(),
+            bbox: OcrBBox {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h,
+            },
+            confidence: conf,
+        }
+    }
+
+    fn parse_scanned_pdf(
+        stub: &StubExtractor,
+        force_text: bool,
+    ) -> (Document, kasane_ir::AssetBag) {
+        let bytes = std::fs::read("../../tests/fixtures/pdf/scanned.pdf").unwrap();
+        let opts = ParseOptions {
+            ocr: Some(stub),
+            ocr_opts: crate::ocr::OcrOptions {
+                force_text,
+                ..Default::default()
+            },
+        };
+        PdfAdapter.parse_with(&bytes, "scanned.pdf", &opts).unwrap()
+    }
+
+    #[test]
+    fn pdf_ocr_recovers_text_and_drops_figure() {
+        let stub = StubExtractor::new(vec![pdf_ocr_line(
+            "recovered scanned paragraph text here",
+            12.0,
+            91.0,
+        )]);
+        let (doc, assets) = parse_scanned_pdf(&stub, false);
+        assert!(
+            !doc.nodes
+                .iter()
+                .any(|n| matches!(&n.block, Block::Figure { .. })),
+            "OCR success must drop the page image"
+        );
+        assert!(!doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Raw { note } if note.contains("scanned page"))));
+        assert!(
+            assets.items.is_empty(),
+            "the dropped image asset must be truncated"
+        );
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block, Block::Para(_))));
+    }
+
+    #[test]
+    fn pdf_ocr_low_confidence_keeps_figure() {
+        let stub = StubExtractor::new(vec![pdf_ocr_line("garbled low conf scan line", 12.0, 18.0)]);
+        let (doc, assets) = parse_scanned_pdf(&stub, false);
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Raw { note } if note.contains("OCR found no confident text"))));
+        assert_eq!(assets.items.len(), 1);
+    }
+
+    #[test]
+    fn pdf_ocr_never_touches_text_pages() {
+        // A born-digital fixture: OCR on must change nothing.
+        let bytes = std::fs::read("../../tests/fixtures/pdf/minimal.pdf").unwrap();
+        let stub = StubExtractor::new(vec![pdf_ocr_line("SHOULD NOT APPEAR", 40.0, 99.0)]);
+        let opts = ParseOptions {
+            ocr: Some(&stub),
+            ocr_opts: crate::ocr::OcrOptions::default(),
+        };
+        let with_ocr = PdfAdapter
+            .parse_with(&bytes, "minimal.pdf", &opts)
+            .unwrap()
+            .0;
+        let without = PdfAdapter.parse(&bytes, "minimal.pdf").unwrap().0;
+        assert_eq!(with_ocr.nodes.len(), without.nodes.len());
+        assert!(!with_ocr
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
     }
 }

@@ -8,7 +8,12 @@ use kasane_ir::*;
 pub struct EpubAdapter;
 
 impl Adapter for EpubAdapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        _opts: &crate::ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError> {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| ParseError::Malformed(e.to_string()))?;
 

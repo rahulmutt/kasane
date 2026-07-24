@@ -7,6 +7,7 @@ mod outline;
 mod text;
 
 use crate::guard::MAX_TOTAL_BYTES;
+use crate::ocr::{self, OcrOutcome};
 use crate::{Adapter, ParseError};
 use kasane_ir::{AssetBag, Block, BlockId, DocMeta, Document, Inline, Node, Provenance};
 use outline::{outline_by_page, OutlineHeading};
@@ -21,11 +22,20 @@ const EMPTY_TEXT_NOTE: &str = "text layer present but empty; no recoverable text
 const IMG_NO_TEXT_NOTE: &str = "page image only; no text layer, OCR not enabled";
 /// Emitted with a rendered page image when the text layer was present but empty.
 const IMG_EMPTY_TEXT_NOTE: &str = "page image only; text layer present but empty";
+/// Page image kept because OCR ran but produced nothing confident.
+const OCR_IMG_NOTE: &str = "page image only; OCR found no confident text";
+/// `--ocr-no-image` and OCR recovered nothing: note only, no image.
+const OCR_NO_TEXT_NOTE: &str = "no text recovered by OCR";
 
 pub struct DjvuAdapter;
 
 impl Adapter for DjvuAdapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        opts: &crate::ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError> {
         let djvu = doc::open(bytes)?;
         let n = doc::page_count(&djvu);
         let outline = outline_by_page(&doc::bookmarks(&djvu));
@@ -63,6 +73,58 @@ impl Adapter for DjvuAdapter {
                 let mut probe = next_id;
                 page_blocks(lines, &mut probe, body_height, !has_outline).is_empty()
             };
+
+            // OCR path: only text-less pages, only when an extractor is present.
+            // `render_page_png` must stay gated behind `opts.ocr` -- it must not
+            // run on the default (no-OCR) path, which would render the page
+            // twice (once here, once in the `render_page_image` fallthrough).
+            if text_less {
+                if let Some(ex) = opts.ocr {
+                    if let Some(png) = image::render_page_png(&djvu, *p) {
+                        let ocr_lines = ocr::extract_guarded(ex, &png, &opts.ocr_opts);
+                        match ocr::decide(&ocr_lines, &opts.ocr_opts) {
+                            OcrOutcome::Text => {
+                                let mapped: Vec<Line> =
+                                    ocr_lines.iter().map(map_ocr_line).collect();
+                                let bh = modal_body_height(std::slice::from_ref(&mapped));
+                                let blocks = page_blocks(&mapped, &mut next_id, bh, true);
+                                let prov = page_prov(*p);
+                                nodes.extend(blocks.into_iter().map(|b| Node {
+                                    block: b,
+                                    prov: prov.clone(),
+                                }));
+                                continue;
+                            }
+                            OcrOutcome::NoteOnly => {
+                                nodes.push(Node {
+                                    block: Block::Raw {
+                                        note: OCR_NO_TEXT_NOTE.into(),
+                                    },
+                                    prov: page_prov(*p),
+                                });
+                                continue;
+                            }
+                            OcrOutcome::ImageFallback => {
+                                let figure = image::push_page_asset(&mut assets, *p, png);
+                                let prov = page_prov(*p);
+                                nodes.push(Node {
+                                    block: figure,
+                                    prov: prov.clone(),
+                                });
+                                nodes.push(Node {
+                                    block: Block::Raw {
+                                        note: OCR_IMG_NOTE.into(),
+                                    },
+                                    prov,
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // No OCR (disabled, or not text-less): unchanged behavior.
             let page_image = if text_less {
                 image::render_page_image(&djvu, *p, &mut assets)
             } else {
@@ -175,6 +237,24 @@ fn page_nodes_from_lines(
         }
     }
     out
+}
+
+/// Map an OCR line into DjVu's line type. `bbox.h` is the heading-size proxy;
+/// `para_start` is left false, so an OCR page merges into one paragraph plus any
+/// inferred headings — coarse but consistent with a text-less scan.
+fn map_ocr_line(l: &ocr::OcrLine) -> Line {
+    Line {
+        text: l.text.clone(),
+        height: l.bbox.h,
+        para_start: false,
+    }
+}
+
+fn page_prov(page: u32) -> Provenance {
+    Provenance {
+        source_pages: Some((page, page)),
+        source_href: None,
+    }
 }
 
 /// Test-facing wrapper: assemble a page from an optional text-layer zone. Shares
@@ -470,5 +550,123 @@ mod tests {
                 .any(|n| matches!(&n.block, Block::Figure { .. })),
             "text-bearing fixture must not produce a page image"
         );
+    }
+
+    use crate::ocr::{OcrBBox, OcrLine, StubExtractor};
+    use crate::ParseOptions;
+
+    fn ocr_line(text: &str, h: f32, conf: f32) -> OcrLine {
+        OcrLine {
+            text: text.into(),
+            bbox: OcrBBox {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h,
+            },
+            confidence: conf,
+        }
+    }
+
+    fn parse_scanned_with_ocr(stub: &StubExtractor, force_text: bool) -> Document {
+        let bytes = std::fs::read("../../tests/fixtures/djvu/scanned.djvu").unwrap();
+        let opts = ParseOptions {
+            ocr: Some(stub),
+            ocr_opts: crate::ocr::OcrOptions {
+                force_text,
+                ..Default::default()
+            },
+        };
+        DjvuAdapter
+            .parse_with(&bytes, "scanned.djvu", &opts)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn djvu_ocr_recovers_text_and_drops_image() {
+        let stub = StubExtractor::new(vec![
+            ocr_line("A Tall Heading", 30.0, 92.0),
+            // Two body-height lines (not one) so `modal_body_height`'s modal count
+            // (2 vs 1) is unambiguous -- a 1-vs-1 tie is resolved via `HashMap`
+            // iteration order, which is randomized per process and would make this
+            // assertion flaky.
+            ocr_line("body text one two three four", 10.0, 90.0),
+            ocr_line("more body text five six seven", 10.0, 90.0),
+        ]);
+        let doc = parse_scanned_with_ocr(&stub, false);
+        assert!(
+            !doc.nodes
+                .iter()
+                .any(|n| matches!(&n.block, Block::Figure { .. })),
+            "OCR success must drop the page image"
+        );
+        assert!(
+            !doc.nodes
+                .iter()
+                .any(|n| matches!(&n.block, Block::Raw { .. })),
+            "OCR success must not leave a fallback note"
+        );
+        assert!(
+            doc.nodes
+                .iter()
+                .any(|n| matches!(&n.block, Block::Heading { .. })),
+            "the tall line should infer a heading"
+        );
+    }
+
+    #[test]
+    fn djvu_ocr_low_confidence_keeps_image() {
+        let stub = StubExtractor::new(vec![ocr_line("garbled low conf line", 10.0, 20.0)]);
+        let doc = parse_scanned_with_ocr(&stub, false);
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Raw { note } if note.contains("OCR found no confident text"))));
+    }
+
+    #[test]
+    fn djvu_ocr_no_image_flag_emits_text_below_threshold() {
+        let stub = StubExtractor::new(vec![ocr_line("low conf but forced text here", 10.0, 15.0)]);
+        let doc = parse_scanned_with_ocr(&stub, true);
+        assert!(!doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block, Block::Para(_))));
+    }
+
+    #[test]
+    fn djvu_ocr_no_image_flag_emits_note_when_nothing_recovered() {
+        // force_text + zero recovered lines => NoteOnly: a note, no image, no text.
+        let stub = StubExtractor::new(vec![]);
+        let doc = parse_scanned_with_ocr(&stub, true);
+        assert!(
+            !doc.nodes
+                .iter()
+                .any(|n| matches!(&n.block, Block::Figure { .. })),
+            "NoteOnly must not keep the page image"
+        );
+        assert!(
+            !doc.nodes.iter().any(|n| matches!(&n.block, Block::Para(_))),
+            "NoteOnly recovers no text"
+        );
+        assert!(
+            doc.nodes.iter().any(|n| matches!(&n.block,
+                Block::Raw { note } if note.contains("no text recovered by OCR"))),
+            "NoteOnly must emit the OCR_NO_TEXT_NOTE"
+        );
+    }
+
+    #[test]
+    fn djvu_ocr_panic_falls_back_to_image() {
+        let stub = StubExtractor::panicking();
+        let doc = parse_scanned_with_ocr(&stub, false);
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::Figure { .. })));
     }
 }

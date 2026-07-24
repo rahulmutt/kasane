@@ -22,5 +22,12 @@ run = "cargo test --workspace"
 run = ["cargo fmt --all -- --check",
        "cargo clippy --workspace --all-targets -- -D warnings"]
 
+[tasks.test-ocr]
+run = "cargo test --workspace --features ocr"
+
+[tasks.lint-ocr]
+run = ["cargo fmt --all -- --check",
+       "cargo clippy --workspace --all-targets --features ocr -- -D warnings"]
+
 [tasks.convert]
 run = "cargo run -p kasane-cli --"

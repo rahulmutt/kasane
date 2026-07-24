@@ -3,6 +3,7 @@ mod djvu;
 mod epub;
 mod guard;
 mod mobi;
+pub mod ocr;
 mod pdf;
 mod pptx;
 mod xmltext;
@@ -16,6 +17,7 @@ pub use pdf::PdfAdapter;
 pub use pptx::PptxAdapter;
 
 use kasane_ir::{AssetBag, Document};
+use ocr::{OcrOptions, TextExtractor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -31,8 +33,27 @@ pub enum ParseError {
     Bomb,
 }
 
+/// Per-parse configuration threaded from the CLI to the adapters. Adapters that
+/// don't OCR ignore it; `Default` disables OCR entirely.
+#[derive(Default)]
+pub struct ParseOptions<'a> {
+    pub ocr: Option<&'a dyn TextExtractor>,
+    pub ocr_opts: OcrOptions,
+}
+
 pub trait Adapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError>;
+    /// Parse with options. Adapters implement this.
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        opts: &ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError>;
+
+    /// Convenience: parse with default (no-OCR) options. Existing callers use this.
+    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+        self.parse_with(bytes, source_path, &ParseOptions::default())
+    }
 }
 
 pub fn adapter_for(fmt: Format) -> Result<Box<dyn Adapter>, ParseError> {
@@ -163,5 +184,14 @@ mod tests {
     fn pdf_format_has_an_adapter() {
         // Regression: Pdf used to fall into the `_ => Unsupported` arm.
         assert!(adapter_for(Format::Pdf).is_ok());
+    }
+    #[test]
+    fn parse_defaults_to_no_ocr_and_matches_parse_with() {
+        let bytes = std::fs::read("../../tests/fixtures/epub/minimal.epub").unwrap();
+        let a = EpubAdapter.parse(&bytes, "minimal.epub").unwrap();
+        let b = EpubAdapter
+            .parse_with(&bytes, "minimal.epub", &ParseOptions::default())
+            .unwrap();
+        assert_eq!(a.0.nodes.len(), b.0.nodes.len());
     }
 }
