@@ -16,7 +16,12 @@ const FILE_KEY: &str = "book";
 pub struct MobiAdapter;
 
 impl Adapter for MobiAdapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        _opts: &crate::ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError> {
         let db = PalmDb::parse(bytes)?;
         let rec0 = db
             .record(0)

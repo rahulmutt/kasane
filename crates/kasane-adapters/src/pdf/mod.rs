@@ -14,7 +14,13 @@ use outline::outline_by_page;
 pub struct PdfAdapter;
 
 impl Adapter for PdfAdapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        opts: &crate::ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError> {
+        let _ = opts;
         let pdf = doc::open(bytes)?;
         let page_list = doc::pages(&pdf);
         let outline = outline_by_page(&pdf);

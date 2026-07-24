@@ -25,7 +25,13 @@ const IMG_EMPTY_TEXT_NOTE: &str = "page image only; text layer present but empty
 pub struct DjvuAdapter;
 
 impl Adapter for DjvuAdapter {
-    fn parse(&self, bytes: &[u8], source_path: &str) -> Result<(Document, AssetBag), ParseError> {
+    fn parse_with(
+        &self,
+        bytes: &[u8],
+        source_path: &str,
+        opts: &crate::ParseOptions,
+    ) -> Result<(Document, AssetBag), ParseError> {
+        let _ = opts;
         let djvu = doc::open(bytes)?;
         let n = doc::page_count(&djvu);
         let outline = outline_by_page(&doc::bookmarks(&djvu));
