@@ -2,6 +2,7 @@ mod detect;
 mod djvu;
 mod epub;
 mod guard;
+mod math;
 mod mobi;
 pub mod ocr;
 mod pdf;
