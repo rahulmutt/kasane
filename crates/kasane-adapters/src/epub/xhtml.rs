@@ -251,6 +251,16 @@ fn is_inline_tag(name: &[u8]) -> bool {
     )
 }
 
+// A <math> element is inline unless it carries display="block". Attribute
+// inspection is why this is separate from is_inline_tag (name-only).
+fn math_is_inline(e: &quick_xml::events::BytesStart) -> bool {
+    e.local_name().as_ref() == b"math"
+        && !e
+            .attributes()
+            .flatten()
+            .any(|a| a.key.as_ref() == b"display" && a.value.as_ref() == b"block")
+}
+
 // epub:type is a space-separated token list, e.g. "footnote" or "rearnote footnote".
 fn epub_type_has(e: &quick_xml::events::BytesStart, token: &str) -> bool {
     e.attributes()
@@ -449,7 +459,7 @@ pub fn xhtml_to_blocks(
                 // as formatting, not reference-adjacent content.
                 pending_ws = None;
                 prev_was_ref = false;
-                if !is_inline_tag(e.local_name().as_ref()) {
+                if !is_inline_tag(e.local_name().as_ref()) && !math_is_inline(&e) {
                     close_implicit!();
                 }
                 if e.local_name().as_ref() == b"body" {
@@ -462,7 +472,7 @@ pub fn xhtml_to_blocks(
                 // pops it and finds inline_stack empty when it tries to
                 // attach the result, silently discarding the content. Mirrors
                 // the Text-arm opener above.
-                if is_inline_tag(e.local_name().as_ref())
+                if (is_inline_tag(e.local_name().as_ref()) || math_is_inline(&e))
                     && inline_stack.is_empty()
                     && in_body
                     && cur_block.is_none()
@@ -662,6 +672,33 @@ pub fn xhtml_to_blocks(
                                     Block::Para(vec![Inline::Text(alt)])
                                 };
                                 emit_block(&mut frames, &mut inline_stack, &mut blocks, b);
+                            }
+                        }
+                    }
+                    b"math" => {
+                        let inline = math_is_inline(&e);
+                        let island = crate::math::capture_island(&mut reader, &e);
+                        let conv = crate::math::mathml_to_latex(&island);
+                        if inline {
+                            if let Some(top) = inline_stack.last_mut() {
+                                crate::xmltext::push_inline(top, Inline::Math(conv.latex));
+                            }
+                        } else {
+                            emit_block(
+                                &mut frames,
+                                &mut inline_stack,
+                                &mut blocks,
+                                Block::MathBlock(conv.latex),
+                            );
+                            if !conv.complete {
+                                emit_block(
+                                    &mut frames,
+                                    &mut inline_stack,
+                                    &mut blocks,
+                                    Block::Raw {
+                                        note: "equation partially converted".into(),
+                                    },
+                                );
                             }
                         }
                     }
@@ -1988,5 +2025,74 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Para(i) if text_of(i) == "sidebar")));
+    }
+
+    #[test]
+    fn inline_math_stays_in_paragraph() {
+        let blocks = parse_blocks(
+            "<body><p>The value <math><msup><mi>x</mi><mn>2</mn></msup></math> is positive.</p></body>",
+        );
+        // One paragraph, containing an Inline::Math between the two text runs.
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        let math = para.iter().find_map(|i| match i {
+            Inline::Math(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(math.as_deref(), Some("{x}^{2}"));
+        // The paragraph was not split into pieces around the math.
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Para(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn inline_math_at_body_level_opens_implicit_paragraph() {
+        // No wrapping <p>: inline math directly under <body> must still open
+        // an implicit paragraph (mirroring the is_inline_tag opener) rather
+        // than being dropped when inline_stack is empty.
+        let blocks = parse_blocks("<body>Value <math><mn>1</mn></math> end.</body>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("an implicit paragraph");
+        assert!(para.iter().any(|i| matches!(i, Inline::Math(_))));
+    }
+
+    #[test]
+    fn display_math_becomes_math_block() {
+        let blocks = parse_blocks(
+            "<body><p>Before.</p><math display=\"block\"><mfrac><mn>1</mn><mn>2</mn></mfrac></math><p>After.</p></body>",
+        );
+        let mb = blocks.iter().find_map(|b| match b {
+            Block::MathBlock(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(mb.as_deref(), Some("\\frac{1}{2}"));
+    }
+
+    #[test]
+    fn partial_display_math_emits_raw_note() {
+        // Content MathML is out of subset → placeholder + note.
+        let blocks =
+            parse_blocks("<body><math display=\"block\"><apply><ci>x</ci></apply></math></body>");
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::MathBlock(s) if s.contains("\\mathord{?}"))));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::Raw { note } if note.contains("partially converted"))));
     }
 }
