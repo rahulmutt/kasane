@@ -37,7 +37,13 @@ See AGENTS.md for the codebase map.
 
 - DRM-protected MOBI/AZW3 files are detected and rejected (exit code 2);
   kasane never breaks DRM.
-- MathML (EPUB) and OMML (PPTX) math are not yet converted to LaTeX.
+- Math is recovered as LaTeX: MathML (EPUB) and OMML (PPTX) equations convert to
+  GitHub-Flavored `$…$` (inline) / `$$…$$` (display) over a documented construct
+  subset — fractions, sub/superscripts, roots, fenced groups, n-ary operators
+  with limits, basic matrices, and common accents. A construct outside the
+  subset degrades best-effort: the unmapped part becomes `\mathord{?}` and a
+  partial display equation is followed by an "equation partially converted"
+  note. Content MathML is not converted.
 - HUFF/CDIC-compressed MOBI books decode through the `mobi` crate; their
   in-book `filepos` links may resolve approximately.
 - PDF conversion is for born-digital PDFs. Headings come from the PDF outline
