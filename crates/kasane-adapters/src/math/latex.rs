@@ -60,7 +60,7 @@ fn render(node: &MathNode, out: &mut String, complete: &mut bool) {
             out.push_str(fence(close));
         }
         MathNode::Nary { op, sub, sup, body } => {
-            out.push_str(op);
+            out.push_str(&map_text(op, complete));
             if let Some(s) = sub {
                 out.push_str("_{");
                 render(s, out, complete);
@@ -202,6 +202,19 @@ mod tests {
             body: Box::new(ident("i")),
         };
         assert_eq!(to_conversion(&n).latex, "\\sum_{i}^{n} i");
+    }
+
+    #[test]
+    fn nary_unmapped_operator_degrades() {
+        let n = MathNode::Nary {
+            op: "⨁".into(),
+            sub: None,
+            sup: None,
+            body: Box::new(ident("x")),
+        };
+        let c = to_conversion(&n);
+        assert_eq!(c.latex, "\\mathord{?} x");
+        assert!(!c.complete);
     }
 
     #[test]

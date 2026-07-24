@@ -160,15 +160,16 @@ fn delim_chars(n: Node) -> (String, String) {
     (get("begChr", "("), get("endChr", ")"))
 }
 
-/// `<m:chr m:val="…"/>` on `<m:naryPr>`, mapped through the symbol table by the
-/// emitter; default is the integral sign.
+/// `<m:chr m:val="…"/>` on `<m:naryPr>`, mapped to LaTeX commands where known;
+/// default is the integral sign. Unknown operators are passed through for the
+/// emitter's symbol table to degrade via placeholder.
 fn nary_op(n: Node) -> String {
     let chr = child(n, "naryPr")
         .and_then(|p| child(p, "chr"))
         .and_then(attr_val)
         .unwrap_or_else(|| "∫".to_string());
-    // Map the raw operator char to a command up front so the Nary `op` string
-    // is already LaTeX (the emitter emits Nary.op verbatim).
+    // Map known operator chars to LaTeX commands; unknown chars pass through
+    // for the emitter to degrade to placeholder.
     match chr.trim() {
         "∑" => "\\sum".to_string(),
         "∏" => "\\prod".to_string(),
@@ -237,6 +238,16 @@ mod tests {
     }
 
     #[test]
+    fn nary_unmapped_operator_degrades() {
+        let c = omml_to_latex(
+            "<m:oMath><m:nary><m:naryPr><m:chr m:val=\"⨁\"/></m:naryPr>\
+             <m:e><m:r><m:t>x</m:t></m:r></m:e></m:nary></m:oMath>",
+        );
+        assert_eq!(c.latex, "\\mathord{?} x");
+        assert!(!c.complete);
+    }
+
+    #[test]
     fn delimiter_becomes_fenced() {
         let c = omml_to_latex("<m:oMath><m:d><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d></m:oMath>");
         assert_eq!(c.latex, "\\left(x\\right)");
@@ -252,6 +263,17 @@ mod tests {
     #[test]
     fn malformed_island_degrades_without_panic() {
         let c = omml_to_latex("<m:oMath><m:f><m:num></m:oMath"); // truncated
+        assert!(!c.complete);
+    }
+
+    #[test]
+    fn oversized_island_degrades() {
+        let big = format!(
+            "<m:oMath><m:r><m:t>{}</m:t></m:r></m:oMath>",
+            "9".repeat(300_000)
+        );
+        let c = omml_to_latex(&big);
+        assert_eq!(c.latex, "\\mathord{?}");
         assert!(!c.complete);
     }
 }
