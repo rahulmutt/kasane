@@ -3,6 +3,7 @@ mod djvu;
 mod epub;
 mod guard;
 mod mobi;
+pub mod ocr;
 mod pdf;
 mod pptx;
 mod xmltext;

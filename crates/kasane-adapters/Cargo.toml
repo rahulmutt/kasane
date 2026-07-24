@@ -24,5 +24,8 @@ kasane-core.workspace = true
 kasane-writer.workspace = true
 tempfile = "3"
 
+[features]
+ocr = []
+
 [lints]
 workspace = true
