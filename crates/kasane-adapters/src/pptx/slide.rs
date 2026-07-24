@@ -17,6 +17,7 @@ pub(crate) enum Shape {
     Body(Vec<Paragraph>),
     Table(kasane_ir::Table),
     Picture { key: String, alt: String },
+    Math { latex: String, complete: bool },
 }
 
 // Run-formatting state carried while inside <a:r>.
@@ -93,6 +94,9 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
     let mut in_pic = false;
     let mut pic_alt = String::new();
     let mut pic_key: Option<String> = None;
+    // Display equations (<m:oMathPara>) for the current shape, flushed as
+    // MathBlock siblings when the shape closes.
+    let mut display_math: Vec<(String, bool)> = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -175,6 +179,31 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                         }
                     }
                 }
+                // OMML lives inside <a:p> but outside <a:r>. <m:oMathPara>
+                // wraps its own <m:oMath>; capture_island consumes the whole
+                // island (including that inner oMath), so the inner oMath
+                // Start never reaches this loop and only one arm fires per
+                // equation.
+                b"oMathPara" => {
+                    let island = crate::math::capture_island(&mut reader, &e);
+                    let conv = crate::math::omml_to_latex(&island);
+                    display_math.push((conv.latex, conv.complete));
+                }
+                b"oMath" => {
+                    let island = crate::math::capture_island(&mut reader, &e);
+                    let conv = crate::math::omml_to_latex(&island);
+                    // Mirrors the in_cell/cur_para destination split used for
+                    // run text above: a table cell paragraph (in_tbl/in_cell)
+                    // never sets cur_para (the `b"p"` arm above is gated on
+                    // `in_sp`, and tables are not nested inside shapes), so
+                    // without this branch inline math inside a table cell
+                    // would vanish silently instead of degrading visibly.
+                    if in_cell {
+                        crate::xmltext::push_inline(&mut cur_cell, Inline::Math(conv.latex));
+                    } else if let Some(p) = cur_para.as_mut() {
+                        crate::xmltext::push_inline(&mut p.inlines, Inline::Math(conv.latex));
+                    }
+                }
                 _ => {}
             },
             Ok(Event::Text(t)) if in_run => {
@@ -218,6 +247,9 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                         shapes.push(Shape::Title(inls));
                     } else if !paras.iter().all(|p| p.inlines.is_empty()) {
                         shapes.push(Shape::Body(std::mem::take(&mut paras)));
+                    }
+                    for (latex, complete) in std::mem::take(&mut display_math) {
+                        shapes.push(Shape::Math { latex, complete });
                     }
                 }
                 b"tc" if in_tbl => {
@@ -338,6 +370,14 @@ pub fn slide_to_blocks(xml: &str, next_id: &mut u32, rels: &SlideRels) -> Vec<Bl
                 },
                 number: None,
             }),
+            Shape::Math { latex, complete } => {
+                out.push(Block::MathBlock(latex));
+                if !complete {
+                    out.push(Block::Raw {
+                        note: "equation partially converted".into(),
+                    });
+                }
+            }
         }
     }
     if truncated {
@@ -352,8 +392,17 @@ pub fn notes_to_blocks(xml: &str) -> Vec<Block> {
     let mut out = Vec::new();
     let (shapes, truncated) = parse_shapes(xml, &SlideRels::empty());
     for s in shapes {
-        if let Shape::Body(paras) = s {
-            body_to_blocks(paras, &mut out);
+        match s {
+            Shape::Body(paras) => body_to_blocks(paras, &mut out),
+            Shape::Math { latex, complete } => {
+                out.push(Block::MathBlock(latex));
+                if !complete {
+                    out.push(Block::Raw {
+                        note: "equation partially converted".into(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
     if truncated {
@@ -690,6 +739,46 @@ mod tests {
         assert!(!blocks
             .iter()
             .any(|b| matches!(b, Block::Raw { note } if note.contains("truncated"))));
+    }
+
+    #[test]
+    fn inline_omath_appends_math_inline_to_paragraph() {
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <a:r><a:t>value </a:t></a:r>
+            <m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e>
+              <m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert!(para
+            .iter()
+            .any(|i| matches!(i, Inline::Math(s) if s == "{x}^{2}")));
+    }
+
+    #[test]
+    fn omathpara_becomes_math_block() {
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <m:oMathPara><m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num>
+              <m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::MathBlock(s) if s == "\\frac{1}{2}")));
     }
 
     #[test]

@@ -1,5 +1,3 @@
-#![allow(dead_code)] // removed in Task 6 once adapters wire this in
-
 //! Math conversion: MathML (EPUB) and OMML (PPTX) islands → LaTeX.
 //! One shared `MathNode` model, two front-ends, one emitter. The island is
 //! untrusted input; every path degrades rather than panicking.
@@ -13,9 +11,7 @@ mod symbols;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, Writer};
 
-#[allow(unused_imports)] // used from Task 5's EPUB wiring; allow removed in Task 6
 pub(crate) use mathml::mathml_to_latex;
-#[allow(unused_imports)] // used from Task 6's PPTX wiring; allow removed in Task 6
 pub(crate) use omml::omml_to_latex;
 
 /// Result of converting one math island to LaTeX.
