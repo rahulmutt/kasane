@@ -691,6 +691,19 @@ pub fn xhtml_to_blocks(
                                 Block::MathBlock(conv.latex),
                             );
                             if !conv.complete {
+                                // If this display equation lands where an inline
+                                // collection is already open (a table cell, a
+                                // figcaption -- see emit_block's inline-context
+                                // branch), the MathBlock above folds to
+                                // Inline::Math carrying the in-band `\mathord{?}`
+                                // token, and this Raw note is intentionally
+                                // dropped by flatten_block_inlines's
+                                // `Block::Raw { .. } => {}` arm: a folded display
+                                // equation is inline, and the plan's degradation
+                                // rule for inline partials is to self-mark via
+                                // the token only (no inline note type is added).
+                                // Pinned by
+                                // partial_display_math_in_folding_context_drops_note_but_keeps_token.
                                 emit_block(
                                     &mut frames,
                                     &mut inline_stack,
@@ -2056,10 +2069,20 @@ mod tests {
     }
 
     #[test]
-    fn inline_math_at_body_level_opens_implicit_paragraph() {
-        // No wrapping <p>: inline math directly under <body> must still open
-        // an implicit paragraph (mirroring the is_inline_tag opener) rather
-        // than being dropped when inline_stack is empty.
+    fn inline_math_after_leading_text_stays_in_the_same_implicit_paragraph() {
+        // No wrapping <p>: inline math directly under <body>, preceded by
+        // bare text, must land in the same implicit paragraph the leading
+        // text opened rather than starting a new one or being dropped.
+        //
+        // Renamed from `inline_math_at_body_level_opens_implicit_paragraph`:
+        // that name overstated what this input exercises. The leading text
+        // "Value " already runs through the pre-existing Text arm's opener
+        // (xhtml.rs's Event::Text handler) and pushes an inline frame before
+        // <math> is ever seen, so by the time the Start(math) guard's
+        // `|| math_is_inline(&e)` term is evaluated, `inline_stack.is_empty()`
+        // is already false and that term is never the deciding factor. See
+        // `leading_math_at_empty_inline_stack_opens_implicit_paragraph` below
+        // for a case where the term actually decides.
         let blocks = parse_blocks("<body>Value <math><mn>1</mn></math> end.</body>");
         let para = blocks
             .iter()
@@ -2069,6 +2092,64 @@ mod tests {
             })
             .expect("an implicit paragraph");
         assert!(para.iter().any(|i| matches!(i, Inline::Math(_))));
+    }
+
+    #[test]
+    fn leading_math_at_empty_inline_stack_opens_implicit_paragraph() {
+        // Repro for the guard this task added support for
+        // (`(is_inline_tag(...) || math_is_inline(&e)) && inline_stack.is_empty()
+        // && in_body && cur_block.is_none()` in the Start(math) handler,
+        // xhtml.rs around line 475): a non-display <math> is the FIRST thing
+        // under <body>, with an empty inline_stack and no open block. Without
+        // the `|| math_is_inline(&e)` disjunct, this guard would not fire,
+        // inline_stack would still be empty when the `<math>` arm runs, and
+        // its `if let Some(top) = inline_stack.last_mut()` would find nothing
+        // to push into -- the equation silently vanishes. This test is the
+        // one that actually exercises that term; see the check documented
+        // alongside it for confirmation that removing the term makes this
+        // test fail.
+        let blocks = parse_blocks("<body><math><mn>1</mn></math></body>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("an implicit paragraph opened by the leading <math>, got no Para");
+        let math = para.iter().find_map(|i| match i {
+            Inline::Math(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            math.as_deref(),
+            Some("1"),
+            "the equation must reach the output, not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn leading_math_in_list_item_opens_implicit_paragraph() {
+        // Cheap variant of the case above in a different empty-inline-stack
+        // context: <li> (unlike <td>) does not push its own inline_stack
+        // frame on Start -- see the b"li" arm, which only pushes onto the
+        // List frame's `items` -- so inline_stack is still empty when <math>
+        // is the item's first and only content.
+        let blocks = parse_blocks("<body><ul><li><math><mn>2</mn></math></li></ul></body>");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected List, got {:?}", blocks[0]);
+        };
+        let Block::Para(inls) = &items[0][0] else {
+            panic!("expected Para inside item, got {:?}", items[0]);
+        };
+        let math = inls.iter().find_map(|i| match i {
+            Inline::Math(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            math.as_deref(),
+            Some("2"),
+            "the equation must reach the output, not be silently dropped"
+        );
     }
 
     #[test]
@@ -2088,11 +2169,59 @@ mod tests {
         // Content MathML is out of subset → placeholder + note.
         let blocks =
             parse_blocks("<body><math display=\"block\"><apply><ci>x</ci></apply></math></body>");
-        assert!(blocks
+        let mb_idx = blocks
             .iter()
-            .any(|b| matches!(b, Block::MathBlock(s) if s.contains("\\mathord{?}"))));
-        assert!(blocks
+            .position(|b| matches!(b, Block::MathBlock(s) if s.contains("\\mathord{?}")))
+            .expect("expected a MathBlock carrying the placeholder token");
+        let note_idx = blocks
             .iter()
-            .any(|b| matches!(b, Block::Raw { note } if note.contains("partially converted"))));
+            .position(|b| matches!(b, Block::Raw { note } if note.contains("partially converted")))
+            .expect("expected a Raw partial-conversion note");
+        // "Adjacent" per the plan means the note immediately follows its
+        // MathBlock, not merely that both exist somewhere in the document.
+        assert_eq!(
+            note_idx,
+            mb_idx + 1,
+            "the partial-conversion note must immediately follow its MathBlock, got blocks {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn partial_display_math_in_folding_context_drops_note_but_keeps_token() {
+        // Adjudicated as correct behavior, not a bug: when a MathBlock lands
+        // where an inline collection is already open, emit_block's
+        // inline-context branch (`if let Some(top) = inline_stack.last_mut()`)
+        // flattens it to Inline::Math via flatten_block_inlines, and the
+        // Block::MathBlock arm there keeps the in-band `\mathord{?}` token.
+        // The following Block::Raw note hits the same fold and is dropped by
+        // flatten_block_inlines's `Block::Raw { .. } => {}` arm: a folded
+        // display equation is inline, and the plan's degradation rule for
+        // inline partials is "self-mark via the token only (no inline note
+        // type is added)". This pins that as deliberate so a future change
+        // to the fold logic can't silently alter it.
+        //
+        // <td> is confirmed (not assumed) to fold here: the b"th" | b"td"
+        // Start arm pushes its own inline_stack frame directly (xhtml.rs,
+        // the `th | td` arm around line 591), so inline_stack is non-empty
+        // for the whole cell, and emit_block's inline-context branch is
+        // checked before the frames-based Table branch.
+        let blocks = parse_blocks(
+            "<body><table><tr><td><math display=\"block\"><apply><ci>x</ci></apply></math></td></tr></table></body>",
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!("expected Table, got {:?}", blocks[0]);
+        };
+        let cell = &t.header[0]; // headerless table promotes the first row
+        assert!(
+            cell.iter()
+                .any(|i| matches!(i, Inline::Math(s) if s.contains("\\mathord{?}"))),
+            "expected the folded equation's placeholder token in the cell, got {cell:?}"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("partially converted"))),
+            "the partial-conversion note must not appear anywhere in the document when folded, got {blocks:?}"
+        );
     }
 }
