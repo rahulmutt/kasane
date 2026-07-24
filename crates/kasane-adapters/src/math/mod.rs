@@ -9,6 +9,9 @@ mod latex;
 mod mathml;
 mod symbols;
 
+#[allow(unused_imports)] // used from Task 5's EPUB wiring; allow removed in Task 6
+pub(crate) use mathml::mathml_to_latex;
+
 /// Result of converting one math island to LaTeX.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MathConversion {
