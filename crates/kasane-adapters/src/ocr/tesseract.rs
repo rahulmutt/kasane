@@ -152,4 +152,33 @@ mod tests {
             other => panic!("expected MissingLanguage, got {other:?}"),
         }
     }
+
+    #[test]
+    fn extracts_text_from_a_real_rendered_image() {
+        // End-to-end FFI: real Tesseract OCRs a known fixture. Guards the TSV
+        // column mapping against engine/version schema drift.
+        let img = std::fs::read("../../tests/fixtures/ocr/hello.png").unwrap();
+        let ex = TesseractExtractor::new("eng").expect("eng traineddata must be installed");
+        let lines = ex
+            .extract(&img, &OcrOptions::default())
+            .expect("OCR must not error");
+
+        // Recovered text (joined, lowercased) contains the rendered words. OCR is
+        // fuzzy, so assert on content rather than exact equality.
+        let joined = lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(joined.contains("hello"), "got: {joined:?}");
+        assert!(joined.contains("ocr"), "got: {joined:?}");
+        assert!(joined.contains("world"), "got: {joined:?}");
+
+        // At least one well-formed line with a sane box and positive confidence.
+        assert!(!lines.is_empty());
+        let l = &lines[0];
+        assert!(l.bbox.w > 0.0 && l.bbox.h > 0.0, "bbox: {:?}", l.bbox);
+        assert!(l.confidence > 0.0, "confidence: {}", l.confidence);
+    }
 }
