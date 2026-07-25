@@ -560,3 +560,103 @@ fn a_non_empty_output_root_needs_force() {
     );
     assert!(out.join("a/minimal/index.md").exists());
 }
+
+#[test]
+fn a_batch_run_writes_a_library_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        0
+    );
+
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("kind: library"));
+    assert!(idx.contains("documents: 2"));
+    assert!(idx.contains("(a/minimal/index.md)"));
+    assert!(idx.contains("(b/minimal/index.md)"));
+    assert!(!idx.contains("## Failed"));
+}
+
+#[test]
+fn a_failure_is_recorded_in_the_library_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        3
+    );
+
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("failed: 1"));
+    assert!(idx.contains("## Failed"));
+    assert!(idx.contains("locked.mobi"));
+}
+
+#[test]
+fn an_all_failed_run_still_writes_the_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        2
+    );
+
+    // A failed run leaves an on-disk record, not just a stderr trace.
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("documents: 0"));
+    assert!(idx.contains("0 of 1 inputs converted."));
+    assert!(idx.contains("locked.mobi"));
+}
+
+#[test]
+fn single_file_mode_writes_no_library_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("book");
+
+    assert_eq!(
+        run_kasane(&[
+            fixture("epub/minimal.epub").as_os_str(),
+            "-o".as_ref(),
+            out.as_os_str()
+        ]),
+        0
+    );
+
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("title: Minimal Book"));
+    assert!(!idx.contains("kind: library"));
+}
+
+/// Pins the up-front `--ocr-lang` validation: a bad language must fail before
+/// any document is converted, not once per document inside the workers.
+#[cfg(feature = "ocr")]
+#[test]
+fn a_bad_ocr_language_fails_before_converting_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[
+        books.as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+        "--ocr".as_ref(),
+        "--ocr-lang".as_ref(),
+        "zzz".as_ref(),
+    ]);
+
+    // OcrError::MissingLanguage matches none of exit_code_for's exit-2
+    // keywords, so this is 1 — and nothing was written.
+    assert_eq!(code, 1);
+    assert!(!out.exists(), "no document should have been converted");
+}

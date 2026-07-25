@@ -16,8 +16,6 @@ pub struct WorkItem {
 impl WorkItem {
     /// `rel` with its extension dropped: the document's directory beneath the
     /// output root, and the link target used in the library index.
-    // Not yet called outside tests: the library index (Task 5) is what uses it.
-    #[allow(dead_code)]
     pub fn rel_dir(&self) -> String {
         Path::new(&self.rel)
             .with_extension("")
@@ -42,11 +40,7 @@ pub struct ConvertOptions {
 /// What a successful conversion produced, for the summary and library index.
 #[derive(Debug)]
 pub struct Converted {
-    // `title`/`format` are not yet read outside tests: the run summary
-    // (Task 4) and the library index (Task 5) are what consume them.
-    #[allow(dead_code)]
     pub title: String,
-    #[allow(dead_code)]
     pub format: String,
     pub files: usize,
 }

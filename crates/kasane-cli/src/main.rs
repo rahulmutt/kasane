@@ -220,6 +220,31 @@ fn run_many(args: &Args, opts: &ConvertOptions) -> Result<u8> {
         }
     }
 
+    let entries: Vec<kasane_writer::LibraryEntry> = outcomes
+        .iter()
+        .filter_map(|o| {
+            o.result.as_ref().ok().map(|c| kasane_writer::LibraryEntry {
+                title: c.title.clone(),
+                rel_dir: o.item.rel_dir(),
+                format: c.format.clone(),
+                files: c.files,
+            })
+        })
+        .collect();
+    let lib_failures: Vec<kasane_writer::LibraryFailure> = outcomes
+        .iter()
+        .filter_map(|o| {
+            o.result
+                .as_ref()
+                .err()
+                .map(|e| kasane_writer::LibraryFailure {
+                    input: o.item.rel.clone(),
+                    reason: format!("{e:#}"),
+                })
+        })
+        .collect();
+    kasane_writer::write_library_index(&entries, &lib_failures, &out)?;
+
     Ok(batch_exit_code(outcomes.len(), &failure_msgs))
 }
 
