@@ -130,6 +130,20 @@ mod tests {
     }
 
     #[test]
+    fn multiple_matches_in_one_directory_are_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let books = dir.path().join("books");
+        std::fs::create_dir_all(&books).unwrap();
+        // Written out of order so an unsorted (or read_dir-order) walk would fail.
+        std::fs::write(books.join("m.pdf"), "x").unwrap();
+        std::fs::write(books.join("a.epub"), "x").unwrap();
+        std::fs::write(books.join("z.djvu"), "x").unwrap();
+
+        let items = discover(&[books], &dir.path().join("out")).unwrap();
+        assert_eq!(rels(&items), vec!["a.epub", "m.pdf", "z.djvu"]);
+    }
+
+    #[test]
     fn output_dir_mirrors_the_path_relative_to_its_root() {
         let dir = tree();
         let out = dir.path().join("out");
