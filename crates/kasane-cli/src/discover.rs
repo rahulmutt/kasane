@@ -30,7 +30,7 @@ pub fn discover(inputs: &[PathBuf], out: &Path) -> Result<Vec<WorkItem>> {
         let meta =
             std::fs::metadata(input).with_context(|| format!("reading {}", input.display()))?;
         if meta.is_dir() {
-            walk(input, input, out, &mut items)?;
+            walk(input, input, out, &mut items);
         } else {
             let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
             items.push(WorkItem {
@@ -47,24 +47,47 @@ pub fn discover(inputs: &[PathBuf], out: &Path) -> Result<Vec<WorkItem>> {
     Ok(items)
 }
 
-fn walk(dir: &Path, root: &Path, out: &Path, items: &mut Vec<WorkItem>) -> Result<()> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading directory {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
+/// Walk `dir`, collecting candidate documents.
+///
+/// Infallible by design. Anything encountered *while walking* that cannot be
+/// read is warned about on stderr and skipped, so one unreadable subdirectory
+/// cannot abort a whole batch run — "one file's failure never aborts the run"
+/// applies to discovery too. This is the same trust boundary as the symlink
+/// rule below: a path the user named on the command line is trusted and a
+/// failure to read it is fatal in `discover`; a path found by walking is not
+/// trusted, and is skipped rather than trusted or fatal.
+fn walk(dir: &Path, root: &Path, out: &Path, items: &mut Vec<WorkItem>) {
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) => {
+            eprintln!("warning: skipping directory {}: {e}", dir.display());
+            return;
+        }
+    };
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for entry in read {
+        match entry {
+            Ok(entry) => entries.push(entry.path()),
+            Err(e) => eprintln!("warning: skipping an entry in {}: {e}", dir.display()),
+        }
+    }
     // Deterministic work list, library index, and summary.
     entries.sort();
 
     for path in entries {
-        let meta = std::fs::symlink_metadata(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                eprintln!("warning: skipping {}: {e}", path.display());
+                continue;
+            }
+        };
         // Never follow symlinks: no cycles, and the walk cannot escape its root.
         if meta.file_type().is_symlink() {
             continue;
         }
         if meta.is_dir() {
-            walk(&path, root, out, items)?;
+            walk(&path, root, out, items);
         } else if has_supported_ext(&path) {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             items.push(WorkItem {
@@ -74,7 +97,6 @@ fn walk(dir: &Path, root: &Path, out: &Path, items: &mut Vec<WorkItem>) -> Resul
             });
         }
     }
-    Ok(())
 }
 
 /// Reject two inputs whose output directories would clash, before any
@@ -359,6 +381,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = discover(&[dir.path().join("nope")], &dir.path().join("out")).unwrap_err();
         assert!(format!("{err:#}").contains("nope"));
+    }
+
+    /// A directory the walk cannot read is warned about and skipped, not
+    /// fatal: one unreadable subdirectory must not abort a whole batch run.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_skipped_not_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tree();
+        let books = dir.path().join("books");
+        let private = books.join("priv");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("secret.epub"), "x").unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let items = discover(&[books], &dir.path().join("out"));
+
+        // Restore before the TempDir drop, so cleanup can recurse in.
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let items = items.expect("an unreadable subdirectory must not abort the walk");
+        assert_eq!(rels(&items), vec!["a/ch.epub", "b/ch.epub", "top.pdf"]);
     }
 
     #[cfg(unix)]
