@@ -266,10 +266,11 @@ thread, and `TextExtractor`'s bounds are unchanged. This also builds one engine 
 *file* instead of the current one per *page*, partly closing the "LepTess re-init
 per call" follow-up from PR #14.
 
-**Preserved behavior:** today a bad `--ocr-lang` fails fast at exit 2 because the
-CLI constructs the extractor once before converting anything. If construction only
-happened inside workers, that would degrade into N identical per-file failures at
-exit 3. So `main` constructs and drops **one** extractor up front purely to validate
+**Preserved behavior:** today a bad `--ocr-lang` fails fast — before any conversion,
+exiting 1 (`OcrError::MissingLanguage` matches none of `exit_code_for`'s exit-2
+keywords) — because the CLI constructs the extractor once up front. If construction
+only happened inside workers, that would degrade into N identical per-file failures
+at exit 3. So `main` constructs and drops **one** extractor up front purely to validate
 the language, then each worker builds its own. The non-`ocr` build's `--ocr`
 rejection (`ensure_ocr_available`) stays exactly where it is.
 
@@ -354,8 +355,8 @@ committed fixtures — **no new fixtures are committed**:
   `Vec<PathBuf>` change
 
 **OCR gate** (`mise run test-ocr`): one cheap test that batch + `--ocr-lang zzz`
-fails fast at exit 2 *before* converting anything, pinning the up-front language
-validation from §6.
+fails fast *before* converting anything — exit 1, and no document tree written —
+pinning the up-front language validation from §6.
 
 Every change ships green under `mise run lint && mise run test` (fmt check +
 `clippy --workspace --all-targets -D warnings`), per the repo convention.
