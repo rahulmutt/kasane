@@ -30,6 +30,15 @@ pub fn discover(inputs: &[PathBuf], out: &Path) -> Result<Vec<WorkItem>> {
         let meta =
             std::fs::metadata(input).with_context(|| format!("reading {}", input.display()))?;
         if meta.is_dir() {
+            // A path the user named must still be a hard error if it cannot be
+            // read — `metadata` succeeds on a mode-000 directory (stat needs
+            // search permission on the *parent*, not read permission on the
+            // directory itself), so probe it. Without this the now-infallible
+            // `walk` would warn and return empty, silently dropping a named
+            // input from the run. Only subdirectories found while walking are
+            // warn-and-skip.
+            std::fs::read_dir(input)
+                .with_context(|| format!("reading directory {}", input.display()))?;
             walk(input, input, out, &mut items);
         } else {
             let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
@@ -381,6 +390,56 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = discover(&[dir.path().join("nope")], &dir.path().join("out")).unwrap_err();
         assert!(format!("{err:#}").contains("nope"));
+    }
+
+    /// The counterpart to `an_unreadable_directory_is_skipped_not_fatal`:
+    /// a directory the user *named* that cannot be read is a hard error, not a
+    /// warning. `std::fs::metadata` succeeds on a mode-000 directory — stat
+    /// needs search permission on the parent, not read permission on the
+    /// directory itself — so the top-level loop has to probe it explicitly.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_unreadable_directory_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("a.epub"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = discover(std::slice::from_ref(&locked), &dir.path().join("out"));
+
+        // Restore before the TempDir drop, so cleanup can recurse in.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("a named directory that cannot be read must be fatal");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("locked"), "got: {msg}");
+        assert!(msg.contains("Permission denied"), "got: {msg}");
+    }
+
+    /// A named unreadable directory must not be silently dropped from a run
+    /// that has other, readable inputs: the whole run fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_unreadable_directory_fails_the_run_beside_readable_inputs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        let good = dir.path().join("good");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(good.join("a.epub"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = discover(&[locked.clone(), good], &dir.path().join("out"));
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("a named directory that cannot be read must be fatal");
+        assert!(format!("{err:#}").contains("locked"), "got: {err:#}");
     }
 
     /// A directory the walk cannot read is warned about and skipped, not
