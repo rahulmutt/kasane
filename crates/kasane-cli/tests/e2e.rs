@@ -509,6 +509,27 @@ fn duplicate_stems_are_rejected_before_writing_anything() {
     );
 }
 
+/// A document sitting next to a directory of the same stem (`ch.epub` beside
+/// `ch/`) maps to nested output directories. `write_tree` swaps whole
+/// directories, so converting `ch.epub` would delete `ch/inner`'s tree.
+#[test]
+fn a_nested_output_directory_is_rejected_before_writing_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(books.join("ch")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), books.join("ch.epub")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), books.join("ch/inner.epub")).unwrap();
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]);
+
+    assert_eq!(code, 1);
+    assert!(
+        !out.exists(),
+        "nesting must be caught before any conversion"
+    );
+}
+
 #[test]
 fn batch_without_an_output_root_is_an_error() {
     let tmp = tempfile::tempdir().unwrap();
