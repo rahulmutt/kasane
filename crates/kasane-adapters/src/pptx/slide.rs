@@ -16,7 +16,17 @@ pub(crate) enum Shape {
     Title(Vec<Inline>),
     Body(Vec<Paragraph>),
     Table(kasane_ir::Table),
-    Picture { key: String, alt: String },
+    Picture {
+        key: String,
+        alt: String,
+    },
+    Math {
+        latex: String,
+        complete: bool,
+    },
+    /// A document-level malformation note, emitted at the point in the shape
+    /// order where an equation island failed to capture.
+    Note(&'static str),
 }
 
 // Run-formatting state carried while inside <a:r>.
@@ -93,6 +103,9 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
     let mut in_pic = false;
     let mut pic_alt = String::new();
     let mut pic_key: Option<String> = None;
+    // Display equations (<m:oMathPara>) for the current shape, flushed as
+    // MathBlock siblings when the shape closes.
+    let mut display_math: Vec<(String, bool)> = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -175,6 +188,62 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                         }
                     }
                 }
+                // OMML lives inside <a:p> but outside <a:r>. <m:oMathPara>
+                // wraps its own <m:oMath>; capture_island consumes the whole
+                // island (including that inner oMath), so the inner oMath
+                // Start never reaches this loop and only one arm fires per
+                // equation.
+                b"oMathPara" => {
+                    let conv = match crate::math::capture_island(&mut reader, &e) {
+                        Ok(island) => crate::math::omml_to_latex(&island),
+                        Err(err) => {
+                            // capture_island rewound the reader, so this
+                            // island's children (including its inner
+                            // <m:oMath>) are handed back to this loop as
+                            // ordinary content instead of vanishing. Record
+                            // the malformation where it happened.
+                            shapes.push(Shape::Note(err.note()));
+                            crate::math::degraded()
+                        }
+                    };
+                    // Tables are parsed via a sibling p:graphicFrame, not
+                    // nested inside p:sp, so a display equation captured
+                    // while in_cell has no p:sp End to flush display_math
+                    // against: it would be dropped entirely (if no p:sp
+                    // follows) or drained into an unrelated shape (if one
+                    // does). Fold it to inline instead, mirroring the oMath
+                    // arm below and the EPUB side's identical fold. The
+                    // `complete` flag is deliberately discarded here: a
+                    // folded display equation is inline, and per the plan a
+                    // folded/inline partial self-marks via the in-band
+                    // `\mathord{?}` token only -- no "equation partially
+                    // converted" note is emitted for it.
+                    if in_cell {
+                        crate::xmltext::push_inline(&mut cur_cell, Inline::Math(conv.latex));
+                    } else {
+                        display_math.push((conv.latex, conv.complete));
+                    }
+                }
+                b"oMath" => {
+                    let conv = match crate::math::capture_island(&mut reader, &e) {
+                        Ok(island) => crate::math::omml_to_latex(&island),
+                        Err(err) => {
+                            shapes.push(Shape::Note(err.note()));
+                            crate::math::degraded()
+                        }
+                    };
+                    // Mirrors the in_cell/cur_para destination split used for
+                    // run text above: a table cell paragraph (in_tbl/in_cell)
+                    // never sets cur_para (the `b"p"` arm above is gated on
+                    // `in_sp`, and tables are not nested inside shapes), so
+                    // without this branch inline math inside a table cell
+                    // would vanish silently instead of degrading visibly.
+                    if in_cell {
+                        crate::xmltext::push_inline(&mut cur_cell, Inline::Math(conv.latex));
+                    } else if let Some(p) = cur_para.as_mut() {
+                        crate::xmltext::push_inline(&mut p.inlines, Inline::Math(conv.latex));
+                    }
+                }
                 _ => {}
             },
             Ok(Event::Text(t)) if in_run => {
@@ -219,6 +288,9 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                     } else if !paras.iter().all(|p| p.inlines.is_empty()) {
                         shapes.push(Shape::Body(std::mem::take(&mut paras)));
                     }
+                    for (latex, complete) in std::mem::take(&mut display_math) {
+                        shapes.push(Shape::Math { latex, complete });
+                    }
                 }
                 b"tc" if in_tbl => {
                     in_cell = false;
@@ -252,12 +324,35 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                 _ => {}
             },
             Ok(Event::Eof) => break,
-            Err(_) => return (shapes, true),
+            Err(_) => {
+                // Same leftover-queue hazard as the Eof case below, reached
+                // via a different exit: an oMathPara captured before the XML
+                // goes malformed has no p:sp End left to flush against, so
+                // without this it would be silently dropped alongside the
+                // truncation. See flush_leftover_display_math_after_truncation.
+                flush_display_math(&mut shapes, &mut display_math);
+                return (shapes, true);
+            }
             _ => {}
         }
         buf.clear();
     }
+    // Normally every oMathPara is drained by its enclosing p:sp End. This is
+    // a safety net for schema-invalid-but-well-formed XML where an oMathPara
+    // sits outside any p:sp/table cell (e.g. a stray direct child of
+    // spTree): such input reaches Eof with no p:sp End ever having fired to
+    // drain it. See flush_leftover_display_math_when_never_inside_a_shape.
+    flush_display_math(&mut shapes, &mut display_math);
     (shapes, false)
+}
+
+// Drains any display-math entries that never reached a p:sp End into the
+// shape list directly, so a leftover queue at parse_shapes's return (Eof or
+// truncation) doesn't silently lose an equation.
+fn flush_display_math(shapes: &mut Vec<Shape>, display_math: &mut Vec<(String, bool)>) {
+    for (latex, complete) in std::mem::take(display_math) {
+        shapes.push(Shape::Math { latex, complete });
+    }
 }
 
 // Map a body shape's paragraphs to blocks. Extended in Task 5 to build nested lists.
@@ -338,6 +433,15 @@ pub fn slide_to_blocks(xml: &str, next_id: &mut u32, rels: &SlideRels) -> Vec<Bl
                 },
                 number: None,
             }),
+            Shape::Math { latex, complete } => {
+                out.push(Block::MathBlock(latex));
+                if !complete {
+                    out.push(Block::Raw {
+                        note: "equation partially converted".into(),
+                    });
+                }
+            }
+            Shape::Note(note) => out.push(Block::Raw { note: note.into() }),
         }
     }
     if truncated {
@@ -352,8 +456,20 @@ pub fn notes_to_blocks(xml: &str) -> Vec<Block> {
     let mut out = Vec::new();
     let (shapes, truncated) = parse_shapes(xml, &SlideRels::empty());
     for s in shapes {
-        if let Shape::Body(paras) = s {
-            body_to_blocks(paras, &mut out);
+        match s {
+            Shape::Title(_) => {}
+            Shape::Body(paras) => body_to_blocks(paras, &mut out),
+            Shape::Table(_) => {}
+            Shape::Picture { .. } => {}
+            Shape::Math { latex, complete } => {
+                out.push(Block::MathBlock(latex));
+                if !complete {
+                    out.push(Block::Raw {
+                        note: "equation partially converted".into(),
+                    });
+                }
+            }
+            Shape::Note(note) => out.push(Block::Raw { note: note.into() }),
         }
     }
     if truncated {
@@ -690,6 +806,270 @@ mod tests {
         assert!(!blocks
             .iter()
             .any(|b| matches!(b, Block::Raw { note } if note.contains("truncated"))));
+    }
+
+    #[test]
+    fn inline_omath_appends_math_inline_to_paragraph() {
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <a:r><a:t>value </a:t></a:r>
+            <m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e>
+              <m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert!(para
+            .iter()
+            .any(|i| matches!(i, Inline::Math(s) if s == "{x}^{2}")));
+    }
+
+    #[test]
+    fn inline_omath_inside_table_cell_reaches_cell_inline_content() {
+        // Regression for the table-cell inline-math fix (the b"oMath" arm's
+        // `if in_cell` branch): tables are parsed via a sibling p:graphicFrame,
+        // never nested inside a p:sp, so this exercises the in_cell/cur_cell
+        // destination directly rather than the in_sp/cur_para one already
+        // covered by inline_omath_appends_math_inline_to_paragraph.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:graphicFrame><a:graphic><a:graphicData><a:tbl>
+            <a:tr><a:tc><a:txBody><a:p>
+              <a:r><a:t>value </a:t></a:r>
+              <m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e>
+                <m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>
+            </a:p></a:txBody></a:tc></a:tr>
+          </a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let t = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("a table");
+        let cell = &t.header[0];
+        assert!(
+            cell.iter()
+                .any(|i| matches!(i, Inline::Math(s) if s == "{x}^{2}")),
+            "expected the inline equation in the cell, got {cell:?}"
+        );
+    }
+
+    #[test]
+    fn display_omathpara_inside_table_cell_folds_to_inline_without_note() {
+        // Regression for Fix 1: a display oMathPara captured while in_cell
+        // has no p:sp End to flush display_math against, so it must fold to
+        // an inline Inline::Math in the cell instead of being lost or
+        // misattributed to an unrelated shape. Uses <m:acc>, which is not in
+        // omml::convert's match arms, so the equation degrades to the
+        // placeholder token and `complete` is false -- this pins that the
+        // "equation partially converted" note is deliberately NOT emitted
+        // for a folded display equation (the plan's inline-partial rule is
+        // the in-band token only).
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:graphicFrame><a:graphic><a:graphicData><a:tbl>
+            <a:tr><a:tc><a:txBody><a:p>
+              <m:oMathPara><m:oMath><m:acc><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc></m:oMath></m:oMathPara>
+            </a:p></a:txBody></a:tc></a:tr>
+          </a:tbl></a:graphicData></a:graphic></p:graphicFrame>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        let t = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("a table");
+        let cell = &t.header[0];
+        assert!(
+            cell.iter()
+                .any(|i| matches!(i, Inline::Math(s) if s.contains("\\mathord{?}"))),
+            "expected the folded equation's placeholder token in the cell, got {cell:?}"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("partially converted"))),
+            "the partial-conversion note must not appear anywhere when folded, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn flush_leftover_display_math_after_truncation() {
+        // A well-formed oMathPara followed by malformed XML before the
+        // enclosing p:sp closes. The island itself closes cleanly, so it is
+        // captured fine; the outer loop then hits the malformed tail and
+        // returns Err(_), bypassing the
+        // p:sp End flush entirely (Fix 3). Without the end-of-parse safety
+        // net this equation would vanish alongside the truncation.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <m:oMathPara><m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num>
+              <m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara>
+          </a:p></a:wrong></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::MathBlock(s) if s == "\\frac{1}{2}")),
+            "the display equation must survive truncation, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("truncated"))),
+            "truncation must still be signaled, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn flush_leftover_display_math_when_never_inside_a_shape() {
+        // Schema-invalid but well-formed XML: an oMathPara as a direct
+        // child of spTree, never inside any p:sp or table cell. quick-xml
+        // only checks tag matching, not OOXML schema, so this reaches Eof
+        // cleanly with display_math still populated and no p:sp End ever
+        // having fired to drain it (Fix 3).
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+            <m:oMathPara><m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num>
+              <m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::MathBlock(s) if s == "\\frac{1}{2}")),
+            "the display equation must survive an oMathPara outside any shape, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn over_deep_omath_degrades_and_notes_without_aborting() {
+        // Whole-adapter cover for the stack-overflow abort. capture_island
+        // refuses the island on its nesting bound before roxmltree can see it,
+        // rewinds the reader, and records the malformation; the <m:e> nest is
+        // then re-read as flow content (no arm matches it) and the run after
+        // the equation still reaches the slide.
+        let levels = 18_000;
+        let xml = format!(
+            r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <m:oMath>{}{}</m:oMath>
+            <a:r><a:t>AFTER</a:t></a:r>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#,
+            "<m:e>".repeat(levels),
+            "</m:e>".repeat(levels)
+        );
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(&xml, &mut id, &SlideRels::empty());
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("too large"))),
+            "the over-budget island must be noted, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Para(i) if text_of(i).contains("AFTER"))),
+            "the run after the over-deep island must survive, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn unclosed_omath_notes_the_malformation_instead_of_swallowing_the_shape() {
+        // An <m:oMath> that never closes used to make capture_island consume
+        // the rest of the part with no trace. It now fails, rewinds, and is
+        // recorded. The shape *containing* the unclosed island is still lost
+        // to the pre-existing slide-truncation path (shapes flush at </p:sp>,
+        // and an unclosed tag makes the reader bail before that) -- but that
+        // loss is now announced twice over rather than silent, and earlier
+        // shapes are unaffected.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><a:r><a:t>BEFORE</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><m:oMath><m:r><m:t>x</m:t></m:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("equation markup"))),
+            "the malformation must be noted, not silent, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Para(i) if text_of(i).contains("BEFORE"))),
+            "content before the unclosed island must survive, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn omathpara_becomes_math_block() {
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <m:oMathPara><m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num>
+              <m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, Block::MathBlock(s) if s == "\\frac{1}{2}")));
+        // capture_island consumes the whole oMathPara island, including its
+        // inner <m:oMath>, so that inner Start never reaches the loop and
+        // the b"oMath" arm never fires for it. Pin that no stray
+        // Inline::Math for this equation leaked into a paragraph, which
+        // would indicate a double-fire regression.
+        assert!(
+            !blocks.iter().any(|b| matches!(b, Block::Para(inls)
+                if inls.iter().any(|i| matches!(i, Inline::Math(s) if s == "\\frac{1}{2}"))
+            )),
+            "the oMath inside oMathPara must not also fire the inline arm, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn notes_math_becomes_math_block() {
+        // notes_to_blocks's Shape::Math arm was added alongside slide_to_blocks's
+        // but had no direct test; notes bodies share parse_shapes with slides,
+        // so an oMathPara in a notes p:sp must surface the same way.
+        let xml = r#"<p:notes xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <m:oMathPara><m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num>
+              <m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:notes>"#;
+        let blocks = notes_to_blocks(xml);
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::MathBlock(s) if s == "\\frac{1}{2}")),
+            "expected a MathBlock in notes output, got {blocks:?}"
+        );
     }
 
     #[test]

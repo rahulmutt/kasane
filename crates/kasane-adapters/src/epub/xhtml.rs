@@ -81,6 +81,34 @@ fn emit_block(
     }
 }
 
+// A malformed-markup note is a statement about the DOCUMENT -- the markup
+// after this point was mis-nested and got re-read as flow content -- not about
+// one equation. Unlike "equation partially converted", whose in-band
+// `\mathord{?}` token already self-marks an inline partial, it has no in-band
+// counterpart, so routing it through emit_block would let an open inline
+// context swallow it (flatten_block_inlines drops Block::Raw) and put us right
+// back at the silent data loss this note exists to report. This is why the
+// malformed note is emitted BEFORE its degraded equation in the XML source
+// order, opposite to the partially-converted note which follows its equation.
+// Use the normal block path when there is one; otherwise put it straight into
+// the block flow.
+fn emit_malformed_note(
+    frames: &mut [BlockFrame],
+    inline_stack: &mut [Vec<Inline>],
+    out: &mut Vec<Block>,
+    note: &str,
+) {
+    let b = Block::Raw { note: note.into() };
+    if inline_stack.is_empty() {
+        emit_block(frames, inline_stack, out, b);
+    } else {
+        // Pushing directly to out also bypasses the frame stack, placing the
+        // note at the top level outside any list, table, or figure — acceptable
+        // because the note documents document-level malformation, not local structure loss.
+        out.push(b);
+    }
+}
+
 // Extracts a block's text content as inlines -- used when block markup
 // appears where only inlines fit (inside a table cell). Structure is lost,
 // text is not.
@@ -249,6 +277,16 @@ fn is_inline_tag(name: &[u8]) -> bool {
             | b"s"
             | b"br"
     )
+}
+
+// A <math> element is inline unless it carries display="block". Attribute
+// inspection is why this is separate from is_inline_tag (name-only).
+fn math_is_inline(e: &quick_xml::events::BytesStart) -> bool {
+    e.local_name().as_ref() == b"math"
+        && !e
+            .attributes()
+            .flatten()
+            .any(|a| a.key.as_ref() == b"display" && a.value.as_ref() == b"block")
 }
 
 // epub:type is a space-separated token list, e.g. "footnote" or "rearnote footnote".
@@ -449,7 +487,7 @@ pub fn xhtml_to_blocks(
                 // as formatting, not reference-adjacent content.
                 pending_ws = None;
                 prev_was_ref = false;
-                if !is_inline_tag(e.local_name().as_ref()) {
+                if !is_inline_tag(e.local_name().as_ref()) && !math_is_inline(&e) {
                     close_implicit!();
                 }
                 if e.local_name().as_ref() == b"body" {
@@ -462,7 +500,7 @@ pub fn xhtml_to_blocks(
                 // pops it and finds inline_stack empty when it tries to
                 // attach the result, silently discarding the content. Mirrors
                 // the Text-arm opener above.
-                if is_inline_tag(e.local_name().as_ref())
+                if (is_inline_tag(e.local_name().as_ref()) || math_is_inline(&e))
                     && inline_stack.is_empty()
                     && in_body
                     && cur_block.is_none()
@@ -662,6 +700,61 @@ pub fn xhtml_to_blocks(
                                     Block::Para(vec![Inline::Text(alt)])
                                 };
                                 emit_block(&mut frames, &mut inline_stack, &mut blocks, b);
+                            }
+                        }
+                    }
+                    b"math" => {
+                        let inline = math_is_inline(&e);
+                        let conv = match crate::math::capture_island(&mut reader, &e) {
+                            Ok(island) => crate::math::mathml_to_latex(&island),
+                            Err(err) => {
+                                // capture_island rewound the reader, so the
+                                // markup this island swallowed is about to be
+                                // re-read as ordinary content by this very
+                                // loop -- nothing is lost, but the document
+                                // was malformed here and that must be visible.
+                                emit_malformed_note(
+                                    &mut frames,
+                                    &mut inline_stack,
+                                    &mut blocks,
+                                    err.note(),
+                                );
+                                crate::math::degraded()
+                            }
+                        };
+                        if inline {
+                            if let Some(top) = inline_stack.last_mut() {
+                                crate::xmltext::push_inline(top, Inline::Math(conv.latex));
+                            }
+                        } else {
+                            emit_block(
+                                &mut frames,
+                                &mut inline_stack,
+                                &mut blocks,
+                                Block::MathBlock(conv.latex),
+                            );
+                            if !conv.complete {
+                                // If this display equation lands where an inline
+                                // collection is already open (a table cell, a
+                                // figcaption -- see emit_block's inline-context
+                                // branch), the MathBlock above folds to
+                                // Inline::Math carrying the in-band `\mathord{?}`
+                                // token, and this Raw note is intentionally
+                                // dropped by flatten_block_inlines's
+                                // `Block::Raw { .. } => {}` arm: a folded display
+                                // equation is inline, and the plan's degradation
+                                // rule for inline partials is to self-mark via
+                                // the token only (no inline note type is added).
+                                // Pinned by
+                                // partial_display_math_in_folding_context_drops_note_but_keeps_token.
+                                emit_block(
+                                    &mut frames,
+                                    &mut inline_stack,
+                                    &mut blocks,
+                                    Block::Raw {
+                                        note: "equation partially converted".into(),
+                                    },
+                                );
                             }
                         }
                     }
@@ -1988,5 +2081,260 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Para(i) if text_of(i) == "sidebar")));
+    }
+
+    #[test]
+    fn inline_math_stays_in_paragraph() {
+        let blocks = parse_blocks(
+            "<body><p>The value <math><msup><mi>x</mi><mn>2</mn></msup></math> is positive.</p></body>",
+        );
+        // One paragraph, containing an Inline::Math between the two text runs.
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        let math = para.iter().find_map(|i| match i {
+            Inline::Math(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(math.as_deref(), Some("{x}^{2}"));
+        // The paragraph was not split into pieces around the math.
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Para(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn inline_math_after_leading_text_stays_in_the_same_implicit_paragraph() {
+        // No wrapping <p>: inline math directly under <body>, preceded by
+        // bare text, must land in the same implicit paragraph the leading
+        // text opened rather than starting a new one or being dropped.
+        //
+        // Renamed from `inline_math_at_body_level_opens_implicit_paragraph`:
+        // that name overstated what this input exercises. The leading text
+        // "Value " already runs through the pre-existing Text arm's opener
+        // (xhtml.rs's Event::Text handler) and pushes an inline frame before
+        // <math> is ever seen, so by the time the Start(math) guard's
+        // `|| math_is_inline(&e)` term is evaluated, `inline_stack.is_empty()`
+        // is already false and that term is never the deciding factor. See
+        // `leading_math_at_empty_inline_stack_opens_implicit_paragraph` below
+        // for a case where the term actually decides.
+        let blocks = parse_blocks("<body>Value <math><mn>1</mn></math> end.</body>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("an implicit paragraph");
+        assert!(para.iter().any(|i| matches!(i, Inline::Math(_))));
+    }
+
+    #[test]
+    fn leading_math_at_empty_inline_stack_opens_implicit_paragraph() {
+        // Repro for the guard this task added support for
+        // (`(is_inline_tag(...) || math_is_inline(&e)) && inline_stack.is_empty()
+        // && in_body && cur_block.is_none()` in the Start(math) handler,
+        // xhtml.rs around line 475): a non-display <math> is the FIRST thing
+        // under <body>, with an empty inline_stack and no open block. Without
+        // the `|| math_is_inline(&e)` disjunct, this guard would not fire,
+        // inline_stack would still be empty when the `<math>` arm runs, and
+        // its `if let Some(top) = inline_stack.last_mut()` would find nothing
+        // to push into -- the equation silently vanishes. This test is the
+        // one that actually exercises that term; see the check documented
+        // alongside it for confirmation that removing the term makes this
+        // test fail.
+        let blocks = parse_blocks("<body><math><mn>1</mn></math></body>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("an implicit paragraph opened by the leading <math>, got no Para");
+        let math = para.iter().find_map(|i| match i {
+            Inline::Math(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            math.as_deref(),
+            Some("1"),
+            "the equation must reach the output, not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn leading_math_in_list_item_opens_implicit_paragraph() {
+        // Cheap variant of the case above in a different empty-inline-stack
+        // context: <li> (unlike <td>) does not push its own inline_stack
+        // frame on Start -- see the b"li" arm, which only pushes onto the
+        // List frame's `items` -- so inline_stack is still empty when <math>
+        // is the item's first and only content.
+        let blocks = parse_blocks("<body><ul><li><math><mn>2</mn></math></li></ul></body>");
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("expected List, got {:?}", blocks[0]);
+        };
+        let Block::Para(inls) = &items[0][0] else {
+            panic!("expected Para inside item, got {:?}", items[0]);
+        };
+        let math = inls.iter().find_map(|i| match i {
+            Inline::Math(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            math.as_deref(),
+            Some("2"),
+            "the equation must reach the output, not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn display_math_becomes_math_block() {
+        let blocks = parse_blocks(
+            "<body><p>Before.</p><math display=\"block\"><mfrac><mn>1</mn><mn>2</mn></mfrac></math><p>After.</p></body>",
+        );
+        let mb = blocks.iter().find_map(|b| match b {
+            Block::MathBlock(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert_eq!(mb.as_deref(), Some("\\frac{1}{2}"));
+    }
+
+    #[test]
+    fn partial_display_math_emits_raw_note() {
+        // Content MathML is out of subset → placeholder + note.
+        let blocks =
+            parse_blocks("<body><math display=\"block\"><apply><ci>x</ci></apply></math></body>");
+        let mb_idx = blocks
+            .iter()
+            .position(|b| matches!(b, Block::MathBlock(s) if s.contains("\\mathord{?}")))
+            .expect("expected a MathBlock carrying the placeholder token");
+        let note_idx = blocks
+            .iter()
+            .position(|b| matches!(b, Block::Raw { note } if note.contains("partially converted")))
+            .expect("expected a Raw partial-conversion note");
+        // "Adjacent" per the plan means the note immediately follows its
+        // MathBlock, not merely that both exist somewhere in the document.
+        assert_eq!(
+            note_idx,
+            mb_idx + 1,
+            "the partial-conversion note must immediately follow its MathBlock, got blocks {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn partial_display_math_in_folding_context_drops_note_but_keeps_token() {
+        // Adjudicated as correct behavior, not a bug: when a MathBlock lands
+        // where an inline collection is already open, emit_block's
+        // inline-context branch (`if let Some(top) = inline_stack.last_mut()`)
+        // flattens it to Inline::Math via flatten_block_inlines, and the
+        // Block::MathBlock arm there keeps the in-band `\mathord{?}` token.
+        // The following Block::Raw note hits the same fold and is dropped by
+        // flatten_block_inlines's `Block::Raw { .. } => {}` arm: a folded
+        // display equation is inline, and the plan's degradation rule for
+        // inline partials is "self-mark via the token only (no inline note
+        // type is added)". This pins that as deliberate so a future change
+        // to the fold logic can't silently alter it.
+        //
+        // <td> is confirmed (not assumed) to fold here: the b"th" | b"td"
+        // Start arm pushes its own inline_stack frame directly (xhtml.rs,
+        // the `th | td` arm around line 591), so inline_stack is non-empty
+        // for the whole cell, and emit_block's inline-context branch is
+        // checked before the frames-based Table branch.
+        let blocks = parse_blocks(
+            "<body><table><tr><td><math display=\"block\"><apply><ci>x</ci></apply></math></td></tr></table></body>",
+        );
+        let Block::Table(t) = &blocks[0] else {
+            panic!("expected Table, got {:?}", blocks[0]);
+        };
+        let cell = &t.header[0]; // headerless table promotes the first row
+        assert!(
+            cell.iter()
+                .any(|i| matches!(i, Inline::Math(s) if s.contains("\\mathord{?}"))),
+            "expected the folded equation's placeholder token in the cell, got {cell:?}"
+        );
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("partially converted"))),
+            "the partial-conversion note must not appear anywhere in the document when folded, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn unclosed_math_keeps_the_rest_of_the_chapter_and_notes_the_malformation() {
+        // The reader runs with check_end_names = false precisely so malformed
+        // markup does not lose content. An unclosed <math> used to make
+        // capture_island consume to EOF, so everything after it vanished with
+        // no trace. capture_island now rewinds instead: the equation degrades,
+        // the island's children come back as ordinary flow content, and the
+        // malformation is recorded.
+        let blocks = parse_blocks(
+            "<body><p>before</p><math><mn>1</mn><p>AFTER-ONE</p><h2>AFTER-TWO</h2></body>",
+        );
+        let all_text: String = blocks
+            .iter()
+            .flat_map(|b| {
+                let mut inls = Vec::new();
+                super::flatten_block_inlines(b, &mut inls);
+                inls
+            })
+            .map(|i| match i {
+                Inline::Text(t) => t,
+                _ => String::new(),
+            })
+            .collect();
+        assert!(
+            all_text.contains("before"),
+            "content before the island must survive, got {blocks:?}"
+        );
+        assert!(
+            all_text.contains("AFTER-ONE"),
+            "content after an unclosed <math> must survive, got {blocks:?}"
+        );
+        assert!(
+            all_text.contains("AFTER-TWO"),
+            "content after an unclosed <math> must survive, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("unclosed equation"))),
+            "the malformation must be noted, not silent, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn over_deep_math_island_degrades_and_notes_without_aborting() {
+        // Whole-adapter cover for the stack-overflow abort: capture_island
+        // refuses the island on its nesting bound, so roxmltree never sees it,
+        // the reader rewinds, and the (meaningless) <mrow> nest is re-read as
+        // flow content -- which the parser ignores -- leaving the trailing
+        // paragraph intact.
+        let levels = 18_000;
+        let xml = format!(
+            "<body><math>{}<mn>1</mn>{}</math><p>AFTER</p></body>",
+            "<mrow>".repeat(levels),
+            "</mrow>".repeat(levels)
+        );
+        let blocks = parse_blocks(&xml);
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("too large"))),
+            "the over-budget island must be noted, got {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Para(i)
+                if i.iter().any(|x| matches!(x, Inline::Text(t) if t.contains("AFTER"))))),
+            "content after the over-deep island must survive, got {blocks:?}"
+        );
     }
 }

@@ -528,6 +528,25 @@ mod tests {
     }
 
     #[test]
+    fn math_survives_full_epub_pipeline() {
+        let bytes = build_epub(
+            "<body><h1>M</h1>\
+             <p>Inline <math><msup><mi>x</mi><mn>2</mn></msup></math> here.</p>\
+             <math display=\"block\"><mfrac><mn>1</mn><mn>2</mn></mfrac></math></body>",
+            &[],
+        );
+        let (doc, _assets) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        // inline math reached a paragraph
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Para(i) if i.iter().any(|x| matches!(x, Inline::Math(s) if s == "{x}^{2}")))));
+        // display math reached a MathBlock
+        assert!(doc
+            .nodes
+            .iter()
+            .any(|n| matches!(&n.block, Block::MathBlock(s) if s == "\\frac{1}{2}")));
+    }
+
+    #[test]
     fn missing_image_degrades_to_alt_paragraph() {
         let bytes = build_epub(
             "<body><h1>C</h1><img src=\"images/gone.png\" alt=\"lost chart\"/></body>",
