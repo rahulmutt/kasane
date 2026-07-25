@@ -121,5 +121,7 @@ See AGENTS.md for the codebase map.
   has no math markup to recover.
 - Batch mode holds one document in memory per worker, so a directory of large
   PDFs at a high `-j` can use a lot of RAM; `-j 1` is the mitigation. Two
-  inputs that would produce the same output directory are rejected before any
-  conversion starts rather than silently renamed.
+  inputs whose output directories would clash — either identical, or one
+  nested inside the other, as when `ch.epub` sits beside a `ch/` directory —
+  are rejected before any conversion starts rather than silently overwriting
+  each other.

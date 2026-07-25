@@ -166,9 +166,23 @@ kasane x/ch.epub y/ch.epub -o out/     # explicit files: stem only
 ```
 
 Structure is preserved, so duplicate stems in different subdirectories cannot
-collide. The **full mapping is built and checked for duplicate destinations before
+collide. The **full mapping is built and checked for clashing destinations before
 any conversion starts**, so a long run cannot die halfway through on a name clash.
-A collision is a pre-flight error naming both inputs.
+A collision is a pre-flight error naming both inputs and both directories.
+
+Two destinations clash if they are **equal**, or if one **contains** the other.
+Containment matters because `write_tree` swaps the whole output directory
+(`rename(out, backup)` / `rename(tmp, out)` / `remove_dir_all(backup)`), so a
+document whose directory contains another's silently deletes it. The ordinary
+trigger is a document sitting beside a directory of the same stem:
+
+```
+  books/ch.epub        ->  out/ch/        \  nested destination:
+  books/ch/inner.epub  ->  out/ch/inner/  /  pre-flight error, nothing written
+```
+
+Containment is a path relation, not a string one: `out/ch` does not contain
+`out/chapter`.
 
 ### `--force`
 
@@ -325,6 +339,8 @@ Matching the repo's existing tiers (unit + e2e). The `insta` / `proptest` /
 - extension filter accepts each supported extension and rejects others
 - explicitly named files bypass the filter
 - duplicate destinations detected before any work
+- nested destinations (`out/ch` vs `out/ch/inner`) detected before any work, in
+  either discovery order; `out/ch` vs `out/chapter` is not a collision
 - per-directory sort ordering is stable
 - symlinked directories are not followed
 

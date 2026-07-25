@@ -32,7 +32,7 @@ Both are improvements found while writing this plan. Implement the plan, not the
 | File | Responsibility |
 |---|---|
 | `crates/kasane-cli/src/convert.rs` | **new** — `WorkItem`, `ConvertOptions`, `Converted`, `convert_one`. One document end to end. Returns `Result`; never exits. |
-| `crates/kasane-cli/src/discover.rs` | **new** — recursive walk, extension filter, output mapping, duplicate-destination detection. Pure path logic; reads no file contents. |
+| `crates/kasane-cli/src/discover.rs` | **new** — recursive walk, extension filter, output mapping, destination-collision detection (equal *and* nested). Pure path logic; reads no file contents. |
 | `crates/kasane-cli/src/batch.rs` | **new** — `Outcome`, `run_batch`: the rayon pool and per-file result collection. |
 | `crates/kasane-cli/src/main.rs` | **modified** — arg parsing, mode dispatch, run summary, exit-code policy. Shrinks to wiring. |
 | `crates/kasane-writer/src/library.rs` | **new** — `LibraryEntry`, `LibraryFailure`, `write_library_index`. |
@@ -511,6 +511,69 @@ mod tests {
         assert!(msg.contains("a/ch.epub") && msg.contains("b/ch.epub"), "got: {msg}");
     }
 
+    fn item(input: &str, out_dir: &str) -> WorkItem {
+        WorkItem {
+            rel: input.into(),
+            input: PathBuf::from(input),
+            out_dir: PathBuf::from(out_dir),
+        }
+    }
+
+    /// `write_tree` swaps whole directories, so an output directory that
+    /// *contains* another's annihilates it. Nesting must be rejected up front,
+    /// exactly like equality.
+    #[test]
+    fn an_output_directory_nested_inside_another_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let books = dir.path().join("books");
+        std::fs::create_dir_all(books.join("ch")).unwrap();
+        std::fs::write(books.join("ch.epub"), "x").unwrap();
+        std::fs::write(books.join("ch/inner.epub"), "x").unwrap();
+        let out = dir.path().join("out");
+
+        let err = discover(&[books], &out).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ch.epub"), "got: {msg}");
+        assert!(msg.contains("inner.epub"), "got: {msg}");
+        assert!(msg.contains(&out.join("ch").display().to_string()), "got: {msg}");
+        assert!(msg.contains(&out.join("ch/inner").display().to_string()), "got: {msg}");
+    }
+
+    #[test]
+    fn nesting_is_rejected_with_the_container_discovered_first() {
+        let err = check_collisions(&[
+            item("books/ch.epub", "out/ch"),
+            item("books/ch/inner.epub", "out/ch/inner"),
+        ])
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("books/ch.epub") && msg.contains("books/ch/inner.epub"), "got: {msg}");
+        assert!(msg.contains("out/ch") && msg.contains("out/ch/inner"), "got: {msg}");
+    }
+
+    #[test]
+    fn nesting_is_rejected_with_the_contained_directory_discovered_first() {
+        let err = check_collisions(&[
+            item("books/ch/inner.epub", "out/ch/inner"),
+            item("books/ch.epub", "out/ch"),
+        ])
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("books/ch.epub") && msg.contains("books/ch/inner.epub"), "got: {msg}");
+        assert!(msg.contains("out/ch") && msg.contains("out/ch/inner"), "got: {msg}");
+    }
+
+    /// Containment is a *path* relation, not a string one: `out/ch` is not a
+    /// prefix of `out/chapter`. A naive `str::starts_with` would reject this.
+    #[test]
+    fn a_shared_name_prefix_is_not_containment() {
+        assert!(check_collisions(&[
+            item("books/ch.epub", "out/ch"),
+            item("books/chapter.epub", "out/chapter"),
+        ])
+        .is_ok());
+    }
+
     #[test]
     fn nested_duplicate_stems_do_not_collide() {
         let dir = tree();
@@ -625,8 +688,24 @@ fn walk(dir: &Path, root: &Path, out: &Path, items: &mut Vec<WorkItem>) -> Resul
     Ok(())
 }
 
-/// Reject two inputs mapping to the same output directory before any
+/// Reject two inputs whose output directories would clash, before any
 /// conversion starts, so a long run cannot die halfway through.
+///
+/// Two ways to clash, both fatal:
+///
+/// - **Equal** destinations — the second document would overwrite the first.
+/// - **Nested** destinations — `write_tree` swaps the whole output directory
+///   (`rename(out, backup)` / `rename(tmp, out)` / `remove_dir_all(backup)`),
+///   so a document whose directory *contains* another's annihilates it. The
+///   ordinary trigger is a document beside a directory of the same stem:
+///   `books/ch.epub` maps to `out/ch`, which contains `out/ch/inner` from
+///   `books/ch/inner.epub`.
+///
+/// Nesting is found by sorting the destinations and testing each against its
+/// predecessor. Sorting makes the check order-independent, and adjacency is
+/// enough: if `a` contains `c` and `b` sorts between them, `a` contains `b`
+/// too, so the `(a, b)` pair fires first. `Path::starts_with` is
+/// component-wise, so `out/ch` is correctly *not* inside `out/chapter`.
 fn check_collisions(items: &[WorkItem]) -> Result<()> {
     let mut seen: HashMap<&Path, &Path> = HashMap::new();
     for it in items {
@@ -639,6 +718,23 @@ fn check_collisions(items: &[WorkItem]) -> Result<()> {
             );
         }
     }
+
+    // Destinations are distinct by now, so `starts_with` means strict nesting.
+    let mut sorted: Vec<&WorkItem> = items.iter().collect();
+    sorted.sort_by(|a, b| a.out_dir.cmp(&b.out_dir));
+    for pair in sorted.windows(2) {
+        let (outer, inner) = (pair[0], pair[1]);
+        if inner.out_dir.starts_with(&outer.out_dir) {
+            bail!(
+                "nested output directory {} inside {}: {} would be written over {}, \
+                 whose whole directory is replaced",
+                inner.out_dir.display(),
+                outer.out_dir.display(),
+                outer.input.display(),
+                inner.input.display()
+            );
+        }
+    }
     Ok(())
 }
 ```
@@ -648,7 +744,7 @@ Add `mod discover;` to `main.rs` beneath `mod convert;`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p kasane-cli discover`
-Expected: PASS — all nine tests.
+Expected: PASS — every test in the module.
 
 - [ ] **Step 5: Lint**
 
@@ -662,8 +758,9 @@ git add crates/kasane-cli/src/discover.rs crates/kasane-cli/src/main.rs
 git commit -m "feat(cli): discover the work list from files and directories
 
 Recursive walk with a case-insensitive extension filter, output dirs
-mirroring each input's path relative to its root, and duplicate
-destinations rejected up front. Symlinks are not followed.
+mirroring each input's path relative to its root, and clashing
+destinations -- equal or nested -- rejected up front. Symlinks are not
+followed.
 
 The filter picks candidates only; detect() still runs on the bytes in
 convert_one, so extensions are never trusted for parsing."

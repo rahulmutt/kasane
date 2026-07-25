@@ -10,9 +10,12 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `convert.rs` converts one document (`WorkItem` -> `Converted`) and returns a
   `Result` rather than exiting, which is what makes per-file failure isolation
   possible; `discover.rs` expands file/directory arguments into the work list
-  (recursive walk, extension filter, output mapping, duplicate-destination
-  check — a symlink named directly on the command line is followed, but one
-  found while walking is skipped); `batch.rs` fans out across rayon workers,
+  (recursive walk, extension filter, output mapping, destination-collision
+  check — equal *and* nested output directories are rejected up front, because
+  `write_tree` swaps whole directories. Paths named on the command line are
+  trusted; paths found by walking are not, so a walked symlink is skipped and
+  an unreadable walked directory is a `warning:` on stderr rather than a fatal
+  error); `batch.rs` fans out across rayon workers,
   preserving input order. Mode is keyed on the invocation shape: a lone
   argument that is not a directory is single-file mode (unchanged output
   layout), anything else is batch mode with a library index at
