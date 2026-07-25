@@ -54,9 +54,25 @@ fn exit_code_for(msg: &str) -> u8 {
     }
 }
 
+/// Batch exit policy (design spec §7): 0 all converted, 3 partial success,
+/// 2 when every failure was unsupported/DRM/encrypted, 1 otherwise.
+fn batch_exit_code(total: usize, failure_msgs: &[String]) -> u8 {
+    if failure_msgs.is_empty() {
+        return 0;
+    }
+    if failure_msgs.len() < total {
+        return 3;
+    }
+    if failure_msgs.iter().all(|m| exit_code_for(m) == 2) {
+        2
+    } else {
+        1
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::from(exit_code_for(&format!("{e:#}")))
@@ -102,7 +118,7 @@ fn is_dir(p: &Path) -> bool {
     std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false)
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<u8> {
     let args = Args::parse();
     ensure_ocr_available(args.ocr)?;
     validate_ocr_lang(args.ocr, &args.ocr_lang)?;
@@ -122,7 +138,7 @@ fn run() -> Result<()> {
     run_many(&args, &opts)
 }
 
-fn run_single(input: &Path, args: &Args, opts: &ConvertOptions) -> Result<()> {
+fn run_single(input: &Path, args: &Args, opts: &ConvertOptions) -> Result<u8> {
     let out = args.out.clone().unwrap_or_else(|| {
         PathBuf::from(input.file_stem().and_then(|s| s.to_str()).unwrap_or("out"))
     });
@@ -140,10 +156,10 @@ fn run_single(input: &Path, args: &Args, opts: &ConvertOptions) -> Result<()> {
     };
     let done = convert_one(&item, opts)?;
     eprintln!("wrote {} files to {}", done.files, out.display());
-    Ok(())
+    Ok(0)
 }
 
-fn run_many(args: &Args, opts: &ConvertOptions) -> Result<()> {
+fn run_many(args: &Args, opts: &ConvertOptions) -> Result<u8> {
     let Some(out) = args.out.clone() else {
         bail!("converting more than one document requires an output root: add `-o <DIR>`");
     };
@@ -167,7 +183,12 @@ fn run_many(args: &Args, opts: &ConvertOptions) -> Result<()> {
 
     let items = discover(&args.inputs, &out)?;
     if items.is_empty() {
-        bail!("no supported documents found");
+        let names: Vec<String> = args
+            .inputs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        bail!("no supported documents found in {}", names.join(", "));
     }
 
     let jobs = args.jobs.map(|n| n.get()).unwrap_or_else(|| {
@@ -177,16 +198,29 @@ fn run_many(args: &Args, opts: &ConvertOptions) -> Result<()> {
     });
 
     let outcomes = run_batch(items, jobs, opts)?;
-    let failures = outcomes.iter().filter(|o| o.result.is_err()).count();
-    if failures > 0 {
-        bail!("{failures} of {} documents failed", outcomes.len());
-    }
+
+    let failure_msgs: Vec<String> = outcomes
+        .iter()
+        .filter_map(|o| o.result.as_ref().err().map(|e| format!("{e:#}")))
+        .collect();
+    let converted = outcomes.len() - failure_msgs.len();
+
+    // Summary in input order, so it is deterministic even though the per-file
+    // lines above appeared in completion order.
     eprintln!(
-        "converted {} documents to {}",
+        "converted {converted} of {} documents to {}",
         outcomes.len(),
         out.display()
     );
-    Ok(())
+    if !failure_msgs.is_empty() {
+        eprintln!("failed:");
+        for o in outcomes.iter().filter(|o| o.result.is_err()) {
+            let e = o.result.as_ref().expect_err("filtered to failures");
+            eprintln!("  {} — {e:#}", o.item.rel);
+        }
+    }
+
+    Ok(batch_exit_code(outcomes.len(), &failure_msgs))
 }
 
 #[cfg(test)]
@@ -213,5 +247,29 @@ mod tests {
     #[test]
     fn no_ocr_flag_is_fine_without_feature() {
         assert!(ensure_ocr_available(false).is_ok());
+    }
+
+    #[test]
+    fn batch_exit_codes_follow_the_outcome() {
+        let drm = "DRM-protected content is not supported".to_string();
+        let broken = "malformed input: bad xref".to_string();
+
+        // everything converted
+        assert_eq!(batch_exit_code(3, &[]), 0);
+        // partial success
+        assert_eq!(batch_exit_code(3, std::slice::from_ref(&broken)), 3);
+        assert_eq!(batch_exit_code(3, &[drm.clone(), broken.clone()]), 3);
+        // every document failed, all of them unsupported/DRM/encrypted
+        assert_eq!(batch_exit_code(2, &[drm.clone(), drm.clone()]), 2);
+        // every document failed, mixed reasons
+        assert_eq!(batch_exit_code(2, &[drm, broken.clone()]), 1);
+        assert_eq!(batch_exit_code(1, &[broken]), 1);
+    }
+
+    #[test]
+    fn no_documents_found_is_exit_one() {
+        // Guards a subtle overlap: this message contains "supported" but must
+        // not match exit_code_for's "unsupported" keyword.
+        assert_eq!(exit_code_for("no supported documents found"), 1);
     }
 }

@@ -4,9 +4,6 @@ use rayon::prelude::*;
 
 /// One document's fate in a batch run.
 pub struct Outcome {
-    // Not yet read outside this file: the run summary (Task 4) is what
-    // surfaces it, to name which document a failure belongs to.
-    #[allow(dead_code)]
     pub item: WorkItem,
     pub result: Result<Converted>,
 }

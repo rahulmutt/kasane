@@ -431,3 +431,132 @@ fn jobs_does_not_change_the_output() {
     }
     assert_eq!(trees[0], trees[1], "-j must not change the emitted tree");
 }
+
+fn run_kasane(args: &[&std::ffi::OsStr]) -> i32 {
+    Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .args(args)
+        .status()
+        .unwrap()
+        .code()
+        .expect("process must exit normally")
+}
+
+#[test]
+fn partial_success_exits_three() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    // A DRM-protected MOBI converts to a failure, deterministically.
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]);
+
+    assert_eq!(code, 3);
+    // The documents that could convert still did.
+    assert!(out.join("a/minimal/index.md").exists());
+    assert!(out.join("b/minimal/index.md").exists());
+}
+
+#[test]
+fn all_documents_drm_protected_exits_two() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        2
+    );
+}
+
+#[test]
+fn a_directory_with_no_documents_exits_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::write(books.join("notes.txt"), "nothing here").unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        1
+    );
+    assert!(!out.exists(), "nothing should be written");
+}
+
+#[test]
+fn duplicate_stems_are_rejected_before_writing_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("x")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("y")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), tmp.path().join("x/ch.epub")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), tmp.path().join("y/ch.epub")).unwrap();
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[
+        tmp.path().join("x/ch.epub").as_os_str(),
+        tmp.path().join("y/ch.epub").as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ]);
+
+    assert_eq!(code, 1);
+    assert!(
+        !out.exists(),
+        "collision must be caught before any conversion"
+    );
+}
+
+#[test]
+fn batch_without_an_output_root_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+
+    assert_eq!(run_kasane(&[books.as_os_str()]), 1);
+}
+
+#[test]
+fn a_walked_file_that_fails_to_parse_is_a_failure_not_a_skip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    // Matching extension, unparseable content: the directory asserted this is
+    // a document, so it must be reported, not silently dropped.
+    std::fs::write(books.join("broken.epub"), b"definitely not a zip").unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        3
+    );
+    assert!(out.join("a/minimal/index.md").exists());
+    assert!(!out.join("broken").exists());
+}
+
+#[test]
+fn a_non_empty_output_root_needs_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("keep.txt"), "x").unwrap();
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        1
+    );
+    // Nothing was converted into it.
+    assert!(!out.join("a").exists());
+
+    assert_eq!(
+        run_kasane(&[
+            books.as_os_str(),
+            "-o".as_ref(),
+            out.as_os_str(),
+            "--force".as_ref()
+        ]),
+        0
+    );
+    assert!(out.join("a/minimal/index.md").exists());
+}
