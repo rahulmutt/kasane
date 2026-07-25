@@ -465,8 +465,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let books = dir.path().join("books");
         std::fs::create_dir_all(&books).unwrap();
+        // Distinct stems: `out_dir` drops the extension, so seven files named
+        // `doc.*` would all map to `out/doc` and trip the collision check that
+        // `duplicate_destinations_are_rejected_before_any_work` pins. This test
+        // is about the extension filter, not about collisions.
         for ext in ["epub", "pptx", "mobi", "azw3", "pdf", "djvu", "djv"] {
-            std::fs::write(books.join(format!("doc.{ext}")), "x").unwrap();
+            std::fs::write(books.join(format!("doc-{ext}.{ext}")), "x").unwrap();
         }
         // Two extensions a document could plausibly sit beside, both rejected.
         std::fs::write(books.join("doc.txt"), "x").unwrap();
