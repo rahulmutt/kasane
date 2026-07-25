@@ -39,13 +39,20 @@ See AGENTS.md for the codebase map.
   kasane never breaks DRM.
 - Math is recovered as LaTeX: MathML (EPUB) and OMML (PPTX) equations convert to
   GitHub-Flavored `$…$` (inline) / `$$…$$` (display) over a documented construct
-  subset — fractions, sub/superscripts, roots, fenced groups, n-ary operators
-  with limits, basic matrices, and (MathML only) common accents. A construct outside the
+  subset — fractions, sub/superscripts, roots, n-ary operators
+  with limits, basic matrices, fenced groups (OMML `<m:d>`, including its
+  multi-argument and `sepChr` forms; on the MathML side only the deprecated
+  `<mfenced>` — an `<mrow><mo>(</mo>…<mo>)</mo></mrow>` fence converts as
+  ordinary operators, not as a `\left…\right` group), and (MathML only) common
+  accents. A construct outside the
   subset degrades best-effort: the unmapped part becomes `\mathord{?}` and a
   partial display equation is followed by an "equation partially converted"
   note; a partial equation appearing inline (including a display equation that
   folds to an inline context such as a table cell) is marked by the token alone.
-  Content MathML is not converted.
+  Content MathML is not converted. An equation whose markup is malformed,
+  oversized or nested past the parser's bound degrades to the placeholder and is
+  accompanied by a note naming the reason; the markup it spanned is re-read as
+  ordinary content rather than being swallowed.
 - HUFF/CDIC-compressed MOBI books decode through the `mobi` crate; their
   in-book `filepos` links may resolve approximately.
 - PDF conversion is for born-digital PDFs. Headings come from the PDF outline
