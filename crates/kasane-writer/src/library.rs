@@ -52,7 +52,7 @@ pub fn write_library_index(
         s.push_str(&format!(
             "- [{}]({}/index.md) — {}, {} files\n",
             link_text(title),
-            e.rel_dir,
+            link_dest(&e.rel_dir),
             e.format,
             e.files
         ));
@@ -61,7 +61,11 @@ pub fn write_library_index(
     if !failures.is_empty() {
         s.push_str("\n## Failed\n\n");
         for f in failures {
-            s.push_str(&format!("- `{}` — {}\n", f.input, one_line(&f.reason)));
+            s.push_str(&format!(
+                "- `{}` — {}\n",
+                one_line(&f.input),
+                one_line(&f.reason)
+            ));
         }
     }
 
@@ -82,6 +86,36 @@ fn link_text(s: &str) -> String {
 /// Collapse a multi-line error message onto a single bullet line.
 fn one_line(s: &str) -> String {
     s.replace(['\n', '\r'], " ")
+}
+
+/// Percent-encode the narrow subset of characters that would otherwise break a
+/// bare (non-`<…>`-wrapped) Markdown link destination: space, `(`, `)`, `<`,
+/// `>`, `\`, `"`, and control characters (including `\n`/`\r`, which would
+/// otherwise split the destination across lines). Encoded as `%XX` with
+/// uppercase hex, matching standard percent-encoding.
+///
+/// `/` is deliberately left alone — `rel_dir` is a path and `/` is its
+/// separator, not something to hide. `%` is also left alone: `rel_dir` comes
+/// from `discover`, which never produces a `%`-sequence that this function
+/// would need to distinguish from an already-encoded one, and encoding it
+/// would add exactly that ambiguity for no benefit here. This is deliberately
+/// narrow, matching `link_text`'s scope — not a general percent-encoder.
+fn link_dest(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' | '(' | ')' | '<' | '>' | '\\' | '"' => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", c as u32));
+            }
+            c if c.is_ascii_control() => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -166,5 +200,59 @@ mod tests {
             "got: {md}"
         );
         assert!(md.contains("0 of 1 inputs converted."));
+    }
+
+    #[test]
+    fn a_space_in_rel_dir_is_percent_encoded_in_the_link_destination() {
+        let md = write(&[entry("War and Peace", "War and Peace")], &[]);
+        assert!(
+            md.contains("- [War and Peace](War%20and%20Peace/index.md) — epub, 7 files"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn parens_in_rel_dir_are_percent_encoded_in_the_link_destination() {
+        let md = write(&[entry("Book (Annotated)", "Book (Annotated)")], &[]);
+        assert!(
+            md.contains("- [Book (Annotated)](Book%20%28Annotated%29/index.md) — epub, 7 files"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_rel_dir_passes_through_the_link_destination_unchanged() {
+        let md = write(&[entry("Dune", "a/dune")], &[]);
+        assert!(
+            md.contains("- [Dune](a/dune/index.md) — epub, 7 files"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn empty_title_fallback_label_stays_literal_while_the_destination_still_encodes() {
+        // The label falls back to `rel_dir` verbatim (through `link_text`,
+        // which does not escape spaces); the destination still goes through
+        // `link_dest`. Label and destination have different escaping rules.
+        let md = write(&[entry("   ", "a/War Stories")], &[]);
+        assert!(
+            md.contains("- [a/War Stories](a/War%20Stories/index.md)"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn a_newline_in_the_failure_input_stays_on_one_bullet() {
+        let md = write(
+            &[],
+            &[LibraryFailure {
+                input: "c/weird\nname.pdf".into(),
+                reason: "malformed input".into(),
+            }],
+        );
+        assert!(
+            md.contains("- `c/weird name.pdf` — malformed input"),
+            "got: {md}"
+        );
     }
 }
