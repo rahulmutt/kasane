@@ -1,5 +1,8 @@
-use anyhow::{bail, Context, Result};
+mod convert;
+
+use anyhow::{bail, Result};
 use clap::Parser;
+use convert::{convert_one, ConvertOptions, WorkItem};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -68,56 +71,27 @@ fn ensure_ocr_available(_ocr_requested: bool) -> Result<()> {
     Ok(())
 }
 
+/// Construct and drop one extractor up front so a bad `--ocr-lang` fails before
+/// any document is converted, instead of failing once inside every worker.
+#[cfg(feature = "ocr")]
+fn validate_ocr_lang(ocr_requested: bool, lang: &str) -> Result<()> {
+    if ocr_requested {
+        kasane_adapters::ocr::TesseractExtractor::new(lang).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "ocr"))]
+fn validate_ocr_lang(_ocr_requested: bool, _lang: &str) -> Result<()> {
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let args = Args::parse();
-    let bytes =
-        std::fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
-    let ext = args.input.extension().and_then(|s| s.to_str());
-    let fmt = kasane_adapters::detect(&bytes, ext).context("unsupported or unrecognized format")?;
-    let adapter = kasane_adapters::adapter_for(fmt).map_err(|e| anyhow::anyhow!("{e}"))?;
-
     ensure_ocr_available(args.ocr)?;
+    validate_ocr_lang(args.ocr, &args.ocr_lang)?;
 
-    #[cfg(feature = "ocr")]
-    let extractor = if args.ocr {
-        Some(
-            kasane_adapters::ocr::TesseractExtractor::new(&args.ocr_lang)
-                .map_err(|e| anyhow::anyhow!("{e}"))?,
-        )
-    } else {
-        None
-    };
-
-    let ocr_opts = kasane_adapters::ocr::OcrOptions {
-        lang: args.ocr_lang.clone(),
-        force_text: args.ocr_no_image,
-        ..Default::default()
-    };
-
-    #[cfg(feature = "ocr")]
-    let parse_opts = kasane_adapters::ParseOptions {
-        ocr: extractor
-            .as_ref()
-            .map(|e| e as &dyn kasane_adapters::ocr::TextExtractor),
-        ocr_opts,
-    };
-    #[cfg(not(feature = "ocr"))]
-    let parse_opts = kasane_adapters::ParseOptions {
-        ocr: None,
-        ocr_opts,
-    };
-
-    let (doc, assets) = adapter
-        .parse_with(&bytes, &args.input.to_string_lossy(), &parse_opts)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let opts = kasane_core::Options {
-        max_tokens: args.max_tokens,
-        min_tokens: args.min_tokens,
-    };
-    let site = kasane_core::structure(doc, &opts);
-
-    let out = args.out.unwrap_or_else(|| {
+    let out = args.out.clone().unwrap_or_else(|| {
         PathBuf::from(
             args.input
                 .file_stem()
@@ -128,8 +102,27 @@ fn run() -> Result<()> {
     if out.as_os_str().is_empty() {
         bail!("could not determine output directory");
     }
-    kasane_writer::write_tree(&site, &assets, &out, args.force)?;
-    eprintln!("wrote {} files to {}", site.files.len(), out.display());
+
+    let item = WorkItem {
+        rel: args
+            .input
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        input: args.input.clone(),
+        out_dir: out.clone(),
+    };
+    let opts = ConvertOptions {
+        max_tokens: args.max_tokens,
+        min_tokens: args.min_tokens,
+        force: args.force,
+        ocr: args.ocr,
+        ocr_lang: args.ocr_lang.clone(),
+        ocr_no_image: args.ocr_no_image,
+    };
+
+    let done = convert_one(&item, &opts)?;
+    eprintln!("wrote {} files to {}", done.files, out.display());
     Ok(())
 }
 
