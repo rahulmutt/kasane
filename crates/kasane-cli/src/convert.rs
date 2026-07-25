@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// One document to convert: where it is read from and where its tree goes.
+#[derive(Debug)]
 pub struct WorkItem {
     /// File to read.
     pub input: PathBuf,

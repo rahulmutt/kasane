@@ -1,4 +1,5 @@
 mod convert;
+mod discover;
 
 use anyhow::{bail, Result};
 use clap::Parser;
