@@ -21,7 +21,6 @@ fn has_supported_ext(p: &Path) -> bool {
 /// A named file is its own root and maps to its stem. A directory is the root
 /// for everything beneath it, walked recursively, and each document keeps its
 /// path relative to that root (extension dropped) as its output directory.
-#[allow(dead_code)] // wired into main in the next task
 pub fn discover(inputs: &[PathBuf], out: &Path) -> Result<Vec<WorkItem>> {
     let mut items = Vec::new();
     for input in inputs {

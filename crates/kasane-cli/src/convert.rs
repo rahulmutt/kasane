@@ -10,8 +10,6 @@ pub struct WorkItem {
     pub out_dir: PathBuf,
     /// `input` relative to the root it was discovered under, extension kept.
     /// Shown in the run summary and in the library index's failure list.
-    // Not yet read outside tests: batch mode (Task 3+) is what surfaces it.
-    #[allow(dead_code)]
     pub rel: String,
 }
 

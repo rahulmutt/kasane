@@ -1,10 +1,13 @@
+mod batch;
 mod convert;
 mod discover;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use batch::run_batch;
 use clap::Parser;
 use convert::{convert_one, ConvertOptions, WorkItem};
-use std::path::PathBuf;
+use discover::discover;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -13,8 +16,9 @@ use std::process::ExitCode;
     about = "Convert documents to progressive-disclosure Markdown"
 )]
 struct Args {
-    /// Input document (EPUB, PPTX, MOBI, AZW3, PDF, DjVu supported in this build)
-    input: PathBuf,
+    /// Input documents and/or directories to convert
+    #[arg(required = true, num_args = 1..)]
+    inputs: Vec<PathBuf>,
     /// Output root directory (default: ./<input-stem>/)
     #[arg(short, long)]
     out: Option<PathBuf>,
@@ -27,6 +31,9 @@ struct Args {
     /// Size-guard merge threshold (estimated tokens)
     #[arg(long, default_value_t = 200)]
     min_tokens: usize,
+    /// Parallel workers for batch mode (default: available parallelism)
+    #[arg(short = 'j', long)]
+    jobs: Option<std::num::NonZeroUsize>,
     /// Run OCR on text-less pages (requires a build compiled with `-F ocr`)
     #[arg(long)]
     ocr: bool,
@@ -87,32 +94,19 @@ fn validate_ocr_lang(_ocr_requested: bool, _lang: &str) -> Result<()> {
     Ok(())
 }
 
+/// A single positional argument that is not a directory means single-file mode.
+/// Keying on the argument rather than on what a walk finds keeps the output
+/// shape predictable from the command line alone — and a nonexistent path stays
+/// in single-file mode, so it still reports "reading <path>" as it does today.
+fn is_dir(p: &Path) -> bool {
+    std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false)
+}
+
 fn run() -> Result<()> {
     let args = Args::parse();
     ensure_ocr_available(args.ocr)?;
     validate_ocr_lang(args.ocr, &args.ocr_lang)?;
 
-    let out = args.out.clone().unwrap_or_else(|| {
-        PathBuf::from(
-            args.input
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("out"),
-        )
-    });
-    if out.as_os_str().is_empty() {
-        bail!("could not determine output directory");
-    }
-
-    let item = WorkItem {
-        rel: args
-            .input
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        input: args.input.clone(),
-        out_dir: out.clone(),
-    };
     let opts = ConvertOptions {
         max_tokens: args.max_tokens,
         min_tokens: args.min_tokens,
@@ -122,8 +116,76 @@ fn run() -> Result<()> {
         ocr_no_image: args.ocr_no_image,
     };
 
-    let done = convert_one(&item, &opts)?;
+    if args.inputs.len() == 1 && !is_dir(&args.inputs[0]) {
+        return run_single(&args.inputs[0], &args, &opts);
+    }
+    run_many(&args, &opts)
+}
+
+fn run_single(input: &Path, args: &Args, opts: &ConvertOptions) -> Result<()> {
+    let out = args.out.clone().unwrap_or_else(|| {
+        PathBuf::from(input.file_stem().and_then(|s| s.to_str()).unwrap_or("out"))
+    });
+    if out.as_os_str().is_empty() {
+        bail!("could not determine output directory");
+    }
+
+    let item = WorkItem {
+        rel: input
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        input: input.to_path_buf(),
+        out_dir: out.clone(),
+    };
+    let done = convert_one(&item, opts)?;
     eprintln!("wrote {} files to {}", done.files, out.display());
+    Ok(())
+}
+
+fn run_many(args: &Args, opts: &ConvertOptions) -> Result<()> {
+    let Some(out) = args.out.clone() else {
+        bail!("converting more than one document requires an output root: add `-o <DIR>`");
+    };
+
+    // Spec §4: the non-empty check applies once to the output root, up front.
+    // Per-document directories are created fresh below, and `force` is still
+    // passed through to write_tree so a re-run behaves as it does today.
+    if !args.force && out.exists() {
+        let non_empty = out
+            .read_dir()
+            .with_context(|| format!("inspect output directory {}", out.display()))?
+            .next()
+            .is_some();
+        if non_empty {
+            bail!(
+                "output directory {} is not empty (use --force)",
+                out.display()
+            );
+        }
+    }
+
+    let items = discover(&args.inputs, &out)?;
+    if items.is_empty() {
+        bail!("no supported documents found");
+    }
+
+    let jobs = args.jobs.map(|n| n.get()).unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+
+    let outcomes = run_batch(items, jobs, opts)?;
+    let failures = outcomes.iter().filter(|o| o.result.is_err()).count();
+    if failures > 0 {
+        bail!("{failures} of {} documents failed", outcomes.len());
+    }
+    eprintln!(
+        "converted {} documents to {}",
+        outcomes.len(),
+        out.display()
+    );
     Ok(())
 }
 

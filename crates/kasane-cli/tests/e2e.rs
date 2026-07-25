@@ -307,3 +307,127 @@ fn lying_skel_azw3_still_converts() {
     assert!(status.success(), "degrade, don't die");
     assert!(read_all_md(&out_dir).contains("Part Two"));
 }
+
+use std::path::{Path, PathBuf};
+
+fn fixture(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(rel)
+}
+
+/// `books/a/minimal.epub`, `books/b/minimal.pdf`, `books/notes.txt`
+fn library(dir: &Path) -> PathBuf {
+    let books = dir.join("books");
+    std::fs::create_dir_all(books.join("a")).unwrap();
+    std::fs::create_dir_all(books.join("b")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), books.join("a/minimal.epub")).unwrap();
+    std::fs::copy(fixture("pdf/minimal.pdf"), books.join("b/minimal.pdf")).unwrap();
+    std::fs::write(books.join("notes.txt"), "not a document").unwrap();
+    books
+}
+
+/// Every file under `root`, as (relative path, contents), sorted.
+fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn converts_a_directory_of_documents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(&books)
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+
+    assert!(status.success(), "expected exit 0, got {status:?}");
+    // Each document keeps its path relative to the walk root.
+    assert!(out.join("a/minimal/index.md").exists());
+    assert!(out.join("b/minimal/index.md").exists());
+    // The non-document is skipped silently.
+    assert!(!out.join("notes").exists());
+}
+
+#[test]
+fn single_file_output_shape_is_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("book");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(fixture("epub/minimal.epub"))
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    // `out` IS the document root — not a library wrapper around it.
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("title: Minimal Book"));
+    assert!(!out.join("minimal").exists());
+}
+
+#[test]
+fn multiple_explicit_files_convert_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+
+    // Distinct stems, so no collision. (Two fixtures both named `minimal`
+    // would collide by design — see `duplicate_stems_are_rejected` in Task 4.)
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(fixture("epub/minimal.epub"))
+        .arg(fixture("epub/rich.epub"))
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(out.join("minimal/index.md").exists());
+    assert!(out.join("rich/index.md").exists());
+}
+
+#[test]
+fn jobs_does_not_change_the_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+
+    let mut trees = Vec::new();
+    for jobs in ["1", "4"] {
+        let out = tmp.path().join(format!("out-{jobs}"));
+        let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+            .arg(&books)
+            .arg("-o")
+            .arg(&out)
+            .arg("-j")
+            .arg(jobs)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        trees.push(snapshot(&out));
+    }
+    assert_eq!(trees[0], trees[1], "-j must not change the emitted tree");
+}
