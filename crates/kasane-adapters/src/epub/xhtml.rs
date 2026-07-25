@@ -87,8 +87,11 @@ fn emit_block(
 // `\mathord{?}` token already self-marks an inline partial, it has no in-band
 // counterpart, so routing it through emit_block would let an open inline
 // context swallow it (flatten_block_inlines drops Block::Raw) and put us right
-// back at the silent data loss this note exists to report. Use the normal block
-// path when there is one; otherwise put it straight into the block flow.
+// back at the silent data loss this note exists to report. This is why the
+// malformed note is emitted BEFORE its degraded equation in the XML source
+// order, opposite to the partially-converted note which follows its equation.
+// Use the normal block path when there is one; otherwise put it straight into
+// the block flow.
 fn emit_malformed_note(
     frames: &mut [BlockFrame],
     inline_stack: &mut [Vec<Inline>],
@@ -99,6 +102,9 @@ fn emit_malformed_note(
     if inline_stack.is_empty() {
         emit_block(frames, inline_stack, out, b);
     } else {
+        // Pushing directly to out also bypasses the frame stack, placing the
+        // note at the top level outside any list, table, or figure — acceptable
+        // because the note documents document-level malformation, not local structure loss.
         out.push(b);
     }
 }

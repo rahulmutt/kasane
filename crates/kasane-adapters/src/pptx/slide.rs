@@ -457,7 +457,10 @@ pub fn notes_to_blocks(xml: &str) -> Vec<Block> {
     let (shapes, truncated) = parse_shapes(xml, &SlideRels::empty());
     for s in shapes {
         match s {
+            Shape::Title(_) => {}
             Shape::Body(paras) => body_to_blocks(paras, &mut out),
+            Shape::Table(_) => {}
+            Shape::Picture { .. } => {}
             Shape::Math { latex, complete } => {
                 out.push(Block::MathBlock(latex));
                 if !complete {
@@ -467,7 +470,6 @@ pub fn notes_to_blocks(xml: &str) -> Vec<Block> {
                 }
             }
             Shape::Note(note) => out.push(Block::Raw { note: note.into() }),
-            _ => {}
         }
     }
     if truncated {

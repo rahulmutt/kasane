@@ -116,7 +116,11 @@ fn row(kids: &[Node], depth: usize) -> MathNode {
     let items: Vec<MathNode> = kids.iter().map(|k| convert(*k, depth + 1)).collect();
     match items.len() {
         // Parity with the OMML front-end: an empty container has no content to
-        // render, and emitting "" would make the writer print a bare `$$`.
+        // render, and emitting "" would make the writer print a bare `$$`. As a
+        // knock-on: an empty <mrow/> or <mpadded/> nested inside an otherwise-
+        // convertible equation injects \mathord{?} and flips complete to false,
+        // which is accepted as parity with OMML is worth more; producer output
+        // rarely contains empty rows (MathJax uses <mspace/>, which is Unsupported anyway).
         0 => MathNode::Unsupported,
         1 => items.into_iter().next().unwrap(),
         _ => MathNode::Row(items),
