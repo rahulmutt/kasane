@@ -24,8 +24,11 @@ fn has_supported_ext(p: &Path) -> bool {
 pub fn discover(inputs: &[PathBuf], out: &Path) -> Result<Vec<WorkItem>> {
     let mut items = Vec::new();
     for input in inputs {
-        let meta = std::fs::symlink_metadata(input)
-            .with_context(|| format!("reading {}", input.display()))?;
+        // A path the user named is trusted: follow it. Paths found by walking
+        // are not — `walk` keeps using symlink_metadata, so the walk still
+        // cannot escape its root or hit a cycle.
+        let meta =
+            std::fs::metadata(input).with_context(|| format!("reading {}", input.display()))?;
         if meta.is_dir() {
             walk(input, input, out, &mut items)?;
         } else {
@@ -253,6 +256,23 @@ mod tests {
 
         let items = discover(&[books], &dir.path().join("out")).unwrap();
         // `link/ch.epub` must not appear.
+        assert_eq!(rels(&items), vec!["a/ch.epub", "b/ch.epub", "top.pdf"]);
+    }
+
+    /// A top-level argument is a path the user named directly, so it is
+    /// trusted: a symlink to a directory, passed on the command line, is
+    /// walked as that directory rather than treated as an explicit file.
+    /// Contrast `symlinked_directories_are_not_followed`, which pins the
+    /// opposite behavior for symlinks discovered *inside* a walk.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_top_level_directory_is_walked() {
+        let dir = tree();
+        let books = dir.path().join("books");
+        let link = dir.path().join("books-link");
+        std::os::unix::fs::symlink(&books, &link).unwrap();
+
+        let items = discover(&[link], &dir.path().join("out")).unwrap();
         assert_eq!(rels(&items), vec!["a/ch.epub", "b/ch.epub", "top.pdf"]);
     }
 }

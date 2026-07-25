@@ -44,3 +44,46 @@ pub fn run_batch(items: Vec<WorkItem>, jobs: usize, opts: &ConvertOptions) -> Re
             .collect()
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts() -> ConvertOptions {
+        ConvertOptions {
+            max_tokens: 2000,
+            min_tokens: 200,
+            force: false,
+            ocr: false,
+            ocr_lang: "eng".into(),
+            ocr_no_image: false,
+        }
+    }
+
+    /// `into_par_iter().collect()` is documented to preserve input order, but
+    /// nothing else pins that guarantee — the summary (Task 4) and the library
+    /// index (Task 5) both depend on `Outcome`s coming back in input order
+    /// regardless of which worker finishes first. Every input here points at
+    /// a nonexistent file, so every conversion fails fast and independently;
+    /// only the ordering of the returned `Vec<Outcome>` is under test.
+    #[test]
+    fn outcomes_preserve_input_order_across_workers() {
+        let items: Vec<WorkItem> = (0..20)
+            .map(|i| WorkItem {
+                input: format!("no-such-file-{i}").into(),
+                out_dir: format!("out-{i}").into(),
+                rel: format!("no-such-file-{i}"),
+            })
+            .collect();
+        let expected: Vec<String> = items.iter().map(|i| i.rel.clone()).collect();
+
+        let outcomes = run_batch(items, 4, &opts()).unwrap();
+
+        assert!(
+            outcomes.iter().all(|o| o.result.is_err()),
+            "every input is a nonexistent file; all should fail"
+        );
+        let got: Vec<String> = outcomes.iter().map(|o| o.item.rel.clone()).collect();
+        assert_eq!(got, expected, "run_batch must preserve input order");
+    }
+}
