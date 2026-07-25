@@ -1,11 +1,13 @@
 use crate::math::ast::{AccentKind, MathNode};
 use crate::math::latex::to_conversion;
-use crate::math::{degraded, wrap_island, MathConversion, MAX_ISLAND_BYTES, MAX_MATH_DEPTH};
+use crate::math::{degraded, island_within_budget, wrap_island, MathConversion, MAX_MATH_DEPTH};
 use roxmltree::{Document, Node};
 
 /// Convert a Presentation-MathML `<math>…</math>` island to LaTeX.
 pub fn mathml_to_latex(island: &str) -> MathConversion {
-    if island.len() > MAX_ISLAND_BYTES {
+    // Size AND nesting must be bounded before `Document::parse`: roxmltree
+    // recurses per element level, and overflowing there aborts the process.
+    if !island_within_budget(island) {
         return degraded();
     }
     let wrapped = wrap_island(island);
@@ -34,13 +36,29 @@ fn accent_for(op: &str) -> Option<AccentKind> {
     }
 }
 
+/// `<annotation>` / `<annotation-xml>` inside `<semantics>` carry alternate
+/// encodings of the same expression (TeX source, Content MathML), not
+/// presentation content. Rendering them would emit the equation twice — and in
+/// the TeX case would pipe untrusted markup straight through — so they are
+/// dropped and the presentation branch is converted instead.
+fn is_annotation(n: &Node) -> bool {
+    matches!(n.tag_name().name(), "annotation" | "annotation-xml")
+}
+
 fn convert(n: Node, depth: usize) -> MathNode {
     if depth > MAX_MATH_DEPTH {
         return MathNode::Unsupported;
     }
-    let kids: Vec<Node> = n.children().filter(Node::is_element).collect();
+    let kids: Vec<Node> = n
+        .children()
+        .filter(Node::is_element)
+        .filter(|c| !is_annotation(c))
+        .collect();
     match n.tag_name().name() {
-        "math" | "mrow" | "mstyle" | "mpadded" => row(&kids, depth),
+        // `semantics` is the dominant shape in EPUB3: MathJax, LaTeXML and
+        // Pandoc all wrap the presentation tree in it alongside an
+        // `<annotation>`. It is a pass-through container, like `mrow`.
+        "math" | "mrow" | "mstyle" | "mpadded" | "semantics" => row(&kids, depth),
         "mi" => MathNode::Ident(text(n)),
         "mn" => MathNode::Number(text(n)),
         "mo" => MathNode::Op(text(n)),
@@ -96,10 +114,12 @@ fn convert(n: Node, depth: usize) -> MathNode {
 
 fn row(kids: &[Node], depth: usize) -> MathNode {
     let items: Vec<MathNode> = kids.iter().map(|k| convert(*k, depth + 1)).collect();
-    if items.len() == 1 {
-        items.into_iter().next().unwrap()
-    } else {
-        MathNode::Row(items)
+    match items.len() {
+        // Parity with the OMML front-end: an empty container has no content to
+        // render, and emitting "" would make the writer print a bare `$$`.
+        0 => MathNode::Unsupported,
+        1 => items.into_iter().next().unwrap(),
+        _ => MathNode::Row(items),
     }
 }
 
@@ -190,6 +210,89 @@ mod tests {
         let c = mathml_to_latex(&big);
         assert_eq!(c.latex, "\\mathord{?}");
         assert!(!c.complete);
+    }
+
+    #[test]
+    fn deeply_nested_island_degrades_without_aborting() {
+        // roxmltree recurses per element level and has no nesting guard, so an
+        // island this deep used to abort the process with `fatal runtime
+        // error: stack overflow` -- a SIGSEGV-class abort no catch_unwind can
+        // rescue. 18,000 levels is past the release-build threshold
+        // (12,000-18,000) and ~11x past the debug one (~1,600).
+        let levels = 18_000;
+        let island = format!(
+            "<math>{}<mn>1</mn>{}</math>",
+            "<mrow>".repeat(levels),
+            "</mrow>".repeat(levels)
+        );
+        assert!(
+            island.len() < crate::math::MAX_ISLAND_BYTES,
+            "must trip the NESTING bound, not the byte bound ({} bytes)",
+            island.len()
+        );
+        let c = mathml_to_latex(&island);
+        assert_eq!(c.latex, "\\mathord{?}");
+        assert!(!c.complete);
+    }
+
+    #[test]
+    fn mathjax_semantics_wrapper_converts_presentation_branch() {
+        // The dominant shape of MathML in EPUB3: MathJax, LaTeXML and Pandoc
+        // all wrap the presentation tree in <semantics> next to a TeX
+        // <annotation>. Falling through to Unsupported lost the whole equation.
+        let c = mathml_to_latex(
+            "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\">\
+             <semantics><mrow><msup><mi>x</mi><mn>2</mn></msup></mrow>\
+             <annotation encoding=\"application/x-tex\">x^2</annotation>\
+             </semantics></math>",
+        );
+        assert_eq!(c.latex, "{x}^{2}");
+        assert!(c.complete);
+    }
+
+    #[test]
+    fn annotation_xml_is_not_rendered_as_content() {
+        let c = mathml_to_latex(
+            "<math><semantics><mn>1</mn>\
+             <annotation-xml encoding=\"MathML-Content\"><apply><ci>x</ci></apply></annotation-xml>\
+             </semantics></math>",
+        );
+        assert_eq!(c.latex, "1");
+        assert!(c.complete);
+    }
+
+    #[test]
+    fn empty_island_degrades_rather_than_emitting_nothing() {
+        // Parity with the OMML front-end. An empty latex string made the
+        // writer emit a bare `$$` / `$$\n\n$$`.
+        let c = mathml_to_latex("<math></math>");
+        assert_eq!(c.latex, "\\mathord{?}");
+        assert!(!c.complete);
+    }
+
+    #[test]
+    fn radical_operator_maps_to_surd_not_sqrt() {
+        // `\sqrt` with no braced argument grabs the next token, so `\sqrt 25`
+        // would typeset as `\sqrt{2}5`.
+        let c = mathml_to_latex("<math><mo>√</mo><mn>25</mn></math>");
+        assert_eq!(c.latex, "\\surd 25");
+        assert!(c.complete);
+    }
+
+    #[test]
+    fn dollar_in_number_cannot_close_the_writers_math_span() {
+        // kasane-writer wraps inline math in `$…$`; a raw `$` here closed the
+        // span the writer itself opened.
+        let c = mathml_to_latex("<math><mn>1$ <b>x</b> $2</mn></math>");
+        assert_eq!(c.latex, "1\\$ x \\$2");
+        assert!(c.complete);
+    }
+
+    #[test]
+    fn brace_in_mtext_cannot_unbalance_the_text_command() {
+        let c = mathml_to_latex("<math><mtext>a}b</mtext></math>");
+        assert_eq!(c.latex, "\\text{a\\}b}");
+        assert!(c.complete);
     }
 
     #[test]

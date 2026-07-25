@@ -16,8 +16,17 @@ pub(crate) enum Shape {
     Title(Vec<Inline>),
     Body(Vec<Paragraph>),
     Table(kasane_ir::Table),
-    Picture { key: String, alt: String },
-    Math { latex: String, complete: bool },
+    Picture {
+        key: String,
+        alt: String,
+    },
+    Math {
+        latex: String,
+        complete: bool,
+    },
+    /// A document-level malformation note, emitted at the point in the shape
+    /// order where an equation island failed to capture.
+    Note(&'static str),
 }
 
 // Run-formatting state carried while inside <a:r>.
@@ -185,8 +194,18 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                 // Start never reaches this loop and only one arm fires per
                 // equation.
                 b"oMathPara" => {
-                    let island = crate::math::capture_island(&mut reader, &e);
-                    let conv = crate::math::omml_to_latex(&island);
+                    let conv = match crate::math::capture_island(&mut reader, &e) {
+                        Ok(island) => crate::math::omml_to_latex(&island),
+                        Err(err) => {
+                            // capture_island rewound the reader, so this
+                            // island's children (including its inner
+                            // <m:oMath>) are handed back to this loop as
+                            // ordinary content instead of vanishing. Record
+                            // the malformation where it happened.
+                            shapes.push(Shape::Note(err.note()));
+                            crate::math::degraded()
+                        }
+                    };
                     // Tables are parsed via a sibling p:graphicFrame, not
                     // nested inside p:sp, so a display equation captured
                     // while in_cell has no p:sp End to flush display_math
@@ -206,8 +225,13 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                     }
                 }
                 b"oMath" => {
-                    let island = crate::math::capture_island(&mut reader, &e);
-                    let conv = crate::math::omml_to_latex(&island);
+                    let conv = match crate::math::capture_island(&mut reader, &e) {
+                        Ok(island) => crate::math::omml_to_latex(&island),
+                        Err(err) => {
+                            shapes.push(Shape::Note(err.note()));
+                            crate::math::degraded()
+                        }
+                    };
                     // Mirrors the in_cell/cur_para destination split used for
                     // run text above: a table cell paragraph (in_tbl/in_cell)
                     // never sets cur_para (the `b"p"` arm above is gated on
@@ -417,6 +441,7 @@ pub fn slide_to_blocks(xml: &str, next_id: &mut u32, rels: &SlideRels) -> Vec<Bl
                     });
                 }
             }
+            Shape::Note(note) => out.push(Block::Raw { note: note.into() }),
         }
     }
     if truncated {
@@ -441,6 +466,7 @@ pub fn notes_to_blocks(xml: &str) -> Vec<Block> {
                     });
                 }
             }
+            Shape::Note(note) => out.push(Block::Raw { note: note.into() }),
             _ => {}
         }
     }
@@ -881,9 +907,9 @@ mod tests {
     #[test]
     fn flush_leftover_display_math_after_truncation() {
         // A well-formed oMathPara followed by malformed XML before the
-        // enclosing p:sp closes. capture_island swallows its own read
-        // errors, so the display equation is captured fine; the outer loop
-        // then hits the malformed tail and returns Err(_), bypassing the
+        // enclosing p:sp closes. The island itself closes cleanly, so it is
+        // captured fine; the outer loop then hits the malformed tail and
+        // returns Err(_), bypassing the
         // p:sp End flush entirely (Fix 3). Without the end-of-parse safety
         // net this equation would vanish alongside the truncation.
         let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
@@ -927,6 +953,72 @@ mod tests {
                 .iter()
                 .any(|b| matches!(b, Block::MathBlock(s) if s == "\\frac{1}{2}")),
             "the display equation must survive an oMathPara outside any shape, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn over_deep_omath_degrades_and_notes_without_aborting() {
+        // Whole-adapter cover for the stack-overflow abort. capture_island
+        // refuses the island on its nesting bound before roxmltree can see it,
+        // rewinds the reader, and records the malformation; the <m:e> nest is
+        // then re-read as flow content (no arm matches it) and the run after
+        // the equation still reaches the slide.
+        let levels = 18_000;
+        let xml = format!(
+            r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p>
+            <m:oMath>{}{}</m:oMath>
+            <a:r><a:t>AFTER</a:t></a:r>
+          </a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#,
+            "<m:e>".repeat(levels),
+            "</m:e>".repeat(levels)
+        );
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(&xml, &mut id, &SlideRels::empty());
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("too large"))),
+            "the over-budget island must be noted, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Para(i) if text_of(i).contains("AFTER"))),
+            "the run after the over-deep island must survive, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn unclosed_omath_notes_the_malformation_instead_of_swallowing_the_shape() {
+        // An <m:oMath> that never closes used to make capture_island consume
+        // the rest of the part with no trace. It now fails, rewinds, and is
+        // recorded. The shape *containing* the unclosed island is still lost
+        // to the pre-existing slide-truncation path (shapes flush at </p:sp>,
+        // and an unclosed tag makes the reader bail before that) -- but that
+        // loss is now announced twice over rather than silent, and earlier
+        // shapes are unaffected.
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p" xmlns:m="m"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><a:r><a:t>BEFORE</a:t></a:r></a:p></p:txBody></p:sp>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><m:oMath><m:r><m:t>x</m:t></m:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("equation markup"))),
+            "the malformation must be noted, not silent, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Para(i) if text_of(i).contains("BEFORE"))),
+            "content before the unclosed island must survive, got {blocks:?}"
         );
     }
 

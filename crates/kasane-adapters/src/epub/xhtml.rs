@@ -81,6 +81,28 @@ fn emit_block(
     }
 }
 
+// A malformed-markup note is a statement about the DOCUMENT -- the markup
+// after this point was mis-nested and got re-read as flow content -- not about
+// one equation. Unlike "equation partially converted", whose in-band
+// `\mathord{?}` token already self-marks an inline partial, it has no in-band
+// counterpart, so routing it through emit_block would let an open inline
+// context swallow it (flatten_block_inlines drops Block::Raw) and put us right
+// back at the silent data loss this note exists to report. Use the normal block
+// path when there is one; otherwise put it straight into the block flow.
+fn emit_malformed_note(
+    frames: &mut [BlockFrame],
+    inline_stack: &mut [Vec<Inline>],
+    out: &mut Vec<Block>,
+    note: &str,
+) {
+    let b = Block::Raw { note: note.into() };
+    if inline_stack.is_empty() {
+        emit_block(frames, inline_stack, out, b);
+    } else {
+        out.push(b);
+    }
+}
+
 // Extracts a block's text content as inlines -- used when block markup
 // appears where only inlines fit (inside a table cell). Structure is lost,
 // text is not.
@@ -677,8 +699,23 @@ pub fn xhtml_to_blocks(
                     }
                     b"math" => {
                         let inline = math_is_inline(&e);
-                        let island = crate::math::capture_island(&mut reader, &e);
-                        let conv = crate::math::mathml_to_latex(&island);
+                        let conv = match crate::math::capture_island(&mut reader, &e) {
+                            Ok(island) => crate::math::mathml_to_latex(&island),
+                            Err(err) => {
+                                // capture_island rewound the reader, so the
+                                // markup this island swallowed is about to be
+                                // re-read as ordinary content by this very
+                                // loop -- nothing is lost, but the document
+                                // was malformed here and that must be visible.
+                                emit_malformed_note(
+                                    &mut frames,
+                                    &mut inline_stack,
+                                    &mut blocks,
+                                    err.note(),
+                                );
+                                crate::math::degraded()
+                            }
+                        };
                         if inline {
                             if let Some(top) = inline_stack.last_mut() {
                                 crate::xmltext::push_inline(top, Inline::Math(conv.latex));
@@ -2222,6 +2259,76 @@ mod tests {
                 .iter()
                 .any(|b| matches!(b, Block::Raw { note } if note.contains("partially converted"))),
             "the partial-conversion note must not appear anywhere in the document when folded, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn unclosed_math_keeps_the_rest_of_the_chapter_and_notes_the_malformation() {
+        // The reader runs with check_end_names = false precisely so malformed
+        // markup does not lose content. An unclosed <math> used to make
+        // capture_island consume to EOF, so everything after it vanished with
+        // no trace. capture_island now rewinds instead: the equation degrades,
+        // the island's children come back as ordinary flow content, and the
+        // malformation is recorded.
+        let blocks = parse_blocks(
+            "<body><p>before</p><math><mn>1</mn><p>AFTER-ONE</p><h2>AFTER-TWO</h2></body>",
+        );
+        let all_text: String = blocks
+            .iter()
+            .flat_map(|b| {
+                let mut inls = Vec::new();
+                super::flatten_block_inlines(b, &mut inls);
+                inls
+            })
+            .map(|i| match i {
+                Inline::Text(t) => t,
+                _ => String::new(),
+            })
+            .collect();
+        assert!(
+            all_text.contains("before"),
+            "content before the island must survive, got {blocks:?}"
+        );
+        assert!(
+            all_text.contains("AFTER-ONE"),
+            "content after an unclosed <math> must survive, got {blocks:?}"
+        );
+        assert!(
+            all_text.contains("AFTER-TWO"),
+            "content after an unclosed <math> must survive, got {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("unclosed equation"))),
+            "the malformation must be noted, not silent, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn over_deep_math_island_degrades_and_notes_without_aborting() {
+        // Whole-adapter cover for the stack-overflow abort: capture_island
+        // refuses the island on its nesting bound, so roxmltree never sees it,
+        // the reader rewinds, and the (meaningless) <mrow> nest is re-read as
+        // flow content -- which the parser ignores -- leaving the trailing
+        // paragraph intact.
+        let levels = 18_000;
+        let xml = format!(
+            "<body><math>{}<mn>1</mn>{}</math><p>AFTER</p></body>",
+            "<mrow>".repeat(levels),
+            "</mrow>".repeat(levels)
+        );
+        let blocks = parse_blocks(&xml);
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Raw { note } if note.contains("too large"))),
+            "the over-budget island must be noted, got {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Para(i)
+                if i.iter().any(|x| matches!(x, Inline::Text(t) if t.contains("AFTER"))))),
+            "content after the over-deep island must survive, got {blocks:?}"
         );
     }
 }

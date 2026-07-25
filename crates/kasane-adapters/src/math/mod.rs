@@ -27,6 +27,21 @@ pub struct MathConversion {
 pub(crate) const MAX_ISLAND_BYTES: usize = 256 * 1024;
 /// Hard cap on math tree recursion depth (untrusted-input bound).
 pub(crate) const MAX_MATH_DEPTH: usize = 64;
+/// Hard cap on raw XML element nesting inside an island (untrusted-input bound).
+///
+/// `roxmltree` recurses once per element nesting level while parsing and its
+/// only depth guard is for entity references, so nesting must be bounded
+/// BEFORE `Document::parse` sees the island: an over-deep island aborts the
+/// process with a stack overflow, which is a SIGSEGV-class abort no
+/// `catch_unwind` can rescue. `MAX_ISLAND_BYTES` does not bound this —
+/// `<mrow></mrow>` is 13 bytes per level, so 256 KB admits ~20,000 levels.
+///
+/// Deliberately larger than `MAX_MATH_DEPTH` (OMML spends 2-3 XML levels per
+/// math level, so equal caps would reject equations `convert` handles today)
+/// and far below the overflow threshold: measured at ~5.5 KB of stack per
+/// level in a debug build, 128 levels is ~700 KB, comfortable inside a 2 MiB
+/// test thread and two orders of magnitude below the release threshold.
+pub(crate) const MAX_ISLAND_NESTING: usize = 128;
 /// In-band token emitted for any unmapped sub-expression or symbol.
 pub(crate) const PLACEHOLDER: &str = "\\mathord{?}";
 
@@ -52,63 +67,204 @@ pub(crate) fn degraded() -> MathConversion {
     }
 }
 
+/// Why `capture_island` gave up before reaching the island's matching end tag.
+///
+/// Every variant means the same thing to a caller — degrade the equation and
+/// record a document-level note — but they carry distinct note text because
+/// they say different things about the input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CaptureError {
+    /// Input ended before the island closed (the adapters read with
+    /// `check_end_names = false`, so an unclosed `<math>` is not a parse error).
+    Unclosed,
+    /// The XML reader rejected the input inside the island.
+    Reader,
+    /// The island exceeded `MAX_ISLAND_BYTES` or `MAX_ISLAND_NESTING`.
+    OverBudget,
+}
+
+impl CaptureError {
+    /// Text for the `Block::Raw` note an adapter emits at the failure site.
+    pub(crate) fn note(self) -> &'static str {
+        match self {
+            CaptureError::Unclosed => "unclosed equation markup",
+            CaptureError::Reader => "malformed equation markup",
+            CaptureError::OverBudget => "equation too large to convert",
+        }
+    }
+}
+
 /// Re-serialize the element opened by `start` (already read from `reader`),
 /// through its matching end tag, and return it as an XML string. Depth-counts
 /// same-named nested elements so an inner `<mrow>` inside `<mrow>` (or nested
-/// `<m:e>`) does not end capture early. On a reader error or EOF, returns what
-/// was captured so far — the front-end then degrades on the malformed island.
-pub(crate) fn capture_island(reader: &mut Reader<&[u8]>, start: &BytesStart) -> String {
+/// `<m:e>`) does not end capture early, and bounds both the captured byte count
+/// and the raw element nesting so the island is within budget *before* the tree
+/// parser ever sees it.
+///
+/// On any abnormal outcome the reader is **rewound** to the position it held on
+/// entry — just past `start` — and `Err` is returned. That is deliberate. The
+/// alternative, consuming to EOF and returning the partial capture, silently
+/// swallows everything after an unclosed `<math>`: the rest of the chapter
+/// disappears with no trace, which is exactly the data loss the adapters'
+/// lenient readers exist to avoid. Rewinding instead hands the island's own
+/// children back to the outer loop, which re-reads them as ordinary document
+/// content: the equation is lost (it degrades to `PLACEHOLDER`) and the markup
+/// around it degrades to text, but nothing vanishes. Callers pair the degraded
+/// equation with `CaptureError::note`, so the outcome is never silent.
+///
+/// Rewinding cannot loop: the `start` event was already consumed by the caller
+/// before this function was entered, so the outer loop always resumes strictly
+/// past it and makes progress even when a nested island also fails.
+pub(crate) fn capture_island(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<String, CaptureError> {
+    // `Reader<&[u8]>` is a cheap value (a slice plus parser state), so this
+    // clone is the rewind point, not a copy of the document.
+    let rewind = reader.clone();
     let local = start.local_name().as_ref().to_vec();
     let mut writer = Writer::new(Vec::new());
     let _ = writer.write_event(Event::Start(start.borrow()));
-    let mut depth = 1usize;
+    // Open elements carrying the island's own local name (end-tag matching)…
+    let mut same_name = 1usize;
+    // …and open elements of any name (the nesting bound roxmltree needs).
+    let mut nesting = 1usize;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let ev = match reader.read_event_into(&mut buf) {
+            Ok(ev) => ev,
+            Err(_) => {
+                *reader = rewind;
+                return Err(CaptureError::Reader);
+            }
+        };
+        match &ev {
+            Event::Eof => {
+                *reader = rewind;
+                return Err(CaptureError::Unclosed);
+            }
+            Event::Start(e) => {
+                nesting += 1;
+                if nesting > MAX_ISLAND_NESTING {
+                    *reader = rewind;
+                    return Err(CaptureError::OverBudget);
+                }
+                if e.local_name().as_ref() == local.as_slice() {
+                    same_name += 1;
+                }
+                let _ = writer.write_event(ev.borrow());
+            }
+            Event::End(e) => {
+                nesting = nesting.saturating_sub(1);
+                let _ = writer.write_event(ev.borrow());
+                if e.local_name().as_ref() == local.as_slice() {
+                    same_name -= 1;
+                    if same_name == 0 {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                let _ = writer.write_event(ev.borrow());
+            }
+        }
+        // Capped *during* capture: checking `island.len()` afterwards would
+        // already have let one `<math>` force an allocation the size of the
+        // whole guarded document.
+        if writer.get_ref().len() > MAX_ISLAND_BYTES {
+            *reader = rewind;
+            return Err(CaptureError::OverBudget);
+        }
+    }
+    match String::from_utf8(writer.into_inner()) {
+        Ok(s) => Ok(s),
+        Err(_) => {
+            *reader = rewind;
+            Err(CaptureError::Reader)
+        }
+    }
+}
+
+/// Cheap size/nesting bound for an island handed straight to a front-end.
+///
+/// `capture_island` enforces the same budget while streaming, but the
+/// front-ends are entry points in their own right and must not hand an
+/// unbounded island to `roxmltree` — see `MAX_ISLAND_NESTING` for why that is
+/// fatal rather than merely slow. Fails closed: input this scanner cannot read
+/// is treated as over budget, since a scan that stopped early has not bounded
+/// what follows it.
+pub(crate) fn island_within_budget(island: &str) -> bool {
+    if island.len() > MAX_ISLAND_BYTES {
+        return false;
+    }
+    let mut reader = Reader::from_str(island);
+    reader.config_mut().check_end_names = false;
+    let mut depth = 0usize;
     let mut buf = Vec::new();
     loop {
         buf.clear();
         match reader.read_event_into(&mut buf) {
-            Ok(ev) => match &ev {
-                Event::Start(e) if e.local_name().as_ref() == local.as_slice() => {
-                    depth += 1;
-                    let _ = writer.write_event(ev.borrow());
+            Ok(Event::Start(_)) => {
+                depth += 1;
+                if depth > MAX_ISLAND_NESTING {
+                    return false;
                 }
-                Event::End(e) if e.local_name().as_ref() == local.as_slice() => {
-                    depth -= 1;
-                    let _ = writer.write_event(ev.borrow());
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                Event::Eof => break,
-                _ => {
-                    let _ = writer.write_event(ev.borrow());
-                }
-            },
-            Err(_) => break,
+            }
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Eof) => return true,
+            Ok(_) => {}
+            Err(_) => return false,
         }
     }
-    String::from_utf8(writer.into_inner()).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::capture_island;
+    use super::{capture_island, island_within_budget, CaptureError, MAX_ISLAND_NESTING};
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
-    fn capture_first_element(xml: &str, local_name: &[u8]) -> String {
+    /// Capture the first `local_name` element, then drain what the *outer*
+    /// loop would see next. The tail is what proves whether the reader was
+    /// rewound: on an abnormal capture it must contain the island's own
+    /// children plus everything after them, not nothing.
+    fn capture_with_tail(
+        xml: &str,
+        local_name: &[u8],
+    ) -> (Result<String, CaptureError>, Vec<String>) {
         let mut reader = Reader::from_str(xml);
         reader.config_mut().expand_empty_elements = true;
+        reader.config_mut().check_end_names = false;
         let mut buf = Vec::new();
-        loop {
+        let captured = loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) if e.local_name().as_ref() == local_name => {
-                    return capture_island(&mut reader, &e);
+                    break capture_island(&mut reader, &e);
                 }
-                Ok(Event::Eof) => return String::new(),
+                Ok(Event::Eof) | Err(_) => return (Ok(String::new()), Vec::new()),
                 _ => {}
             }
             buf.clear();
+        };
+        let mut tail = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    tail.push(String::from_utf8_lossy(e.local_name().as_ref()).into_owned());
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                _ => {}
+            }
         }
+        (captured, tail)
+    }
+
+    fn capture_first_element(xml: &str, local_name: &[u8]) -> String {
+        capture_with_tail(xml, local_name)
+            .0
+            .expect("island should close normally")
     }
 
     fn capture_first_math(xml: &str) -> String {
@@ -165,24 +321,63 @@ mod tests {
     }
 
     #[test]
-    fn handles_truncated_input() {
-        // Unclosed element (EOF before close tag) should return partial capture
-        // without panicking.
-        let xml = "<math><mrow><mn>1</mn></mrow>";
-        let island = capture_first_math(xml);
-        // Should have captured what was available.
-        assert!(island.contains("<mrow>"));
-        assert!(island.contains("<mn>1</mn>"));
-        // The partial capture does not panic and does not hang.
+    fn unclosed_island_reports_unclosed_and_rewinds() {
+        // EOF before the close tag: capture fails rather than handing back a
+        // partial island, and the reader is rewound so the content the island
+        // swallowed is still there for the outer loop.
+        let xml = "<math><mrow><mn>1</mn></mrow><p>AFTER</p>";
+        let (res, tail) = capture_with_tail(xml, b"math");
+        assert_eq!(res, Err(CaptureError::Unclosed));
+        assert_eq!(tail, vec!["mrow", "mn", "p"]);
     }
 
     #[test]
-    fn handles_malformed_close() {
-        // Mismatched close tag should degrade gracefully.
-        let xml = "<math><mrow><mn>1</mn></mrow></wrong>";
-        let island = capture_first_math(xml);
-        // Should have captured the mrow and its contents before the mismatched close.
-        assert!(island.contains("<mrow>"));
-        assert!(island.contains("<mn>1</mn>"));
+    fn reader_error_reports_reader_and_rewinds() {
+        // An unterminated comment is a syntax error, not merely a missing
+        // close tag, and must be reported as such.
+        let xml = "<math><mrow/><!-- oops";
+        let (res, tail) = capture_with_tail(xml, b"math");
+        assert_eq!(res, Err(CaptureError::Reader));
+        assert_eq!(tail, vec!["mrow"]);
+    }
+
+    #[test]
+    fn oversized_island_trips_during_capture_and_rewinds() {
+        // The cap is enforced while streaming, so this never materializes as
+        // one allocation the size of the document.
+        let filler = "<mn>9</mn>".repeat(40_000); // ~400 KB, past MAX_ISLAND_BYTES
+        let xml = format!("<math>{filler}</math><p>AFTER</p>");
+        let (res, tail) = capture_with_tail(&xml, b"math");
+        assert_eq!(res, Err(CaptureError::OverBudget));
+        assert_eq!(tail.last().map(String::as_str), Some("p"));
+    }
+
+    #[test]
+    fn overnested_island_trips_during_capture_and_rewinds() {
+        let deep = MAX_ISLAND_NESTING + 50;
+        let xml = format!(
+            "<math>{}<mn>1</mn>{}</math><p>AFTER</p>",
+            "<mrow>".repeat(deep),
+            "</mrow>".repeat(deep)
+        );
+        let (res, tail) = capture_with_tail(&xml, b"math");
+        assert_eq!(res, Err(CaptureError::OverBudget));
+        assert_eq!(tail.last().map(String::as_str), Some("p"));
+    }
+
+    #[test]
+    fn budget_scan_rejects_deep_and_large_islands() {
+        let deep = MAX_ISLAND_NESTING + 50;
+        let island = format!(
+            "<math>{}<mn>1</mn>{}</math>",
+            "<mrow>".repeat(deep),
+            "</mrow>".repeat(deep)
+        );
+        assert!(!island_within_budget(&island));
+        assert!(!island_within_budget(&format!(
+            "<math><mn>{}</mn></math>",
+            "9".repeat(300_000)
+        )));
+        assert!(island_within_budget("<math><mn>1</mn></math>"));
     }
 }

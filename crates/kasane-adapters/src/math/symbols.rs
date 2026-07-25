@@ -32,7 +32,10 @@ pub(crate) fn symbol(c: char) -> Option<&'static str> {
         '∑' => "\\sum",
         '∏' => "\\prod",
         '∫' => "\\int",
-        '√' => "\\sqrt",
+        // `\sqrt` with no braced argument swallows the next token, so a bare
+        // radical operator (`<mo>√</mo><mn>25</mn>`) would render `\sqrt 25`
+        // = `\sqrt{2}5`. `\surd` is the standalone radical glyph.
+        '√' => "\\surd",
         _ => return None,
     })
 }

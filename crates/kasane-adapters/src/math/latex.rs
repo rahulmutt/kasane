@@ -24,10 +24,10 @@ fn render(node: &MathNode, out: &mut String, complete: &mut bool) {
             }
         }
         MathNode::Ident(s) | MathNode::Op(s) => out.push_str(&map_text(s, complete)),
-        MathNode::Number(s) => out.push_str(s),
+        MathNode::Number(s) => out.push_str(&sanitize(s)),
         MathNode::Text(s) => {
             out.push_str("\\text{");
-            out.push_str(s);
+            out.push_str(&sanitize(s));
             out.push('}');
         }
         MathNode::Frac(n, d) => {
@@ -122,6 +122,33 @@ fn script(
         render(s, out, complete);
         out.push('}');
     }
+}
+
+/// `<mn>` / `<mtext>` hold literal document text, not LaTeX source, and unlike
+/// `Ident`/`Op` they never pass through `map_text`. Neutralize exactly the
+/// characters that would corrupt a delimiter this pipeline itself generates:
+/// `$` closes the `$…$` / `$$…$$` span `kasane-writer` opened, and `{` / `}`
+/// unbalance the `\text{}` braces the emitter opened. A stray `\` would start
+/// an arbitrary command, so it is dropped; newlines would break out of an
+/// inline span, so they collapse to a space.
+///
+/// Scoped deliberately: this is *not* general LaTeX escaping. `kasane-writer`
+/// escapes nothing anywhere (`Inline::Text` is pushed raw), so a repo-wide
+/// escaping policy is separate work; only the structural subset that corrupts
+/// generated delimiters is handled here.
+fn sanitize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '$' => out.push_str("\\$"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '\\' => {}
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn fence(s: &str) -> &str {
@@ -239,6 +266,30 @@ mod tests {
     fn greek_symbol_maps_via_table() {
         // An identifier carrying a Greek letter maps to its LaTeX command.
         assert_eq!(to_conversion(&ident("α")).latex, "\\alpha");
+    }
+
+    #[test]
+    fn number_and_text_neutralize_delimiter_breaking_characters() {
+        // Number and Text bypass map_text, so without sanitizing they push
+        // raw document text into the middle of the `$…$` span the writer
+        // generates and the `\text{}` braces this emitter generates.
+        assert_eq!(to_conversion(&num("1$2")).latex, "1\\$2");
+        assert_eq!(
+            to_conversion(&MathNode::Text("a}b{c".into())).latex,
+            "\\text{a\\}b\\{c}"
+        );
+        // A stray backslash would start an arbitrary command: dropped.
+        assert_eq!(
+            to_conversion(&MathNode::Text("a\\b".into())).latex,
+            "\\text{ab}"
+        );
+        // A newline would break out of an inline span.
+        assert_eq!(
+            to_conversion(&MathNode::Text("a\nb".into())).latex,
+            "\\text{a b}"
+        );
+        // Ordinary content is untouched.
+        assert_eq!(to_conversion(&num("3.14")).latex, "3.14");
     }
 
     #[test]
