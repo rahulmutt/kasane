@@ -88,23 +88,26 @@ fn one_line(s: &str) -> String {
     s.replace(['\n', '\r'], " ")
 }
 
-/// Percent-encode the narrow subset of characters that would otherwise break a
-/// bare (non-`<…>`-wrapped) Markdown link destination: space, `(`, `)`, `<`,
-/// `>`, `\`, `"`, and control characters (including `\n`/`\r`, which would
-/// otherwise split the destination across lines). Encoded as `%XX` with
-/// uppercase hex, matching standard percent-encoding.
+/// Percent-encode the characters that would otherwise break a bare
+/// (non-`<…>`-wrapped) Markdown link destination, as `%XX` with uppercase hex:
 ///
-/// `/` is deliberately left alone — `rel_dir` is a path and `/` is its
-/// separator, not something to hide. `%` is also left alone: `rel_dir` comes
-/// from `discover`, which never produces a `%`-sequence that this function
-/// would need to distinguish from an already-encoded one, and encoding it
-/// would add exactly that ambiguity for no benefit here. This is deliberately
-/// narrow, matching `link_text`'s scope — not a general percent-encoder.
+/// - `%` — encoded first in spirit and in effect, so the output is
+///   unambiguous: a literal `%` in a filename (`50%20off`) would otherwise be
+///   read back as an escape and decode to a different, non-existent directory.
+/// - `#` and `?` — fragment and query delimiters. `C# Notes` would otherwise
+///   emit `C#%20Notes/index.md`, which parses as path `C` with fragment
+///   `#%20Notes/index.md`.
+/// - space, `(`, `)`, `<`, `>`, `\`, `"` — end or nest the destination.
+/// - control characters, including `\n`/`\r`, which would split the
+///   destination across lines.
+///
+/// `/` is deliberately left literal: `rel_dir` is a path and `/` is its
+/// separator, not something to hide.
 fn link_dest(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            ' ' | '(' | ')' | '<' | '>' | '\\' | '"' => {
+            '%' | '#' | '?' | ' ' | '(' | ')' | '<' | '>' | '\\' | '"' => {
                 out.push('%');
                 out.push_str(&format!("{:02X}", c as u32));
             }
@@ -216,6 +219,39 @@ mod tests {
         let md = write(&[entry("Book (Annotated)", "Book (Annotated)")], &[]);
         assert!(
             md.contains("- [Book (Annotated)](Book%20%28Annotated%29/index.md) — epub, 7 files"),
+            "got: {md}"
+        );
+    }
+
+    /// `#` starts a fragment, so `C#%20Notes/index.md` parses as path `C`
+    /// with fragment `#%20Notes/index.md` — a link to nowhere.
+    #[test]
+    fn a_hash_in_rel_dir_is_percent_encoded_in_the_link_destination() {
+        let md = write(&[entry("C# Notes", "C# Notes")], &[]);
+        assert!(
+            md.contains("- [C# Notes](C%23%20Notes/index.md) — epub, 7 files"),
+            "got: {md}"
+        );
+    }
+
+    /// `?` starts a query string, with the same effect.
+    #[test]
+    fn a_question_mark_in_rel_dir_is_percent_encoded_in_the_link_destination() {
+        let md = write(&[entry("What Now?", "What Now?/vol 1")], &[]);
+        assert!(
+            md.contains("- [What Now?](What%20Now%3F/vol%201/index.md) — epub, 7 files"),
+            "got: {md}"
+        );
+    }
+
+    /// A literal `%` in a filename would otherwise be read back as the start
+    /// of an escape: `50%20off` decodes to `50 off`, a directory that does
+    /// not exist.
+    #[test]
+    fn a_percent_in_rel_dir_is_percent_encoded_in_the_link_destination() {
+        let md = write(&[entry("Rich Book", "50%20off")], &[]);
+        assert!(
+            md.contains("- [Rich Book](50%2520off/index.md) — epub, 7 files"),
             "got: {md}"
         );
     }
