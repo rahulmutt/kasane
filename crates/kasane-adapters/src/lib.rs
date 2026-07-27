@@ -1,6 +1,8 @@
 mod detect;
 mod djvu;
 mod epub;
+#[doc(hidden)]
+pub mod fuzz_entry;
 mod guard;
 mod math;
 mod mobi;
