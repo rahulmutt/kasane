@@ -9,8 +9,28 @@
 # without them -- so `mise run lint` passed on a laptop and failed on the
 # runner with "cargo-fmt is not installed". Naming them here keeps the two
 # environments resolving from one file, which is the point of mise-first.
-rust = { version = "1.97.1", components = "rustfmt,clippy" }
+#
+# The second array entry is a second toolchain, not a second install of the
+# same one: mise's rust backend has no separate "rust-nightly" tool, so a
+# nightly pin lives as a second version of the `rust` tool. mise installs both
+# through rustup and keeps the first entry (stable) active on PATH as plain
+# `cargo`/`rustc`; the nightly is reached only via `cargo +<toolchain>`, which
+# is how `mise run fuzz` gets to it. cargo-fuzz builds its targets with
+# libFuzzer and sanitizer flags that only exist on nightly -- this pin is used
+# by `mise run fuzz` and the fuzz workflow, nowhere else.
+rust = [
+  { version = "1.97.1", components = "rustfmt,clippy" },
+  { version = "nightly-2026-07-01", components = "rustfmt,clippy" },
+]
 "cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-fuzz" = "0.13.2"
+
+[env]
+# The toolchain `cargo fuzz` builds targets with. Named here so `mise run fuzz`,
+# `mise run fuzz-all`, and .github/workflows/fuzz.yml cannot drift apart. mise's
+# rust backend installs it through rustup, which is what makes `cargo +<name>`
+# resolve.
+KASANE_FUZZ_TOOLCHAIN = "nightly-2026-07-01"
 
 [tasks.build]
 run = "cargo build --workspace"
@@ -31,3 +51,37 @@ run = ["cargo fmt --all -- --check",
 
 [tasks.convert]
 run = "cargo run -p kasane-cli --"
+
+[tasks.fuzz]
+description = "Fuzz one target: mise run fuzz <target> [-- -max_total_time=60]"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+target="$1"; shift || true
+mkdir -p "fuzz/corpus/$target"
+# Seed per target (design spec §5). The per-format and ZIP targets get their own
+# format's fixtures; detect gets everything; the sub-parser targets take seeds
+# only -- an EPUB archive is not a useful starting input for palmdoc.
+case "$target" in
+  epub|epub_zip) cp -f tests/fixtures/epub/*.epub "fuzz/corpus/$target/" 2>/dev/null || true ;;
+  pptx|pptx_zip) cp -f tests/fixtures/pptx/*.pptx "fuzz/corpus/$target/" 2>/dev/null || true ;;
+  mobi)          cp -f tests/fixtures/mobi/*.mobi tests/fixtures/azw3/*.azw3 "fuzz/corpus/$target/" 2>/dev/null || true ;;
+  pdf)           cp -f tests/fixtures/pdf/*.pdf "fuzz/corpus/$target/" 2>/dev/null || true ;;
+  djvu)          cp -f tests/fixtures/djvu/*.djvu "fuzz/corpus/$target/" 2>/dev/null || true ;;
+  detect)        find tests/fixtures -type f ! -name '*.py' ! -name '*.md' -exec cp -f {} "fuzz/corpus/$target/" \\; 2>/dev/null || true ;;
+esac
+if [ -d "fuzz/seeds/$target" ]; then cp -f "fuzz/seeds/$target/"* "fuzz/corpus/$target/" 2>/dev/null || true; fi
+cargo "+$KASANE_FUZZ_TOOLCHAIN" fuzz run "$target" "fuzz/corpus/$target" -- \\
+  -rss_limit_mb=2048 -malloc_limit_mb=2048 -timeout=25 "$@"
+"""
+
+[tasks.fuzz-all]
+description = "Fuzz every target for 5 minutes each"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+for t in epub pptx mobi pdf djvu epub_zip pptx_zip detect math_island palmdoc guards xmltext; do
+  echo "=== $t ==="
+  mise run fuzz "$t" -- -max_total_time=300
+done
+"""

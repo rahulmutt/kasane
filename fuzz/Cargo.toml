@@ -1,0 +1,109 @@
+[package]
+name = "kasane-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace. cargo-fuzz builds this crate with nightly-only flags that
+# must not leak into the root workspace, which stays on the pinned stable
+# toolchain. The root Cargo.toml excludes this directory to match.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kasane-adapters = { path = "../crates/kasane-adapters" }
+
+# Fuzz targets must be built with debug assertions and overflow checks on, in
+# release mode. Without this an integer overflow that would panic in a debug
+# build silently wraps and the fuzzer never reports it.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "epub"
+path = "fuzz_targets/epub.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pptx"
+path = "fuzz_targets/pptx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mobi"
+path = "fuzz_targets/mobi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdf"
+path = "fuzz_targets/pdf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "djvu"
+path = "fuzz_targets/djvu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epub_zip"
+path = "fuzz_targets/epub_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pptx_zip"
+path = "fuzz_targets/pptx_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "detect"
+path = "fuzz_targets/detect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "math_island"
+path = "fuzz_targets/math_island.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "palmdoc"
+path = "fuzz_targets/palmdoc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guards"
+path = "fuzz_targets/guards.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xmltext"
+path = "fuzz_targets/xmltext.rs"
+test = false
+doc = false
+bench = false
