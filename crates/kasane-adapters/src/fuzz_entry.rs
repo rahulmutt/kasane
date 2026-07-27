@@ -20,6 +20,9 @@ use crate::{Adapter, DjvuAdapter, EpubAdapter, MobiAdapter, PdfAdapter, PptxAdap
 use kasane_ir::AssetBag;
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::io::Write as _;
+use zip::write::{SimpleFileOptions, ZipWriter};
+use zip::CompressionMethod;
 
 pub fn epub(data: &[u8]) {
     adapter(&EpubAdapter, data, "fuzz.epub");
@@ -197,6 +200,63 @@ pub fn xmltext(data: &[u8]) {
     }
 }
 
+/// Maximum members the builder will emit from one input. Without a cap a single
+/// fuzzer input could build an archive with thousands of entries, which costs
+/// throughput without buying coverage.
+const MAX_ZIP_ENTRIES: usize = 64;
+
+/// Assemble a structurally valid ZIP -- correct local headers, central
+/// directory and CRCs -- from fuzzer-controlled entry names and contents.
+///
+/// The `zip` crate verifies CRCs on read, so raw byte mutation is rejected at
+/// the container before it ever reaches the parsers underneath. Generating a
+/// valid container puts the mutation budget on entry names and member payloads
+/// instead, which is where `safe_entry_name`, the bomb guards, and the OPF /
+/// XHTML / math parsers live.
+///
+/// Input is NUL-separated fields read pairwise: name, content, name, content...
+fn build_zip(data: &[u8]) -> Vec<u8> {
+    let mut out = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut rest = data;
+    for _ in 0..MAX_ZIP_ENTRIES {
+        if rest.is_empty() {
+            break;
+        }
+        let (name, after) = split2(rest);
+        let (content, after) = split2(after);
+        rest = after;
+        // Lossy is right here: an entry name is a string to the zip crate, and
+        // invalid UTF-8 should still produce *an* entry rather than skipping it.
+        let name = String::from_utf8_lossy(name).into_owned();
+        // The zip crate rejects an empty name outright, which would abort the
+        // whole build; substitute rather than lose every later entry.
+        let name = if name.is_empty() {
+            "_".to_string()
+        } else {
+            name
+        };
+        if out.start_file(name, opts).is_err() {
+            continue;
+        }
+        let _ = out.write_all(content);
+    }
+    match out.finish() {
+        Ok(c) => c.into_inner(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// EPUB past the container (see `build_zip`).
+pub fn epub_zip(data: &[u8]) {
+    adapter(&EpubAdapter, &build_zip(data), "fuzz.epub");
+}
+
+/// PPTX past the container (see `build_zip`).
+pub fn pptx_zip(data: &[u8]) {
+    adapter(&PptxAdapter, &build_zip(data), "fuzz.pptx");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +360,37 @@ mod tests {
             f(&[]);
             f(&[0u8; 64]);
             f(b"<<<>>>&&&\0\0\0");
+        }
+    }
+
+    #[test]
+    fn build_zip_produces_a_readable_archive() {
+        let raw = b"mimetype\0application/epub+zip\0META-INF/container.xml\0<container/>";
+        let bytes = build_zip(raw);
+        let mut ar = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..]))
+            .expect("builder must emit a structurally valid archive");
+        assert_eq!(ar.len(), 2);
+        assert_eq!(ar.by_index(0).unwrap().name(), "mimetype");
+        assert_eq!(ar.by_index(1).unwrap().name(), "META-INF/container.xml");
+    }
+
+    #[test]
+    fn build_zip_tolerates_hostile_entry_names() {
+        // Names the builder must not choke on -- rejecting them is the
+        // *adapter's* job, not the builder's.
+        let raw = b"../../etc/passwd\0x\0/abs\0y\0\0z";
+        let bytes = build_zip(raw);
+        assert!(zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).is_ok());
+    }
+
+    #[test]
+    fn zip_targets_survive_arbitrary_input() {
+        for f in [epub_zip as fn(&[u8]), pptx_zip] {
+            f(&[]);
+            f(b"mimetype\0application/epub+zip");
+            f(b"ppt/slides/slide1.xml\0<p:sld><m:oMath/></p:sld>");
+            f(b"../../escape\0<x/>\0OEBPS/a.xhtml\0<math><mrow/></math>");
+            f(&[0u8; 256]);
         }
     }
 
