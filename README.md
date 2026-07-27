@@ -41,6 +41,44 @@ produced. One file's failure never aborts the run.
     mise run test    # run all tests
     mise run lint    # fmt check + clippy -D warnings
 
+### Fuzzing
+
+Every adapter parses untrusted input, so the boundary is fuzzed with
+`cargo-fuzz`. Twelve targets cover the five format adapters, format detection,
+the two ZIP container formats past their CRC check, and the sub-parsers a
+whole-file fuzzer would rarely reach — the math island capture, PalmDOC
+decompression, the path guards, and XML entity resolution.
+
+    mise run fuzz math_island                    # one target, until you stop it
+    mise run fuzz epub -- -max_total_time=60     # one target, 60 seconds
+    mise run fuzz-all                            # every target, 5 minutes each
+
+Targets build on a pinned nightly (libFuzzer needs it); everything else in this
+repo stays on the pinned stable toolchain. CI runs the full set weekly.
+
+Beyond panics and hangs, the targets assert that the decompression-bomb guards
+hold under libFuzzer's RSS limit, that no asset filename escapes `_assets/`, and
+that `safe_entry_name` / `resolve_rel` never emit a traversal.
+
+**When the fuzzer finds a crash, commit the reproducer** from
+`fuzz/artifacts/<target>/`. If the underlying bug gets fixed right away, `cargo
+test` replays that reproducer on the stable toolchain from then on, so the fix
+stays fixed. If the bug is left open instead, the reproducer is still
+committed but also listed in `KNOWN_OPEN` in `tests/fuzz_corpus.rs`, which
+skips it during the stable replay so the suite stays green; removing it from
+that list is what re-arms the regression test once the bug is fixed.
+
+Two findings are open this way today: a stack overflow in the `pdf` adapter,
+and a path-confinement leak in `guards` (`resolve_rel` normalizes `..` in its
+`target` argument but not in `base_dir`). Their reproducers live under
+`fuzz/artifacts/{pdf,guards}/`. The quarantine above only protects the stable
+`cargo test` run — `mise run fuzz`/`mise run fuzz-all` still reproduce both
+crashes, so expect those two targets to fail immediately, and expect the
+weekly fuzz CI run to be red on them, until they're fixed.
+
+The `ocr` feature is not fuzzed — it links C (Tesseract, Leptonica), which needs
+its own sanitizer setup.
+
 ### OCR (optional)
 
 OCR is off by default and is the only feature that links a C library. Build
