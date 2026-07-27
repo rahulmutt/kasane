@@ -307,3 +307,377 @@ fn lying_skel_azw3_still_converts() {
     assert!(status.success(), "degrade, don't die");
     assert!(read_all_md(&out_dir).contains("Part Two"));
 }
+
+use std::path::{Path, PathBuf};
+
+fn fixture(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(rel)
+}
+
+/// `books/a/minimal.epub`, `books/b/minimal.pdf`, `books/notes.txt`
+fn library(dir: &Path) -> PathBuf {
+    let books = dir.join("books");
+    std::fs::create_dir_all(books.join("a")).unwrap();
+    std::fs::create_dir_all(books.join("b")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), books.join("a/minimal.epub")).unwrap();
+    std::fs::copy(fixture("pdf/minimal.pdf"), books.join("b/minimal.pdf")).unwrap();
+    std::fs::write(books.join("notes.txt"), "not a document").unwrap();
+    books
+}
+
+/// Every file under `root`, as (relative path, contents), sorted.
+fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn converts_a_directory_of_documents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(&books)
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+
+    assert!(status.success(), "expected exit 0, got {status:?}");
+    // Each document keeps its path relative to the walk root.
+    assert!(out.join("a/minimal/index.md").exists());
+    assert!(out.join("b/minimal/index.md").exists());
+    // The non-document is skipped silently.
+    assert!(!out.join("notes").exists());
+}
+
+#[test]
+fn single_file_output_shape_is_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("book");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(fixture("epub/minimal.epub"))
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    // `out` IS the document root — not a library wrapper around it.
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("title: Minimal Book"));
+    assert!(!out.join("minimal").exists());
+}
+
+#[test]
+fn multiple_explicit_files_convert_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+
+    // Distinct stems, so no collision. (Two fixtures both named `minimal`
+    // would collide by design — see `duplicate_stems_are_rejected` in Task 4.)
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(fixture("epub/minimal.epub"))
+        .arg(fixture("epub/rich.epub"))
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert!(out.join("minimal/index.md").exists());
+    assert!(out.join("rich/index.md").exists());
+}
+
+#[test]
+fn jobs_does_not_change_the_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+
+    let mut trees = Vec::new();
+    for jobs in ["1", "4"] {
+        let out = tmp.path().join(format!("out-{jobs}"));
+        let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+            .arg(&books)
+            .arg("-o")
+            .arg(&out)
+            .arg("-j")
+            .arg(jobs)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        trees.push(snapshot(&out));
+    }
+    assert_eq!(trees[0], trees[1], "-j must not change the emitted tree");
+}
+
+fn run_kasane(args: &[&std::ffi::OsStr]) -> i32 {
+    Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .args(args)
+        .status()
+        .unwrap()
+        .code()
+        .expect("process must exit normally")
+}
+
+#[test]
+fn partial_success_exits_three() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    // A DRM-protected MOBI converts to a failure, deterministically.
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]);
+
+    assert_eq!(code, 3);
+    // The documents that could convert still did.
+    assert!(out.join("a/minimal/index.md").exists());
+    assert!(out.join("b/minimal/index.md").exists());
+}
+
+#[test]
+fn all_documents_drm_protected_exits_two() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        2
+    );
+}
+
+#[test]
+fn a_directory_with_no_documents_exits_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::write(books.join("notes.txt"), "nothing here").unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        1
+    );
+    assert!(!out.exists(), "nothing should be written");
+}
+
+#[test]
+fn duplicate_stems_are_rejected_before_writing_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("x")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("y")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), tmp.path().join("x/ch.epub")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), tmp.path().join("y/ch.epub")).unwrap();
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[
+        tmp.path().join("x/ch.epub").as_os_str(),
+        tmp.path().join("y/ch.epub").as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ]);
+
+    assert_eq!(code, 1);
+    assert!(
+        !out.exists(),
+        "collision must be caught before any conversion"
+    );
+}
+
+/// A document sitting next to a directory of the same stem (`ch.epub` beside
+/// `ch/`) maps to nested output directories. `write_tree` swaps whole
+/// directories, so converting `ch.epub` would delete `ch/inner`'s tree.
+#[test]
+fn a_nested_output_directory_is_rejected_before_writing_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(books.join("ch")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), books.join("ch.epub")).unwrap();
+    std::fs::copy(fixture("epub/minimal.epub"), books.join("ch/inner.epub")).unwrap();
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]);
+
+    assert_eq!(code, 1);
+    assert!(
+        !out.exists(),
+        "nesting must be caught before any conversion"
+    );
+}
+
+#[test]
+fn batch_without_an_output_root_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+
+    assert_eq!(run_kasane(&[books.as_os_str()]), 1);
+}
+
+#[test]
+fn a_walked_file_that_fails_to_parse_is_a_failure_not_a_skip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    // Matching extension, unparseable content: the directory asserted this is
+    // a document, so it must be reported, not silently dropped.
+    std::fs::write(books.join("broken.epub"), b"definitely not a zip").unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        3
+    );
+    assert!(out.join("a/minimal/index.md").exists());
+    assert!(!out.join("broken").exists());
+}
+
+#[test]
+fn a_non_empty_output_root_needs_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("keep.txt"), "x").unwrap();
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        1
+    );
+    // Nothing was converted into it.
+    assert!(!out.join("a").exists());
+
+    assert_eq!(
+        run_kasane(&[
+            books.as_os_str(),
+            "-o".as_ref(),
+            out.as_os_str(),
+            "--force".as_ref()
+        ]),
+        0
+    );
+    assert!(out.join("a/minimal/index.md").exists());
+}
+
+#[test]
+fn a_batch_run_writes_a_library_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        0
+    );
+
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("kind: library"));
+    assert!(idx.contains("documents: 2"));
+    assert!(idx.contains("(a/minimal/index.md)"));
+    assert!(idx.contains("(b/minimal/index.md)"));
+    assert!(!idx.contains("## Failed"));
+}
+
+#[test]
+fn a_failure_is_recorded_in_the_library_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        3
+    );
+
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("failed: 1"));
+    assert!(idx.contains("## Failed"));
+    assert!(idx.contains("locked.mobi"));
+}
+
+#[test]
+fn an_all_failed_run_still_writes_the_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::copy(fixture("mobi/minimal-drm.mobi"), books.join("locked.mobi")).unwrap();
+    let out = tmp.path().join("out");
+
+    assert_eq!(
+        run_kasane(&[books.as_os_str(), "-o".as_ref(), out.as_os_str()]),
+        2
+    );
+
+    // A failed run leaves an on-disk record, not just a stderr trace.
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("documents: 0"));
+    assert!(idx.contains("0 of 1 inputs converted."));
+    assert!(idx.contains("locked.mobi"));
+}
+
+#[test]
+fn single_file_mode_writes_no_library_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("book");
+
+    assert_eq!(
+        run_kasane(&[
+            fixture("epub/minimal.epub").as_os_str(),
+            "-o".as_ref(),
+            out.as_os_str()
+        ]),
+        0
+    );
+
+    let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
+    assert!(idx.contains("title: Minimal Book"));
+    assert!(!idx.contains("kind: library"));
+}
+
+/// Pins the up-front `--ocr-lang` validation: a bad language must fail before
+/// any document is converted, not once per document inside the workers.
+#[cfg(feature = "ocr")]
+#[test]
+fn a_bad_ocr_language_fails_before_converting_anything() {
+    let tmp = tempfile::tempdir().unwrap();
+    let books = library(tmp.path());
+    let out = tmp.path().join("out");
+
+    let code = run_kasane(&[
+        books.as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+        "--ocr".as_ref(),
+        "--ocr-lang".as_ref(),
+        "zzz".as_ref(),
+    ]);
+
+    // OcrError::MissingLanguage matches none of exit_code_for's exit-2
+    // keywords, so this is 1 — and nothing was written.
+    assert_eq!(code, 1);
+    assert!(!out.exists(), "no document should have been converted");
+}

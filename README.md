@@ -9,6 +9,31 @@ AI-agent-friendly, progressively-disclosed Markdown file tree.
     mise run convert book.epub -o out/book
     # open out/book/index.md and drill into linked sections
 
+### Batch conversion
+
+    kasane books/ -o out/            # every document under books/, recursively
+    kasane a.epub b.pdf -o out/      # several files at once
+    kasane books/ -o out/ -j 4       # 4 workers (default: all cores)
+
+Each document lands at its path relative to the root it was found under, so
+`books/a/ch.epub` becomes `out/a/ch/index.md`. `out/index.md` is a library
+index linking every document and naming every failure; its links are
+percent-encoded, so `War and Peace/` becomes `War%20and%20Peace/index.md`. A
+single file argument is unchanged: `-o` is that document's own root.
+
+Directories are walked recursively and filtered by extension. A symlink named
+directly on the command line is followed; a symlink encountered while walking
+is skipped, so a linked directory can't introduce a cycle or let the walk
+escape its root. `-o` is required whenever more than one document could be
+produced. One file's failure never aborts the run.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | every document converted |
+| 1 | nothing converted, or a usage problem (missing `-o`, duplicate destinations, no documents found) |
+| 2 | every failure was an unsupported format, DRM, or encryption |
+| 3 | some documents converted, some failed |
+
 ## Install
     cargo install kasane-cli   # installs the `kasane` binary
 
@@ -94,3 +119,9 @@ See AGENTS.md for the codebase map.
   (multi-file) documents are rejected with a clear message (exit code 1, not
   2 — this is a format-support gap, not DRM). Tables become paragraphs; DjVu
   has no math markup to recover.
+- Batch mode holds one document in memory per worker, so a directory of large
+  PDFs at a high `-j` can use a lot of RAM; `-j 1` is the mitigation. Two
+  inputs whose output directories would clash — either identical, or one
+  nested inside the other, as when `ch.epub` sits beside a `ch/` directory —
+  are rejected before any conversion starts rather than silently overwriting
+  each other.

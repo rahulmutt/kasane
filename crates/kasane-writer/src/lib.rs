@@ -1,6 +1,8 @@
 mod frontmatter;
+mod library;
 mod markdown;
 
+pub use library::{write_library_index, LibraryEntry, LibraryFailure};
 pub use markdown::blocks_to_markdown;
 
 use anyhow::{bail, Context, Result};
