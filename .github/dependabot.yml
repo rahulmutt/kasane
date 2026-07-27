@@ -14,3 +14,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  # fuzz/ is a separate cargo workspace with its own lockfile, so the `/` entry
+  # above does not see it and `cargo deny check advisories` in audit.yml does
+  # not scan it. These are dev-only dependencies that never ship in the released
+  # binary, but they still get update PRs.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

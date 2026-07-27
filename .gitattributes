@@ -1,0 +1,2 @@
+fuzz/artifacts/** -text -diff
+fuzz/seeds/**     -text -diff

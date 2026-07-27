@@ -1,0 +1,66 @@
+name: fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Single target to fuzz (blank = all)'
+        required: false
+        type: string
+      duration:
+        description: 'Seconds per target'
+        required: false
+        default: '300'
+        type: string
+  # Advisories aside, fuzzing finds nothing if nobody runs it. Offset an hour
+  # from audit.yml's 07:00 Monday so the two do not contend.
+  schedule:
+    - cron: '0 8 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      # One crashing target must not cancel the other eleven — each is an
+      # independent finding.
+      fail-fast: false
+      matrix:
+        target:
+          - epub
+          - pptx
+          - mobi
+          - pdf
+          - djvu
+          - epub_zip
+          - pptx_zip
+          - detect
+          - math_island
+          - palmdoc
+          - guards
+          - xmltext
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Fuzz ${{ matrix.target }}
+        if: ${{ github.event.inputs.target == '' || github.event.inputs.target == matrix.target }}
+        run: mise run fuzz ${{ matrix.target }} -- -max_total_time=${{ github.event.inputs.duration || '300' }}
+
+      # A crash writes a reproducer to fuzz/artifacts/<target>/. Upload it so it
+      # can be committed — that is what turns a find into a permanent regression
+      # test (see crates/kasane-adapters/tests/fuzz_corpus.rs).
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
