@@ -35,15 +35,31 @@ KASANE_FUZZ_TOOLCHAIN = "nightly-2026-07-01"
 [tasks.build]
 run = "cargo build --workspace"
 
+# libtest captures stdout for passing tests and only shows it on failure or
+# with `--nocapture`/`--show-output`. fuzz_corpus.rs's KNOWN_OPEN quarantine
+# notice (see tests/fuzz_corpus.rs) is deliberately printed so a skipped
+# reproducer is never silent -- but that only holds if this task actually
+# surfaces it. Adding `--show-output` to the whole workspace run was tried
+# and rejected: it roughly doubled total output (554 -> 1107 lines) with
+# unrelated tests' `successes:` dumps (panicking-on-purpose tests, degrade
+# warnings, etc.), which is worse noise than the problem it fixes. Instead,
+# rerun just the one small, already-built fuzz_corpus binary with
+# `--nocapture` -- 13 lines, always visible, no interleaving risk.
 [tasks.test]
-run = "cargo test --workspace"
+run = [
+  "cargo test --workspace",
+  "cargo test -p kasane-adapters --test fuzz_corpus -- --nocapture",
+]
 
 [tasks.lint]
 run = ["cargo fmt --all -- --check",
        "cargo clippy --workspace --all-targets -- -D warnings"]
 
 [tasks.test-ocr]
-run = "cargo test --workspace --features ocr"
+run = [
+  "cargo test --workspace --features ocr",
+  "cargo test -p kasane-adapters --features ocr --test fuzz_corpus -- --nocapture",
+]
 
 [tasks.lint-ocr]
 run = ["cargo fmt --all -- --check",
@@ -71,6 +87,12 @@ case "$target" in
   detect)        find tests/fixtures -type f ! -name '*.py' ! -name '*.md' -exec cp -f {} "fuzz/corpus/$target/" \\; 2>/dev/null || true ;;
 esac
 if [ -d "fuzz/seeds/$target" ]; then cp -f "fuzz/seeds/$target/"* "fuzz/corpus/$target/" 2>/dev/null || true; fi
+# A renamed/moved fixtures or seeds dir would otherwise fail silently above
+# (the `|| true` swallows exactly that). Warn, don't fail: some targets
+# legitimately have no fixtures (e.g. detect with an empty tests/fixtures).
+if [ -z "$(ls -A "fuzz/corpus/$target" 2>/dev/null)" ]; then
+  echo "WARNING: fuzz/corpus/$target is empty -- no seeds found for '$target'" >&2
+fi
 cargo "+$KASANE_FUZZ_TOOLCHAIN" fuzz run "$target" "fuzz/corpus/$target" -- \\
   -rss_limit_mb=2048 -malloc_limit_mb=2048 -timeout=25 "$@"
 """

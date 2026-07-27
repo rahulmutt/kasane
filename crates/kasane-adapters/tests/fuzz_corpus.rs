@@ -41,9 +41,16 @@ const TARGET_COUNT: usize = 12;
 /// Reproducers whose underlying bug is still open, keyed on (target
 /// directory, filename) rather than filename alone -- unambiguous if two
 /// targets ever produce a same-named file. Quarantining one here is what
-/// keeps `mise run test` green despite a real, uncommitted-fix bug; removing
-/// the entry is what re-arms its regression test once the bug is fixed --
-/// do that as part of the fix, not before.
+/// keeps `mise run test` (this file, the stable replay) green despite a
+/// real, uncommitted-fix bug; removing the entry is what re-arms its
+/// regression test once the bug is fixed -- do that as part of the fix, not
+/// before.
+///
+/// This quarantine protects the stable replay test ONLY. It has no effect on
+/// `mise run fuzz` / `mise run fuzz-all`, which still reproduce these same
+/// crashes on nightly -- `guards` deterministically around run #3. That is
+/// intended, not a gap to close: a weekly fuzz job going red on a real,
+/// unfixed bug is the correct signal, and fuzz targets get no skip logic.
 const KNOWN_OPEN: &[(&str, &str)] = &[
     // pdf: stack overflow in the PDF adapter (unbounded recursion).
     // Uncatchable -- aborts the whole test process rather than failing one
