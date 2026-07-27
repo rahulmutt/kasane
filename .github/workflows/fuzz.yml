@@ -16,6 +16,11 @@ on:
   # from audit.yml's 07:00 Monday so the two do not contend.
   schedule:
     - cron: '0 8 * * 1'
+  # TEMPORARY: exercises the workflow on this branch before merge, since a
+  # brand-new workflow_dispatch workflow isn't dispatchable via API/CLI until
+  # it exists on the default branch. Removed in the following commit.
+  push:
+    branches: [adapter-fuzzing]
 
 permissions:
   contents: read
