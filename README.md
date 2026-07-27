@@ -68,13 +68,15 @@ committed but also listed in `KNOWN_OPEN` in `tests/fuzz_corpus.rs`, which
 skips it during the stable replay so the suite stays green; removing it from
 that list is what re-arms the regression test once the bug is fixed.
 
-Two findings are open this way today: a stack overflow in the `pdf` adapter,
-and a path-confinement leak in `guards` (`resolve_rel` normalizes `..` in its
-`target` argument but not in `base_dir`). Their reproducers live under
-`fuzz/artifacts/{pdf,guards}/`. The quarantine above only protects the stable
-`cargo test` run — `mise run fuzz`/`mise run fuzz-all` still reproduce both
-crashes, so expect those two targets to fail immediately, and expect the
-weekly fuzz CI run to be red on them, until they're fixed.
+Two findings are open this way today: a stack overflow in the `pdf` adapter
+([#21](https://github.com/rahulmutt/kasane/issues/21)), and a
+path-confinement leak in `guards` ([#22](https://github.com/rahulmutt/kasane/issues/22),
+`resolve_rel` normalizes `..` in its `target` argument but not in `base_dir`).
+Their reproducers live under `fuzz/artifacts/{pdf,guards}/`. The quarantine
+above only protects the stable `cargo test` run — `mise run fuzz`/`mise run
+fuzz-all` still reproduce both crashes, so expect those two targets to fail
+immediately, and expect the weekly fuzz CI run to be red on them, until
+they're fixed. Delete this paragraph once both issues are closed.
 
 The `ocr` feature is not fuzzed — it links C (Tesseract, Leptonica), which needs
 its own sanitizer setup.

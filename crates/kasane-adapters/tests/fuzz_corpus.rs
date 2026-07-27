@@ -16,8 +16,9 @@ use std::path::Path;
 /// Every fuzz target, by the directory name its corpus lives under.
 ///
 /// Adding a target means adding it here. An unrecognized directory is a test
-/// failure (see `unknown_corpus_directory_is_a_failure`), so a renamed target
-/// cannot silently stop being replayed.
+/// failure -- `replay()` panics when `target()` returns `None` for a corpus
+/// directory it finds on disk -- so a renamed target cannot silently stop
+/// being replayed.
 fn target(name: &str) -> Option<fn(&[u8])> {
     Some(match name {
         "epub" => fuzz_entry::epub,
@@ -55,10 +56,12 @@ const KNOWN_OPEN: &[(&str, &str)] = &[
     // pdf: stack overflow in the PDF adapter (unbounded recursion).
     // Uncatchable -- aborts the whole test process rather than failing one
     // test, so it must be skipped rather than merely allowed to fail.
+    // Tracked in https://github.com/rahulmutt/kasane/issues/21.
     ("pdf", "crash-bf187532d0e5d3bae0e505fca2044d82067e55fd"),
     // guards: `resolve_rel` leaks a ".." component from an unnormalized
     // `base_dir` -- it normalizes ".." in `target` but splits `base_dir` raw
     // (guard.rs:26).
+    // Tracked in https://github.com/rahulmutt/kasane/issues/22.
     ("guards", "crash-135a36f60489a1f6461ea75e10caf336b27ec0df"),
 ];
 

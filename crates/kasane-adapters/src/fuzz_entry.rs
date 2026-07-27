@@ -229,8 +229,9 @@ fn build_zip(data: &[u8]) -> Vec<u8> {
         // Lossy is right here: an entry name is a string to the zip crate, and
         // invalid UTF-8 should still produce *an* entry rather than skipping it.
         let name = String::from_utf8_lossy(name).into_owned();
-        // The zip crate rejects an empty name outright, which would abort the
-        // whole build; substitute rather than lose every later entry.
+        // An empty name is a legal entry to the zip crate, but it's useless
+        // coverage -- substitute rather than spend the mutation budget on an
+        // entry the parsers underneath can't meaningfully distinguish.
         let name = if name.is_empty() {
             "_".to_string()
         } else {
