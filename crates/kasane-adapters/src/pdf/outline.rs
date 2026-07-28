@@ -54,6 +54,54 @@ fn kids<'a>(doc: &'a Document, tree: &'a Dictionary) -> Vec<(ObjectId, &'a Dicti
         .collect()
 }
 
+/// Prove a graph rooted at `start` is finite: acyclic, no deeper than
+/// `MAX_OUTLINE_DEPTH`, and no larger than `MAX_OUTLINE_NODES` nodes. This is
+/// the one place the explicit stack, the `ObjectId`-keyed visited set, and
+/// both caps live -- `outline_is_traversable` (the `/Outlines` `/First` +
+/// `/Next` graph) and `named_destinations_are_traversable` (the
+/// `/Dests`/`/Names` `/Kids` tree) both call this rather than each keeping
+/// their own copy of the bookkeeping.
+///
+/// `expand` is called once per node, after that node has already passed the
+/// depth, node-count, and cycle checks below, and supplies that node's
+/// outgoing edges: each paired with the child's depth *relative to the
+/// child's own parent* -- 1 for a depth-increasing edge (`/First`, `/Kids`),
+/// 0 for a same-depth edge (`/Next`, which lopdf walks as a sibling, not a
+/// child). Preserving that distinction is what lets one walk model two
+/// graphs whose depth accounting is not the same shape.
+///
+/// The visited set is global to the whole walk rather than reset per path,
+/// so a node reachable by two routes is rejected even though it is acyclic.
+/// Each caller's own doc comment explains why that stricter rule costs it
+/// nothing.
+fn is_bounded_and_acyclic<'a>(
+    start: (Option<ObjectId>, &'a Dictionary),
+    mut expand: impl FnMut(&'a Dictionary) -> Vec<(usize, (Option<ObjectId>, &'a Dictionary))>,
+) -> bool {
+    let mut visited: HashSet<ObjectId> = HashSet::new();
+    let mut nodes = 0usize;
+    let mut stack: Vec<((Option<ObjectId>, &Dictionary), usize)> = vec![(start, 1)];
+
+    while let Some(((id, node), depth)) = stack.pop() {
+        if depth > MAX_OUTLINE_DEPTH {
+            return false;
+        }
+        nodes += 1;
+        if nodes > MAX_OUTLINE_NODES {
+            return false;
+        }
+        if let Some(id) = id {
+            if !visited.insert(id) {
+                return false; // already seen: the graph is cyclic
+            }
+        }
+        for (depth_delta, child) in expand(node) {
+            stack.push((child, depth + depth_delta));
+        }
+    }
+    true
+}
+
 /// True when the destination name tree -- `/Dests` in the catalog, or
 /// `/Dests` inside `/Names` -- is finite and small enough for
 /// `Document::get_named_destinations` to walk. `Document::get_outlines`
@@ -75,54 +123,36 @@ fn named_destinations_are_traversable(doc: &Document, catalog: &Dictionary) -> b
         let (_, names) = edge(doc, catalog, b"Names")?;
         edge(doc, names, b"Dests")
     });
-    let Some((root_id, root)) = tree else {
+    let Some(start) = tree else {
         return true;
     };
 
-    let mut visited: HashSet<ObjectId> = HashSet::new();
-    let mut nodes = 0usize;
-    let mut stack: Vec<((Option<ObjectId>, &Dictionary), usize)> = vec![((root_id, root), 1)];
-
-    while let Some(((id, node), depth)) = stack.pop() {
-        if depth > MAX_OUTLINE_DEPTH {
-            return false;
-        }
-        nodes += 1;
-        if nodes > MAX_OUTLINE_NODES {
-            return false;
-        }
-        if let Some(id) = id {
-            if !visited.insert(id) {
-                return false; // already seen: the tree is cyclic
-            }
-        }
-        for (kid_id, kid) in kids(doc, node) {
-            stack.push(((Some(kid_id), kid), depth + 1));
-        }
-    }
-    true
+    is_bounded_and_acyclic(start, |node| {
+        kids(doc, node)
+            .into_iter()
+            .map(|(id, dict)| (1, (Some(id), dict)))
+            .collect()
+    })
 }
 
 /// True when both graphs lopdf walks on the way to a table of contents are
 /// finite and small enough to hand to `get_toc`: the `/Outlines` tree itself,
 /// and the destination name tree (`/Dests` or `/Names/Dests`) that lopdf
-/// resolves and walks first, before a single outline node is touched. lopdf
-/// walks `/First` and `/Kids` recursively and `/Next` iteratively, with
-/// neither a visited set nor a depth bound anywhere in either graph, so a
-/// cycle in either one either overflows the stack (`/First`, `/Kids`) or
-/// spins forever while growing a Vec (`/Next`). The overflow aborts the
-/// process and cannot be caught, so both graphs must be proven finite
-/// *before* `get_toc` is called at all.
+/// resolves and walks first, before a single outline node is touched. See
+/// `is_bounded_and_acyclic` for the shared walk mechanics and
+/// `named_destinations_are_traversable` for the other graph.
 ///
-/// The walk uses an explicit stack, so fixing a recursion bug does not
-/// introduce recursion of its own. It follows the same edges lopdf follows,
-/// including lopdf's reassignment of the start node to the root's `/First`
-/// when the root has one.
+/// This graph's own two edges: `/First` descends -- lopdf follows it
+/// recursively -- and `/Next` stays at the same depth -- lopdf follows it
+/// iteratively, growing a `Vec` one entry per pass. The start node is
+/// reassigned to the root's `/First` when the root has one, exactly as
+/// `Document::get_outlines` reassigns it, since that is where lopdf's own
+/// walk actually begins.
 ///
-/// `visited` is global to each walk rather than per-path, so a node reachable
-/// by two routes is rejected even though it is acyclic. That is deliberate:
-/// an outline item has one `/Parent`, sharing is malformed, and the cost of
-/// the stricter rule is a fallback to font-size headings.
+/// The visited set is global to the walk rather than per-path, so a node
+/// reachable by two routes is rejected even though it is acyclic. That is
+/// deliberate here: an outline item has one `/Parent`, sharing is malformed,
+/// and the cost of the stricter rule is a fallback to font-size headings.
 fn outline_is_traversable(doc: &Document) -> bool {
     // No catalog: get_toc fails harmlessly on its own for both graphs below.
     let Ok(catalog) = doc.catalog() else {
@@ -138,31 +168,16 @@ fn outline_is_traversable(doc: &Document) -> bool {
     };
     let start = edge(doc, root, b"First").unwrap_or((root_id, root));
 
-    let mut visited: HashSet<ObjectId> = HashSet::new();
-    let mut nodes = 0usize;
-    let mut stack: Vec<((Option<ObjectId>, &Dictionary), usize)> = vec![(start, 1)];
-
-    while let Some(((id, node), depth)) = stack.pop() {
-        if depth > MAX_OUTLINE_DEPTH {
-            return false;
-        }
-        nodes += 1;
-        if nodes > MAX_OUTLINE_NODES {
-            return false;
-        }
-        if let Some(id) = id {
-            if !visited.insert(id) {
-                return false; // already seen: the graph is cyclic
-            }
-        }
+    is_bounded_and_acyclic(start, |node| {
+        let mut children = Vec::new();
         if let Some(first) = edge(doc, node, b"First") {
-            stack.push((first, depth + 1));
+            children.push((1, first));
         }
         if let Some(next) = edge(doc, node, b"Next") {
-            stack.push((next, depth));
+            children.push((0, next));
         }
-    }
-    true
+        children
+    })
 }
 
 /// Map each page number to the outline headings that target it, in outline
