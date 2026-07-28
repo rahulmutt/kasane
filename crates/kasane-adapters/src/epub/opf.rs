@@ -1,3 +1,4 @@
+use crate::guard::resolve_rel;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
@@ -71,8 +72,13 @@ pub fn parse_opf(xml: &str, opf_dir: &str) -> Opf {
                                 _ => {}
                             }
                         }
+                        // Resolve once, here, where opf_dir is in scope: an href
+                        // that escapes the archive root never enters the manifest,
+                        // so no later stage has to re-guard it.
                         if !id.is_empty() {
-                            manifest.insert(id, join_href(opf_dir, &href));
+                            if let Some(path) = resolve_rel(opf_dir, &href) {
+                                manifest.insert(id, path);
+                            }
                         }
                     }
                     b"itemref" => {
@@ -118,14 +124,6 @@ pub fn parse_opf(xml: &str, opf_dir: &str) -> Opf {
         authors,
         language,
         spine_hrefs,
-    }
-}
-
-fn join_href(dir: &str, href: &str) -> String {
-    if dir.is_empty() {
-        href.to_string()
-    } else {
-        format!("{}/{}", dir.trim_end_matches('/'), href)
     }
 }
 
@@ -199,5 +197,33 @@ mod tests {
         </metadata></package>"#;
         let opf = parse_opf(xml, "OEBPS");
         assert_eq!(opf.title, "a&nbsp;b");
+    }
+
+    #[test]
+    fn manifest_hrefs_are_normalized_and_confined() {
+        let xml = r#"<package><metadata><dc:title>T</dc:title></metadata>
+          <manifest>
+            <item id="a" href="../shared/ch.xhtml"/>
+            <item id="b" href="..foo.xhtml"/>
+            <item id="c" href="./ch1.xhtml"/>
+            <item id="d" href="../../etc/passwd"/>
+          </manifest>
+          <spine>
+            <itemref idref="a"/><itemref idref="b"/>
+            <itemref idref="c"/><itemref idref="d"/>
+          </spine></package>"#;
+        let opf = parse_opf(xml, "OEBPS");
+        assert_eq!(
+            opf.spine_hrefs,
+            vec![
+                // `..` pops OEBPS instead of surviving into the key.
+                "shared/ch.xhtml".to_string(),
+                // `..foo` is a filename, not a traversal: the segment is not `..`.
+                "OEBPS/..foo.xhtml".to_string(),
+                // `.` segments are dropped.
+                "OEBPS/ch1.xhtml".to_string(),
+                // `d` escapes the archive root, so it never enters the manifest.
+            ]
+        );
     }
 }
