@@ -26,12 +26,15 @@ impl Adapter for EpubAdapter {
         let opf_path =
             find_opf_path(&container).ok_or(ParseError::Malformed("no rootfile".into()))?;
         // container.xml's full-path is archive-root-relative, so the base is "".
+        // A leading `/` (full-path="/OEBPS/content.opf") is package-absolute:
+        // resolve_rel normalizes it away and accepts the rootfile, where the
+        // deleted safe_entry_name rejected it outright. That loosening is
+        // deliberate -- the result is still confined to the archive root, the
+        // key is only ever a zip lookup and never reaches the filesystem, and
+        // it matches how PPTX already resolves package-absolute targets.
         let opf_path = crate::guard::resolve_rel("", &opf_path)
             .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
-        let opf_dir = opf_path
-            .rsplit_once('/')
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default();
+        let opf_dir = crate::guard::parent_dir(&opf_path);
 
         let opf_xml = crate::ziputil::read_entry_string(&mut zip, &opf_path, &mut total_read)?;
         let parsed = opf::parse_opf(&opf_xml, &opf_dir);
@@ -59,10 +62,7 @@ impl Adapter for EpubAdapter {
             let Ok(xml) = crate::ziputil::read_entry_string(&mut zip, name, &mut total_read) else {
                 continue;
             };
-            let file_dir = name
-                .rsplit_once('/')
-                .map(|(d, _)| d.to_string())
-                .unwrap_or_default();
+            let file_dir = crate::guard::parent_dir(name);
             let fp = xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id, &mut next_note);
             for (aid, bid) in &fp.anchors {
                 anchor_map.insert((name.clone(), aid.clone()), *bid);
@@ -705,6 +705,54 @@ mod tests {
         // Escaping the archive root is still rejected -- silently, not fatally:
         // the other two chapters must still convert.
         assert!(!has_para_text(&doc, "outside"));
+    }
+
+    #[test]
+    fn package_absolute_rootfile_path_is_normalized_and_accepted() {
+        // A leading `/` makes full-path package-absolute. The deleted
+        // safe_entry_name rejected it outright; resolve_rel normalizes it away
+        // and accepts the rootfile. Pinning that here so the loosening is a
+        // recorded decision rather than an accident of the refactor.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="/OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch1.xhtml",
+            b"<body><p>absolute rootfile</p></body>",
+        );
+        w.finish().unwrap();
+        let (doc, _) = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap();
+        assert!(
+            has_para_text(&doc, "absolute rootfile"),
+            "a package-absolute rootfile path should normalize to OEBPS/content.opf"
+        );
+    }
+
+    #[test]
+    fn package_absolute_rootfile_path_still_cannot_escape_the_root() {
+        // The loosening is confined: a leading `/` resolves from the archive
+        // root, it does not disable normalization or confinement.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="/../etc/passwd"/></rootfiles></container>"#);
+        w.finish().unwrap();
+        let err = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe rootfile path"),
+            "expected the guard to reject an escaping package-absolute rootfile path, got: {err}"
+        );
     }
 
     #[test]
