@@ -12,7 +12,7 @@
 //! what lets `tests/fuzz_corpus.rs` dispatch by directory name and keeps every
 //! libFuzzer wrapper identical.
 
-use crate::guard::{check_expansion, resolve_rel};
+use crate::guard::{check_expansion, percent_decode, resolve_rel};
 use crate::math::{capture_island, mathml_to_latex, omml_to_latex};
 use crate::mobi::palmdoc::decompress;
 use crate::xmltext::resolve_general_ref;
@@ -142,19 +142,26 @@ pub fn guards(data: &[u8]) {
         return;
     };
 
-    if let Some(path) = resolve_rel(base, target) {
-        // resolve_rel joins segments, and a `..` segment pops rather than being
-        // emitted -- but a segment may legitimately *contain* `..` (e.g.
-        // `..foo`). Check components, not substrings, or valid input reports as
-        // a crash.
-        assert!(
-            !path.split('/').any(|s| s == ".."),
-            "resolve_rel emitted a traversal component: {path:?} from base={base:?} target={target:?}"
-        );
-        assert!(
-            !path.starts_with('/') && !path.is_empty(),
-            "resolve_rel emitted an absolute or empty path: {path:?}"
-        );
+    // Both target shapes an adapter can hand to resolve_rel: the raw one, and
+    // the percent-decoded one. Decoding runs BEFORE resolve_rel at every EPUB
+    // call site precisely so that decoded separators are still normalized and
+    // confined by its segment loop, so the postconditions must hold for both.
+    let decoded = percent_decode(target);
+    for target in [target, decoded.as_str()] {
+        if let Some(path) = resolve_rel(base, target) {
+            // resolve_rel joins segments, and a `..` segment pops rather than being
+            // emitted -- but a segment may legitimately *contain* `..` (e.g.
+            // `..foo`). Check components, not substrings, or valid input reports as
+            // a crash.
+            assert!(
+                !path.split('/').any(|s| s == ".."),
+                "resolve_rel emitted a traversal component: {path:?} from base={base:?} target={target:?}"
+            );
+            assert!(
+                !path.starts_with('/') && !path.is_empty(),
+                "resolve_rel emitted an absolute or empty path: {path:?}"
+            );
+        }
     }
 
     // Monotonicity: the streaming callers re-check as `decompressed` grows, so

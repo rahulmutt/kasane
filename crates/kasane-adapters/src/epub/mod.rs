@@ -315,7 +315,14 @@ fn resolve_footnote(
     let target_file = if path.is_empty() {
         file.to_string()
     } else {
-        crate::guard::resolve_rel(&crate::guard::parent_dir(file), path)?
+        // Decode after the fragment split (so a `%23` can never become a
+        // delimiter) and before resolve_rel (so a `%2F` is normalized as a
+        // separator). The map is keyed by decoded spine keys, so an undecoded
+        // path could never match one.
+        crate::guard::resolve_rel(
+            &crate::guard::parent_dir(file),
+            &crate::guard::percent_decode(path),
+        )?
     };
     map.get(&(target_file, frag.to_string())).copied()
 }
@@ -334,7 +341,12 @@ fn resolve_internal(
     let target_file = if path.is_empty() {
         file.to_string()
     } else {
-        crate::guard::resolve_rel(&crate::guard::parent_dir(file), path)?
+        // Same ordering as resolve_footnote: fragment split, then decode, then
+        // resolve_rel.
+        crate::guard::resolve_rel(
+            &crate::guard::parent_dir(file),
+            &crate::guard::percent_decode(path),
+        )?
     };
     map.get(&(target_file.clone(), frag.to_string()))
         .or_else(|| map.get(&(target_file, String::new())))
@@ -707,6 +719,86 @@ mod tests {
         assert!(!has_para_text(&doc, "outside"));
     }
 
+    /// An EPUB whose manifest hrefs are percent-encoded IRI references, as an
+    /// ordinary authoring tool writes them for filenames containing a space or
+    /// a non-ASCII character.
+    fn build_epub_percent_encoded_hrefs() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch%201.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="caf%C3%A9.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="100%.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c4" href="%2E%2E%2F%2E%2E%2Foutside.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/>
+            <itemref idref="c3"/><itemref idref="c4"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch 1.xhtml",
+            b"<body><p>spaced chapter</p></body>",
+        );
+        add(
+            &mut w,
+            "OEBPS/café.xhtml",
+            b"<body><p>accented chapter</p></body>",
+        );
+        add(
+            &mut w,
+            "OEBPS/100%.xhtml",
+            b"<body><p>percent chapter</p></body>",
+        );
+        // Same non-tautology device as build_epub_awkward_hrefs, for the two
+        // shapes a decoding regression would produce: decoding AFTER
+        // resolve_rel yields "OEBPS/../../outside.xhtml" (the escape is one
+        // opaque segment when the normalizer sees it), and skipping
+        // confinement entirely yields "../../outside.xhtml".
+        add(
+            &mut w,
+            "OEBPS/../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        add(
+            &mut w,
+            "../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        w.finish().unwrap();
+        let bytes = buf.into_inner();
+        assert_literal_names_present(
+            &bytes,
+            &["OEBPS/../../outside.xhtml", "../../outside.xhtml"],
+        );
+        bytes
+    }
+
+    #[test]
+    fn percent_encoded_spine_hrefs_are_read_and_encoded_escapes_are_not() {
+        let bytes = build_epub_percent_encoded_hrefs();
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(
+            has_para_text(&doc, "spaced chapter"),
+            "chapter at OEBPS/ch 1.xhtml was dropped: href=\"ch%201.xhtml\" was not decoded"
+        );
+        assert!(
+            has_para_text(&doc, "accented chapter"),
+            "chapter at OEBPS/café.xhtml was dropped: %C3%A9 did not round-trip as UTF-8"
+        );
+        assert!(
+            has_para_text(&doc, "percent chapter"),
+            "chapter at OEBPS/100%.xhtml was dropped: a literal `%` must survive verbatim"
+        );
+        // Decoding happens before resolve_rel, so an encoded traversal is
+        // normalized and confined exactly like its literal form.
+        assert!(!has_para_text(&doc, "outside"));
+    }
+
     #[test]
     fn package_absolute_rootfile_path_is_normalized_and_accepted() {
         // A leading `/` makes full-path package-absolute. The deleted
@@ -795,6 +887,49 @@ mod tests {
             first_link_target(&doc),
             Some(RefTarget::Internal(BlockId(2)))
         ));
+    }
+
+    #[test]
+    fn cross_file_link_with_percent_encoded_path_resolves_to_internal_block_id() {
+        // Coherence with the manifest-side decode: the anchor map is keyed by
+        // spine keys, which are now percent-decoded (`OEBPS/ch 2.xhtml`). A
+        // link href is the same kind of IRI reference, so it must be decoded
+        // on the same terms -- otherwise `ch%202.xhtml#s2` can never match the
+        // map and the link silently degrades to plain text.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="ch%202.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch1.xhtml",
+            b"<body><h1>One</h1><p><a href=\"ch%202.xhtml#s2\">go</a></p></body>",
+        );
+        add(
+            &mut w,
+            "OEBPS/ch 2.xhtml",
+            b"<body><h1>Two</h1><h2 id=\"s2\">Sect</h2><p>t</p></body>",
+        );
+        w.finish().unwrap();
+        let (doc, _) = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap();
+        // ch1: h1 -> BlockId(0); ch2: h1 -> 1, h2#s2 -> 2
+        assert!(
+            matches!(
+                first_link_target(&doc),
+                Some(RefTarget::Internal(BlockId(2)))
+            ),
+            "percent-encoded link path did not resolve: got {:?}",
+            first_link_target(&doc)
+        );
     }
 
     #[test]
