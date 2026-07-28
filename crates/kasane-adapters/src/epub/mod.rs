@@ -647,7 +647,33 @@ mod tests {
             b"<body><p>outside</p></body>",
         );
         w.finish().unwrap();
-        buf.into_inner()
+        let bytes = buf.into_inner();
+        assert_literal_names_present(
+            &bytes,
+            &["OEBPS/../../outside.xhtml", "../../outside.xhtml"],
+        );
+        bytes
+    }
+
+    /// A fixture that plants traversal-named entries to keep an escaping-href
+    /// assertion non-tautological only works if the archive really holds them
+    /// under those literal names. `zip` 2.4.2's `start_file` stores a name
+    /// verbatim (only `start_file_from_path` normalizes), but that is upstream
+    /// behavior, not a guarantee we control: a future bump that normalized on
+    /// write would collapse both traversal names to `outside.xhtml`, quietly
+    /// turning the assertion back into a tautology while the suite stayed
+    /// green. Assert the premise so it fails loudly instead.
+    fn assert_literal_names_present(bytes: &[u8], expected: &[&str]) {
+        let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let names: Vec<&str> = zip.file_names().collect();
+        for want in expected {
+            assert!(
+                names.contains(want),
+                "fixture premise broken: the zip writer did not store the literal \
+                 entry name {want:?} (stored names: {names:?}). The escaping-href \
+                 assertion is tautological without it."
+            );
+        }
     }
 
     fn has_para_text(doc: &Document, needle: &str) -> bool {
