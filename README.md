@@ -113,11 +113,13 @@ See AGENTS.md for the codebase map.
 - PDF conversion is for born-digital PDFs. Headings come from the PDF outline
   (bookmarks) at page granularity, or from font-size inference when there is no
   outline. Multi-column layout is read as a single column; tables become
-  paragraphs; PDF has no math markup to recover. An outline that is cyclic or
-  implausibly large — including via the document's internal destination-name
-  tree, which the outline lookup also resolves — is ignored entirely and
-  headings fall back to font-size inference, because the underlying PDF
-  library walks these structures unbounded.
+  paragraphs; PDF has no math markup to recover. Bookmarks are ignored
+  entirely — headings fall back to font-size inference — when either the
+  outline itself or the document's internal destination-name table, which the
+  bookmark lookup also reads, is cyclic, implausibly large, or malformed in a
+  way the underlying PDF library would crash on. Either one is enough on its
+  own: a document with pristine bookmarks and a damaged destination table
+  falls back too.
 - Scanned/image-only PDF pages: with an `-F ocr` build and `--ocr`, text is
   recovered by OCR (text-first; the page image is kept as a fallback when OCR is
   not confident). OCR runs only on pages whose image kasane already decodes

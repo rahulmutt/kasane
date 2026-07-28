@@ -122,9 +122,12 @@ an inline dictionary cannot refer to itself. Inline dictionaries can still
 nest, but that nesting is bounded by file size and is covered by
 `MAX_OUTLINE_DEPTH`. Both mechanisms are needed.
 
-On the committed reproducer, the root `8 0 R` is marked visited when resolved
-as the outline root, its `/First` resolves to `8 0 R` again, and the walk
-rejects on the first edge.
+On the committed reproducer, the outline root `8 0 R` has `/First 8 0 R`. The
+root is never inserted into `visited` on its own account — when it has a
+`/First`, the start node *becomes* that `/First` target, which here is `8 0 R`
+itself. So `8 0 R` goes into `visited` on the first pop, its `/First` pushes
+`8 0 R` back onto the stack, and the second pop is the repeat visit that
+rejects.
 
 The traversal must mirror lopdf's edge set, including the detail that lopdf
 reassigns the start node to the root's `/First` when present before entering
@@ -142,11 +145,12 @@ if !outline_is_traversable(doc) {
 ### 2.4 Why an empty map is the right degradation
 
 This is the same signal `outline_by_page` already produces for any `get_toc`
-failure (`let Ok(toc) = doc.get_toc() else { return map };`). The adapter reads
-an empty map as "no outline" at `pdf/mod.rs:50` and falls back to font-size
-heading inference — a path that already exists and is already covered by
-`font_size_fallback_when_no_outline`. A hostile outline therefore lands on
-tested behavior rather than a new one.
+failure (`let Some(toc) = guarded_toc(doc) else { return map };`). The adapter
+reads an empty map as "no outline" at `pdf/mod.rs:50` and falls back to
+font-size heading inference — a path that already exists and is already covered
+by `font_size_fallback_when_no_outline`. A hostile outline therefore lands on
+tested behavior rather than a new one; `font_size_fallback_when_the_outline_is_rejected`
+drives that same seam with a rejected outline and real body text.
 
 Two consequences, stated deliberately:
 
