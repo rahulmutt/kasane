@@ -627,6 +627,25 @@ mod tests {
             "shared/ch.xhtml",
             b"<body><p>shared chapter</p></body>",
         );
+        // If confinement regressed -- either the deleted join_href-style
+        // concatenation, or inserting the raw href unresolved -- one of these
+        // literal entries is exactly what `../../outside.xhtml` under
+        // opf_dir "OEBPS" would resolve to. Without them, a regression would
+        // still fail the zip lookup with "missing entry" (same outcome as a
+        // properly rejected href), which makes the `outside` assertion below
+        // tautological. Their presence is what lets it actually catch a
+        // regression instead of just repeating "this key isn't in the
+        // archive."
+        add(
+            &mut w,
+            "OEBPS/../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        add(
+            &mut w,
+            "../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
         w.finish().unwrap();
         buf.into_inner()
     }
