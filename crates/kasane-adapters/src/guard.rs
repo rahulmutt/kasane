@@ -20,12 +20,18 @@ pub fn check_expansion(compressed: u64, decompressed: u64) -> bool {
 /// `/` makes the target package-absolute (resolved from root). Returns `None` if
 /// the target escapes the root or resolves to nothing.
 pub fn resolve_rel(base_dir: &str, target: &str) -> Option<String> {
-    let mut parts: Vec<&str> = if target.starts_with('/') || base_dir.is_empty() {
-        Vec::new()
+    // A package-absolute target resolves from the archive root, so base_dir is
+    // not consulted at all.
+    let base = if target.starts_with('/') {
+        ""
     } else {
-        base_dir.split('/').filter(|s| !s.is_empty()).collect()
+        base_dir
     };
-    for seg in target.split('/') {
+    let mut parts: Vec<&str> = Vec::new();
+    // Both sources run through the SAME loop. Splitting base_dir raw was the
+    // bug: its segments never saw the `..` arm, so a `..` passed straight
+    // through into the result and defeated the confinement contract above.
+    for seg in base.split('/').chain(target.split('/')) {
         match seg {
             "" | "." => {}
             ".." => {
@@ -148,5 +154,23 @@ mod tests {
         assert_eq!(resolve_rel("ppt", "../../etc/passwd"), None);
         // resolving to empty (the root itself) is rejected
         assert_eq!(resolve_rel("ppt", ".."), None);
+    }
+
+    #[test]
+    fn resolve_rel_rejects_escaping_base_dir() {
+        // The #22 reproducer's shape: `..` in base_dir must pop like it does in
+        // target, not pass through into the result.
+        assert_eq!(resolve_rel("../a", "x"), None);
+        assert_eq!(resolve_rel("..", "x"), None);
+        assert_eq!(resolve_rel("a/../../b", "x"), None);
+    }
+
+    #[test]
+    fn resolve_rel_normalizes_interior_base_dir() {
+        // An interior `..` in base_dir normalizes rather than being emitted.
+        assert_eq!(resolve_rel("a/../b", "x").as_deref(), Some("b/x"));
+        assert_eq!(resolve_rel("a/./b", "x").as_deref(), Some("a/b/x"));
+        // An empty base_dir still resolves against the archive root.
+        assert_eq!(resolve_rel("", "a/b.xml").as_deref(), Some("a/b.xml"));
     }
 }

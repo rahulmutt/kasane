@@ -58,11 +58,6 @@ const KNOWN_OPEN: &[(&str, &str)] = &[
     // test, so it must be skipped rather than merely allowed to fail.
     // Tracked in https://github.com/rahulmutt/kasane/issues/21.
     ("pdf", "crash-bf187532d0e5d3bae0e505fca2044d82067e55fd"),
-    // guards: `resolve_rel` leaks a ".." component from an unnormalized
-    // `base_dir` -- it normalizes ".." in `target` but splits `base_dir` raw
-    // (guard.rs:26).
-    // Tracked in https://github.com/rahulmutt/kasane/issues/22.
-    ("guards", "crash-135a36f60489a1f6461ea75e10caf336b27ec0df"),
 ];
 
 fn corpus_root(which: &str) -> std::path::PathBuf {
