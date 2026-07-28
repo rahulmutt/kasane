@@ -134,8 +134,10 @@ pub fn palmdoc(data: &[u8]) {
     let _ = decompress(data);
 }
 
-/// Two pure functions whose postconditions are security-critical and, until
-/// now, asserted nowhere.
+/// Three pure functions whose postconditions are security-critical and, until
+/// now, asserted nowhere: `resolve_rel`, `check_expansion`, and `percent_decode`
+/// -- the last checked through `resolve_rel`, since what matters about it is
+/// that decoding upstream of the segment loop cannot defeat confinement.
 pub fn guards(data: &[u8]) {
     let (base, target) = split2(data);
     let (Ok(base), Ok(target)) = (std::str::from_utf8(base), std::str::from_utf8(target)) else {

@@ -25,14 +25,16 @@ impl Adapter for EpubAdapter {
             crate::ziputil::read_entry_string(&mut zip, "META-INF/container.xml", &mut total_read)?;
         let opf_path =
             find_opf_path(&container).ok_or(ParseError::Malformed("no rootfile".into()))?;
-        // container.xml's full-path is archive-root-relative, so the base is "".
+        // container.xml's full-path is archive-root-relative, so the base is "";
+        // it is a relative IRI reference like every other href in the format, so
+        // it is percent-decoded before resolution on the same terms.
         // A leading `/` (full-path="/OEBPS/content.opf") is package-absolute:
         // resolve_rel normalizes it away and accepts the rootfile, where the
         // deleted safe_entry_name rejected it outright. That loosening is
         // deliberate -- the result is still confined to the archive root, the
         // key is only ever a zip lookup and never reaches the filesystem, and
         // it matches how PPTX already resolves package-absolute targets.
-        let opf_path = crate::guard::resolve_rel("", &opf_path)
+        let opf_path = crate::guard::resolve_rel("", &crate::guard::percent_decode(&opf_path))
             .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
         let opf_dir = crate::guard::parent_dir(&opf_path);
 
@@ -844,6 +846,56 @@ mod tests {
         assert!(
             err.to_string().contains("unsafe rootfile path"),
             "expected the guard to reject an escaping package-absolute rootfile path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn percent_encoded_rootfile_path_locates_the_opf() {
+        // OCF full-path is a relative IRI reference like every other href in
+        // the format, so a space in the OPF's name is written `%20`. Left
+        // undecoded the zip lookup misses and the whole book fails to convert
+        // -- a ParseError rather than finding 1's silent chapter loss, but the
+        // same defect class.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/my%20book.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/my book.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch1.xhtml",
+            b"<body><p>encoded rootfile</p></body>",
+        );
+        w.finish().unwrap();
+        let (doc, _) = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap();
+        assert!(
+            has_para_text(&doc, "encoded rootfile"),
+            "full-path=\"OEBPS/my%20book.opf\" did not locate OEBPS/my book.opf"
+        );
+    }
+
+    #[test]
+    fn percent_encoded_escaping_rootfile_path_is_rejected_as_unsafe() {
+        // Decoding runs before resolve_rel here too, so an encoded traversal is
+        // confined exactly like its literal form rather than becoming an opaque
+        // segment that happens to miss the archive.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="%2E%2E%2Fetc%2Fpasswd"/></rootfiles></container>"#);
+        w.finish().unwrap();
+        let err = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe rootfile path"),
+            "expected the guard to reject an encoded escaping rootfile path, got: {err}"
         );
     }
 
