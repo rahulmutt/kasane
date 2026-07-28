@@ -6,6 +6,14 @@ pub struct Opf {
     pub title: String,
     pub authors: Vec<String>,
     pub language: Option<String>,
+    /// Zip entry keys for the spine documents, in reading order.
+    ///
+    /// INVARIANT: every element is `guard::resolve_rel` output -- normalized and
+    /// confined to the archive root -- so a consumer may pass one straight to
+    /// `zip::by_name` without re-guarding it. The whole confinement case for the
+    /// spine rests on this: any new insertion point in `parse_opf` must resolve
+    /// through `resolve_rel` too, or the reader's zip lookup silently becomes
+    /// unconfined.
     pub spine_hrefs: Vec<String>,
 }
 

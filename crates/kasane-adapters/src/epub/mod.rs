@@ -49,7 +49,12 @@ impl Adapter for EpubAdapter {
         for href in &parsed.spine_hrefs {
             // parse_opf resolved and confined these, so they are usable as zip
             // keys directly -- re-guarding here is what used to drop legal
-            // chapters whose names merely contained `..`.
+            // chapters whose names merely contained `..`. Check the invariant
+            // Opf::spine_hrefs declares, at the point that relies on it.
+            debug_assert!(
+                !href.split('/').any(|seg| seg == ".."),
+                "spine href is not resolve_rel output, so this zip lookup is unconfined: {href}"
+            );
             let name = href;
             let Ok(xml) = crate::ziputil::read_entry_string(&mut zip, name, &mut total_read) else {
                 continue;

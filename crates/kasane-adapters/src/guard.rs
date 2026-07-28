@@ -7,10 +7,21 @@ pub fn check_expansion(compressed: u64, decompressed: u64) -> bool {
         && (compressed == 0 || decompressed / compressed.max(1) <= MAX_RATIO)
 }
 
-/// Resolve a relationship `target` (which may contain `..`) against `base_dir`,
-/// normalizing `.`/`..` and confining the result to the archive root. A leading
-/// `/` makes the target package-absolute (resolved from root). Returns `None` if
-/// the target escapes the root or resolves to nothing.
+/// The crate's single path-confinement primitive: turn an untrusted in-archive
+/// reference into a zip entry key that cannot name anything outside the archive
+/// root.
+///
+/// `target` (an OPF manifest href, an EPUB container rootfile path, an `img
+/// src`, a PPTX relationship target -- anything an adapter reads out of a
+/// document) is resolved against `base_dir`, the directory of the file it was
+/// read from. `.` and empty segments are dropped, `..` pops, and a leading `/`
+/// makes the target package-absolute (resolved from the root, ignoring
+/// `base_dir`). Returns `None` -- reject, do not fall back -- if the target
+/// escapes the root or resolves to nothing.
+///
+/// Callers may use a `Some` result directly as a zip key: it is already
+/// normalized and confined, and re-guarding it is what used to drop legal
+/// chapters whose names merely contained `..`.
 pub fn resolve_rel(base_dir: &str, target: &str) -> Option<String> {
     // A package-absolute target resolves from the archive root, so base_dir is
     // not consulted at all.
