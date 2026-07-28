@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Hermetic PDF fixture generator (stdlib only). Regenerate with:
     python3 tests/fixtures/pdf/make_pdf_fixtures.py
-Emits minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf next to this file.
+Emits minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf, cyclic-outline.pdf
+next to this file.
 """
 import os
 import zlib
@@ -117,12 +118,34 @@ def build_image(with_text: bool) -> bytes:
     return p.build(1)
 
 
+def build_cyclic_outline() -> bytes:
+    """Same page and body text as no-outline.pdf, but with an /Outlines graph
+    whose single item is its own /First. The outline guard rejects that graph
+    whole, so the adapter must still produce a heading by font-size inference
+    — this fixture is what drives that seam end to end."""
+    p = Pdf()
+    p.add(1, b"<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>")
+    p.add(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    p.add(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+             b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>")
+    body = (show(20, 170, 24, "Big Title")
+            + show(20, 140, 12, "Ordinary paragraph text one.")
+            + show(20, 124, 12, "Ordinary paragraph text two."))
+    p.add(4, font_obj())
+    p.add(5, p.stream_obj(b"", text_stream(body)))
+    p.add(6, b"<< /Type /Outlines /First 7 0 R /Last 7 0 R /Count 1 >>")
+    p.add(7, b"<< /Title (Loop) /Parent 6 0 R /First 7 0 R /Dest [3 0 R /Fit] >>")
+    return p.build(1)
+
+
 def main():
     open(os.path.join(HERE, "minimal.pdf"), "wb").write(build_minimal())
     open(os.path.join(HERE, "no-outline.pdf"), "wb").write(build_no_outline())
     open(os.path.join(HERE, "image.pdf"), "wb").write(build_image(with_text=True))
     open(os.path.join(HERE, "scanned.pdf"), "wb").write(build_image(with_text=False))
-    print("wrote minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf")
+    open(os.path.join(HERE, "cyclic-outline.pdf"), "wb").write(build_cyclic_outline())
+    print("wrote minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf, "
+          "cyclic-outline.pdf")
 
 
 if __name__ == "__main__":
