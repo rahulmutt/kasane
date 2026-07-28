@@ -659,7 +659,7 @@ pub fn xhtml_to_blocks(
                         let key = if src.is_empty() || crate::guard::has_scheme(&src) {
                             None
                         } else {
-                            crate::guard::resolve_rel(base_dir, &src)
+                            crate::guard::resolve_rel(base_dir, &crate::guard::percent_decode(&src))
                         };
                         match key {
                             Some(key) => {
@@ -1129,6 +1129,53 @@ mod tests {
     #[test]
     fn traversal_img_src_degrades() {
         let blocks = parse_blocks("<body><img src=\"../../../etc/passwd\" alt=\"x\"/></body>");
+        assert!(matches!(&blocks[0], Block::Para(_)));
+    }
+
+    #[test]
+    fn img_src_is_percent_decoded_before_resolution() {
+        // `src` is an IRI reference, the zip entry name is literal bytes.
+        let blocks = parse_blocks("<body><img src=\"my%20pic.png\" alt=\"d\"/></body>");
+        let Block::Figure { image, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        assert_eq!(image.key, "OEBPS/my pic.png");
+
+        // A multi-byte UTF-8 sequence spans two escapes.
+        let blocks = parse_blocks("<body><img src=\"caf%C3%A9.png\" alt=\"d\"/></body>");
+        let Block::Figure { image, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        assert_eq!(image.key, "OEBPS/café.png");
+
+        // A literal `%` and a truncated escape survive verbatim.
+        let blocks = parse_blocks("<body><img src=\"100%.png\" alt=\"d\"/></body>");
+        let Block::Figure { image, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        assert_eq!(image.key, "OEBPS/100%.png");
+
+        let blocks = parse_blocks("<body><img src=\"a%2.png\" alt=\"d\"/></body>");
+        let Block::Figure { image, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        assert_eq!(image.key, "OEBPS/a%2.png");
+
+        // An encoded separator is normalized by resolve_rel, not smuggled
+        // into the key as an opaque segment.
+        let blocks = parse_blocks("<body><img src=\"sub%2Fpic.png\" alt=\"d\"/></body>");
+        let Block::Figure { image, .. } = &blocks[0] else {
+            panic!("expected Figure, got {:?}", blocks[0])
+        };
+        assert_eq!(image.key, "OEBPS/sub/pic.png");
+    }
+
+    #[test]
+    fn percent_encoded_traversal_img_src_degrades() {
+        // The security case: decoding happens before resolve_rel, so an
+        // encoded traversal is confined exactly like its literal form.
+        let blocks =
+            parse_blocks("<body><img src=\"%2E%2E%2F%2E%2E%2Fetc%2Fpasswd\" alt=\"x\"/></body>");
         assert!(matches!(&blocks[0], Block::Para(_)));
     }
 

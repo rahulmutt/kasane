@@ -58,7 +58,7 @@ repo stays on the pinned stable toolchain. CI runs the full set weekly.
 
 Beyond panics and hangs, the targets assert that the decompression-bomb guards
 hold under libFuzzer's RSS limit, that no asset filename escapes `_assets/`, and
-that `safe_entry_name` / `resolve_rel` never emit a traversal.
+that `resolve_rel` never emits a traversal.
 
 **When the fuzzer finds a crash, commit the reproducer** from
 `fuzz/artifacts/<target>/`. If the underlying bug gets fixed right away, `cargo

@@ -12,7 +12,7 @@
 //! what lets `tests/fuzz_corpus.rs` dispatch by directory name and keeps every
 //! libFuzzer wrapper identical.
 
-use crate::guard::{check_expansion, resolve_rel, safe_entry_name};
+use crate::guard::{check_expansion, percent_decode, resolve_rel};
 use crate::math::{capture_island, mathml_to_latex, omml_to_latex};
 use crate::mobi::palmdoc::decompress;
 use crate::xmltext::resolve_general_ref;
@@ -135,35 +135,35 @@ pub fn palmdoc(data: &[u8]) {
 }
 
 /// Three pure functions whose postconditions are security-critical and, until
-/// now, asserted nowhere.
+/// now, asserted nowhere: `resolve_rel`, `check_expansion`, and `percent_decode`
+/// -- the last checked through `resolve_rel`, since what matters about it is
+/// that decoding upstream of the segment loop cannot defeat confinement.
 pub fn guards(data: &[u8]) {
     let (base, target) = split2(data);
     let (Ok(base), Ok(target)) = (std::str::from_utf8(base), std::str::from_utf8(target)) else {
         return;
     };
 
-    if let Some(name) = safe_entry_name(target) {
-        // safe_entry_name rejects `..` as a substring, so the substring form is
-        // the right check for *its* output.
-        assert!(
-            !name.contains("..") && !name.starts_with('/'),
-            "safe_entry_name admitted an escaping name: {name:?} from {target:?}"
-        );
-    }
-
-    if let Some(path) = resolve_rel(base, target) {
-        // resolve_rel joins segments, and a `..` segment pops rather than being
-        // emitted -- but a segment may legitimately *contain* `..` (e.g.
-        // `..foo`). Check components, not substrings, or valid input reports as
-        // a crash.
-        assert!(
-            !path.split('/').any(|s| s == ".."),
-            "resolve_rel emitted a traversal component: {path:?} from base={base:?} target={target:?}"
-        );
-        assert!(
-            !path.starts_with('/') && !path.is_empty(),
-            "resolve_rel emitted an absolute or empty path: {path:?}"
-        );
+    // Both target shapes an adapter can hand to resolve_rel: the raw one, and
+    // the percent-decoded one. Decoding runs BEFORE resolve_rel at every EPUB
+    // call site precisely so that decoded separators are still normalized and
+    // confined by its segment loop, so the postconditions must hold for both.
+    let decoded = percent_decode(target);
+    for target in [target, decoded.as_str()] {
+        if let Some(path) = resolve_rel(base, target) {
+            // resolve_rel joins segments, and a `..` segment pops rather than being
+            // emitted -- but a segment may legitimately *contain* `..` (e.g.
+            // `..foo`). Check components, not substrings, or valid input reports as
+            // a crash.
+            assert!(
+                !path.split('/').any(|s| s == ".."),
+                "resolve_rel emitted a traversal component: {path:?} from base={base:?} target={target:?}"
+            );
+            assert!(
+                !path.starts_with('/') && !path.is_empty(),
+                "resolve_rel emitted an absolute or empty path: {path:?}"
+            );
+        }
     }
 
     // Monotonicity: the streaming callers re-check as `decompressed` grows, so
@@ -211,7 +211,7 @@ const MAX_ZIP_ENTRIES: usize = 64;
 /// The `zip` crate verifies CRCs on read, so raw byte mutation is rejected at
 /// the container before it ever reaches the parsers underneath. Generating a
 /// valid container puts the mutation budget on entry names and member payloads
-/// instead, which is where `safe_entry_name`, the bomb guards, and the OPF /
+/// instead, which is where `resolve_rel`, the bomb guards, and the OPF /
 /// XHTML / math parsers live.
 ///
 /// Input is NUL-separated fields read pairwise: name, content, name, content...

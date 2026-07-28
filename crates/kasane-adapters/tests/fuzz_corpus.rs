@@ -48,10 +48,11 @@ const TARGET_COUNT: usize = 12;
 /// before.
 ///
 /// This quarantine protects the stable replay test ONLY. It has no effect on
-/// `mise run fuzz` / `mise run fuzz-all`, which still reproduce these same
-/// crashes on nightly -- `guards` deterministically around run #3. That is
-/// intended, not a gap to close: a weekly fuzz job going red on a real,
-/// unfixed bug is the correct signal, and fuzz targets get no skip logic.
+/// `mise run fuzz` / `mise run fuzz-all`, which still reproduce a quarantined
+/// crash on nightly. That is intended, not a gap to close: a weekly fuzz job
+/// going red on a real, unfixed bug is the correct signal, and fuzz targets
+/// get no skip logic. The list is empty whenever every committed reproducer
+/// has a landed fix behind it, which is the steady state.
 const KNOWN_OPEN: &[(&str, &str)] = &[];
 
 fn corpus_root(which: &str) -> std::path::PathBuf {

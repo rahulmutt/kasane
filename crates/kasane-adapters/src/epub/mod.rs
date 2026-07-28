@@ -1,7 +1,6 @@
 mod opf;
 pub(crate) mod xhtml;
 
-use crate::guard::safe_entry_name;
 use crate::{Adapter, ParseError};
 use kasane_ir::*;
 
@@ -26,12 +25,18 @@ impl Adapter for EpubAdapter {
             crate::ziputil::read_entry_string(&mut zip, "META-INF/container.xml", &mut total_read)?;
         let opf_path =
             find_opf_path(&container).ok_or(ParseError::Malformed("no rootfile".into()))?;
-        let opf_path = crate::guard::safe_entry_name(&opf_path)
+        // container.xml's full-path is archive-root-relative, so the base is "";
+        // it is a relative IRI reference like every other href in the format, so
+        // it is percent-decoded before resolution on the same terms.
+        // A leading `/` (full-path="/OEBPS/content.opf") is package-absolute:
+        // resolve_rel normalizes it away and accepts the rootfile, where the
+        // deleted safe_entry_name rejected it outright. That loosening is
+        // deliberate -- the result is still confined to the archive root, the
+        // key is only ever a zip lookup and never reaches the filesystem, and
+        // it matches how PPTX already resolves package-absolute targets.
+        let opf_path = crate::guard::resolve_rel("", &crate::guard::percent_decode(&opf_path))
             .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
-        let opf_dir = opf_path
-            .rsplit_once('/')
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default();
+        let opf_dir = crate::guard::parent_dir(&opf_path);
 
         let opf_xml = crate::ziputil::read_entry_string(&mut zip, &opf_path, &mut total_read)?;
         let parsed = opf::parse_opf(&opf_xml, &opf_dir);
@@ -47,17 +52,19 @@ impl Adapter for EpubAdapter {
             std::collections::HashMap::new();
         let mut noteref_keys: std::collections::HashSet<(String, String)> = Default::default();
         for href in &parsed.spine_hrefs {
-            let Some(name) = safe_entry_name(href) else {
+            // parse_opf resolved and confined these, so they are usable as zip
+            // keys directly -- re-guarding here is what used to drop legal
+            // chapters whose names merely contained `..`. Check the invariant
+            // Opf::spine_hrefs declares, at the point that relies on it.
+            debug_assert!(
+                !href.split('/').any(|seg| seg == ".."),
+                "spine href is not resolve_rel output, so this zip lookup is unconfined: {href}"
+            );
+            let name = href;
+            let Ok(xml) = crate::ziputil::read_entry_string(&mut zip, name, &mut total_read) else {
                 continue;
             };
-            let Ok(xml) = crate::ziputil::read_entry_string(&mut zip, &name, &mut total_read)
-            else {
-                continue;
-            };
-            let file_dir = name
-                .rsplit_once('/')
-                .map(|(d, _)| d.to_string())
-                .unwrap_or_default();
+            let file_dir = crate::guard::parent_dir(name);
             let fp = xhtml::xhtml_to_blocks(&xml, &file_dir, &mut next_id, &mut next_note);
             for (aid, bid) in &fp.anchors {
                 anchor_map.insert((name.clone(), aid.clone()), *bid);
@@ -310,7 +317,14 @@ fn resolve_footnote(
     let target_file = if path.is_empty() {
         file.to_string()
     } else {
-        crate::guard::resolve_rel(&crate::guard::parent_dir(file), path)?
+        // Decode after the fragment split (so a `%23` can never become a
+        // delimiter) and before resolve_rel (so a `%2F` is normalized as a
+        // separator). The map is keyed by decoded spine keys, so an undecoded
+        // path could never match one.
+        crate::guard::resolve_rel(
+            &crate::guard::parent_dir(file),
+            &crate::guard::percent_decode(path),
+        )?
     };
     map.get(&(target_file, frag.to_string())).copied()
 }
@@ -329,7 +343,12 @@ fn resolve_internal(
     let target_file = if path.is_empty() {
         file.to_string()
     } else {
-        crate::guard::resolve_rel(&crate::guard::parent_dir(file), path)?
+        // Same ordering as resolve_footnote: fragment split, then decode, then
+        // resolve_rel.
+        crate::guard::resolve_rel(
+            &crate::guard::parent_dir(file),
+            &crate::guard::percent_decode(path),
+        )?
     };
     map.get(&(target_file.clone(), frag.to_string()))
         .or_else(|| map.get(&(target_file, String::new())))
@@ -599,6 +618,305 @@ mod tests {
         buf.into_inner()
     }
 
+    /// An EPUB whose spine mixes a filename that merely *contains* `..`, an href
+    /// that legitimately walks out of the OPF directory, and one that escapes the
+    /// archive root entirely.
+    fn build_epub_awkward_hrefs() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="..foo.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="../shared/ch.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="../../outside.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/..foo.xhtml",
+            b"<body><p>dotdot chapter</p></body>",
+        );
+        add(
+            &mut w,
+            "shared/ch.xhtml",
+            b"<body><p>shared chapter</p></body>",
+        );
+        // If confinement regressed -- either the deleted join_href-style
+        // concatenation, or inserting the raw href unresolved -- one of these
+        // literal entries is exactly what `../../outside.xhtml` under
+        // opf_dir "OEBPS" would resolve to. Without them, a regression would
+        // still fail the zip lookup with "missing entry" (same outcome as a
+        // properly rejected href), which makes the `outside` assertion below
+        // tautological. Their presence is what lets it actually catch a
+        // regression instead of just repeating "this key isn't in the
+        // archive."
+        add(
+            &mut w,
+            "OEBPS/../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        add(
+            &mut w,
+            "../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        w.finish().unwrap();
+        let bytes = buf.into_inner();
+        assert_literal_names_present(
+            &bytes,
+            &["OEBPS/../../outside.xhtml", "../../outside.xhtml"],
+        );
+        bytes
+    }
+
+    /// A fixture that plants traversal-named entries to keep an escaping-href
+    /// assertion non-tautological only works if the archive really holds them
+    /// under those literal names. `zip` 2.4.2's `start_file` stores a name
+    /// verbatim (only `start_file_from_path` normalizes), but that is upstream
+    /// behavior, not a guarantee we control: a future bump that normalized on
+    /// write would collapse both traversal names to `outside.xhtml`, quietly
+    /// turning the assertion back into a tautology while the suite stayed
+    /// green. Assert the premise so it fails loudly instead.
+    fn assert_literal_names_present(bytes: &[u8], expected: &[&str]) {
+        let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let names: Vec<&str> = zip.file_names().collect();
+        for want in expected {
+            assert!(
+                names.contains(want),
+                "fixture premise broken: the zip writer did not store the literal \
+                 entry name {want:?} (stored names: {names:?}). The escaping-href \
+                 assertion is tautological without it."
+            );
+        }
+    }
+
+    fn has_para_text(doc: &Document, needle: &str) -> bool {
+        doc.nodes.iter().any(|n| {
+            matches!(&n.block,
+                Block::Para(i) if i.iter().any(|x| matches!(x, Inline::Text(t) if t == needle)))
+        })
+    }
+
+    #[test]
+    fn awkward_but_legal_spine_hrefs_are_read_and_escaping_ones_are_not() {
+        let bytes = build_epub_awkward_hrefs();
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        // A filename containing `..` is not a traversal.
+        assert!(
+            has_para_text(&doc, "dotdot chapter"),
+            "chapter at OEBPS/..foo.xhtml was dropped"
+        );
+        // An href that walks out of the OPF dir but stays inside the archive.
+        assert!(
+            has_para_text(&doc, "shared chapter"),
+            "chapter at shared/ch.xhtml was dropped"
+        );
+        // Escaping the archive root is still rejected -- silently, not fatally:
+        // the other two chapters must still convert.
+        assert!(!has_para_text(&doc, "outside"));
+    }
+
+    /// An EPUB whose manifest hrefs are percent-encoded IRI references, as an
+    /// ordinary authoring tool writes them for filenames containing a space or
+    /// a non-ASCII character.
+    fn build_epub_percent_encoded_hrefs() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch%201.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="caf%C3%A9.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="100%.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c4" href="%2E%2E%2F%2E%2E%2Foutside.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/>
+            <itemref idref="c3"/><itemref idref="c4"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch 1.xhtml",
+            b"<body><p>spaced chapter</p></body>",
+        );
+        add(
+            &mut w,
+            "OEBPS/café.xhtml",
+            b"<body><p>accented chapter</p></body>",
+        );
+        add(
+            &mut w,
+            "OEBPS/100%.xhtml",
+            b"<body><p>percent chapter</p></body>",
+        );
+        // Same non-tautology device as build_epub_awkward_hrefs, for the two
+        // shapes a decoding regression would produce: decoding AFTER
+        // resolve_rel yields "OEBPS/../../outside.xhtml" (the escape is one
+        // opaque segment when the normalizer sees it), and skipping
+        // confinement entirely yields "../../outside.xhtml".
+        add(
+            &mut w,
+            "OEBPS/../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        add(
+            &mut w,
+            "../../outside.xhtml",
+            b"<body><p>outside</p></body>",
+        );
+        w.finish().unwrap();
+        let bytes = buf.into_inner();
+        assert_literal_names_present(
+            &bytes,
+            &["OEBPS/../../outside.xhtml", "../../outside.xhtml"],
+        );
+        bytes
+    }
+
+    #[test]
+    fn percent_encoded_spine_hrefs_are_read_and_encoded_escapes_are_not() {
+        let bytes = build_epub_percent_encoded_hrefs();
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        assert!(
+            has_para_text(&doc, "spaced chapter"),
+            "chapter at OEBPS/ch 1.xhtml was dropped: href=\"ch%201.xhtml\" was not decoded"
+        );
+        assert!(
+            has_para_text(&doc, "accented chapter"),
+            "chapter at OEBPS/café.xhtml was dropped: %C3%A9 did not round-trip as UTF-8"
+        );
+        assert!(
+            has_para_text(&doc, "percent chapter"),
+            "chapter at OEBPS/100%.xhtml was dropped: a literal `%` must survive verbatim"
+        );
+        // Decoding happens before resolve_rel, so an encoded traversal is
+        // normalized and confined exactly like its literal form.
+        assert!(!has_para_text(&doc, "outside"));
+    }
+
+    #[test]
+    fn package_absolute_rootfile_path_is_normalized_and_accepted() {
+        // A leading `/` makes full-path package-absolute. The deleted
+        // safe_entry_name rejected it outright; resolve_rel normalizes it away
+        // and accepts the rootfile. Pinning that here so the loosening is a
+        // recorded decision rather than an accident of the refactor.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="/OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch1.xhtml",
+            b"<body><p>absolute rootfile</p></body>",
+        );
+        w.finish().unwrap();
+        let (doc, _) = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap();
+        assert!(
+            has_para_text(&doc, "absolute rootfile"),
+            "a package-absolute rootfile path should normalize to OEBPS/content.opf"
+        );
+    }
+
+    #[test]
+    fn package_absolute_rootfile_path_still_cannot_escape_the_root() {
+        // The loosening is confined: a leading `/` resolves from the archive
+        // root, it does not disable normalization or confinement.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="/../etc/passwd"/></rootfiles></container>"#);
+        w.finish().unwrap();
+        let err = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe rootfile path"),
+            "expected the guard to reject an escaping package-absolute rootfile path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn percent_encoded_rootfile_path_locates_the_opf() {
+        // OCF full-path is a relative IRI reference like every other href in
+        // the format, so a space in the OPF's name is written `%20`. Left
+        // undecoded the zip lookup misses and the whole book fails to convert
+        // -- a ParseError rather than finding 1's silent chapter loss, but the
+        // same defect class.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/my%20book.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/my book.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch1.xhtml",
+            b"<body><p>encoded rootfile</p></body>",
+        );
+        w.finish().unwrap();
+        let (doc, _) = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap();
+        assert!(
+            has_para_text(&doc, "encoded rootfile"),
+            "full-path=\"OEBPS/my%20book.opf\" did not locate OEBPS/my book.opf"
+        );
+    }
+
+    #[test]
+    fn percent_encoded_escaping_rootfile_path_is_rejected_as_unsafe() {
+        // Decoding runs before resolve_rel here too, so an encoded traversal is
+        // confined exactly like its literal form rather than becoming an opaque
+        // segment that happens to miss the archive.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="%2E%2E%2Fetc%2Fpasswd"/></rootfiles></container>"#);
+        w.finish().unwrap();
+        let err = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe rootfile path"),
+            "expected the guard to reject an encoded escaping rootfile path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_rootfile_path_is_rejected_as_unsafe() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(
+            &mut w,
+            "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path=""/></rootfiles></container>"#,
+        );
+        w.finish().unwrap();
+        let err = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe rootfile path"),
+            "expected the guard to reject an empty rootfile path, got: {err}"
+        );
+    }
+
     fn first_link_target(doc: &Document) -> Option<RefTarget> {
         doc.nodes.iter().find_map(|n| match &n.block {
             Block::Para(inls) => inls.iter().find_map(|i| match i {
@@ -621,6 +939,49 @@ mod tests {
             first_link_target(&doc),
             Some(RefTarget::Internal(BlockId(2)))
         ));
+    }
+
+    #[test]
+    fn cross_file_link_with_percent_encoded_path_resolves_to_internal_block_id() {
+        // Coherence with the manifest-side decode: the anchor map is keyed by
+        // spine keys, which are now percent-decoded (`OEBPS/ch 2.xhtml`). A
+        // link href is the same kind of IRI reference, so it must be decoded
+        // on the same terms -- otherwise `ch%202.xhtml#s2` can never match the
+        // map and the link silently degrades to plain text.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="ch%202.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/ch1.xhtml",
+            b"<body><h1>One</h1><p><a href=\"ch%202.xhtml#s2\">go</a></p></body>",
+        );
+        add(
+            &mut w,
+            "OEBPS/ch 2.xhtml",
+            b"<body><h1>Two</h1><h2 id=\"s2\">Sect</h2><p>t</p></body>",
+        );
+        w.finish().unwrap();
+        let (doc, _) = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap();
+        // ch1: h1 -> BlockId(0); ch2: h1 -> 1, h2#s2 -> 2
+        assert!(
+            matches!(
+                first_link_target(&doc),
+                Some(RefTarget::Internal(BlockId(2)))
+            ),
+            "percent-encoded link path did not resolve: got {:?}",
+            first_link_target(&doc)
+        );
     }
 
     #[test]
