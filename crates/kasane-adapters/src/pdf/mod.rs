@@ -295,6 +295,22 @@ mod tests {
         assert_eq!(headings(&doc), vec![(1, "Big Title".into())]);
     }
 
+    /// The guard-rejection seam, end to end: `cyclic-outline.pdf` carries a
+    /// real page with real body text *and* an `/Outlines` graph whose item is
+    /// its own `/First`. `outline_by_page` drops the hostile outline whole and
+    /// returns an empty map, which this adapter reads as "no outline", so the
+    /// headings that come out must be the font-size ones — the same result as
+    /// `no-outline.pdf`, reached by a different route.
+    #[test]
+    fn font_size_fallback_when_the_outline_is_rejected() {
+        let doc = parse("cyclic-outline");
+        assert_eq!(headings(&doc), vec![(1, "Big Title".into())]);
+        // The body text survives; the whole document is not dropped with the
+        // outline.
+        assert!(doc.nodes.iter().any(|n| matches!(&n.block,
+            Block::Para(inlines) if text(inlines).contains("Ordinary paragraph"))));
+    }
+
     #[test]
     fn scanned_page_yields_figure_and_note() {
         let bytes = std::fs::read("../../tests/fixtures/pdf/scanned.pdf").unwrap();
