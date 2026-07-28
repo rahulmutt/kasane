@@ -29,27 +29,110 @@ fn edge<'a>(
     Some((id, resolved.as_dict().ok()?))
 }
 
-/// True when the `/Outlines` graph is finite and small enough to hand to
-/// `get_toc`. lopdf walks `/First` recursively and `/Next` iteratively with
-/// neither a visited set nor a depth bound, so a cyclic outline either
-/// overflows the stack (`/First`) or spins forever while growing a Vec
-/// (`/Next`). The overflow aborts the process and cannot be caught, so the
-/// graph must be proven finite *before* `get_toc` is called at all.
+/// Resolve `tree`'s `/Kids` array to the entries
+/// `Document::get_named_destinations` recurses into: only array entries that
+/// are references resolving to a dictionary --
+/// `kid.as_reference().and_then(|id| self.get_dictionary(id))` in lopdf's own
+/// code. A non-reference or non-dictionary kid is skipped by lopdf, not
+/// recursed, so it is skipped here too. This is a separate helper from
+/// `edge` rather than a reuse of it: `/Kids` is an array of children, not a
+/// single named edge, so `edge`'s one-dictionary-in, one-dictionary-out shape
+/// does not fit.
+fn kids<'a>(doc: &'a Document, tree: &'a Dictionary) -> Vec<(ObjectId, &'a Dictionary)> {
+    let Ok(kids) = tree.get(b"Kids") else {
+        return Vec::new();
+    };
+    let Ok(kids) = kids.as_array() else {
+        return Vec::new();
+    };
+    kids.iter()
+        .filter_map(|kid| {
+            let id = kid.as_reference().ok()?;
+            let dict = doc.get_dictionary(id).ok()?;
+            Some((id, dict))
+        })
+        .collect()
+}
+
+/// True when the destination name tree -- `/Dests` in the catalog, or
+/// `/Dests` inside `/Names` -- is finite and small enough for
+/// `Document::get_named_destinations` to walk. `Document::get_outlines`
+/// resolves and walks this tree *before* it touches a single outline node, so
+/// it has to be proven finite here too, on the same terms as the outline
+/// graph below: `get_named_destinations` recurses `/Kids` with neither a
+/// visited set nor a depth bound -- the same unbounded-recursion shape as the
+/// outline's `/First`, just reached one call earlier.
+///
+/// Tree selection mirrors lopdf exactly: `catalog/Dests` first, and only if
+/// that is absent, `catalog/Names/Dests`. If neither resolves there is
+/// nothing to walk, so this returns `true` -- there is nothing to reject.
+///
+/// `/Names` within a node is iterated, not recursed, by
+/// `get_named_destinations`, so it cannot be the source of an abort and is
+/// not walked here -- only `/Kids` is bounded.
+fn named_destinations_are_traversable(doc: &Document, catalog: &Dictionary) -> bool {
+    let tree = edge(doc, catalog, b"Dests").or_else(|| {
+        let (_, names) = edge(doc, catalog, b"Names")?;
+        edge(doc, names, b"Dests")
+    });
+    let Some((root_id, root)) = tree else {
+        return true;
+    };
+
+    let mut visited: HashSet<ObjectId> = HashSet::new();
+    let mut nodes = 0usize;
+    let mut stack: Vec<((Option<ObjectId>, &Dictionary), usize)> = vec![((root_id, root), 1)];
+
+    while let Some(((id, node), depth)) = stack.pop() {
+        if depth > MAX_OUTLINE_DEPTH {
+            return false;
+        }
+        nodes += 1;
+        if nodes > MAX_OUTLINE_NODES {
+            return false;
+        }
+        if let Some(id) = id {
+            if !visited.insert(id) {
+                return false; // already seen: the tree is cyclic
+            }
+        }
+        for (kid_id, kid) in kids(doc, node) {
+            stack.push(((Some(kid_id), kid), depth + 1));
+        }
+    }
+    true
+}
+
+/// True when both graphs lopdf walks on the way to a table of contents are
+/// finite and small enough to hand to `get_toc`: the `/Outlines` tree itself,
+/// and the destination name tree (`/Dests` or `/Names/Dests`) that lopdf
+/// resolves and walks first, before a single outline node is touched. lopdf
+/// walks `/First` and `/Kids` recursively and `/Next` iteratively, with
+/// neither a visited set nor a depth bound anywhere in either graph, so a
+/// cycle in either one either overflows the stack (`/First`, `/Kids`) or
+/// spins forever while growing a Vec (`/Next`). The overflow aborts the
+/// process and cannot be caught, so both graphs must be proven finite
+/// *before* `get_toc` is called at all.
 ///
 /// The walk uses an explicit stack, so fixing a recursion bug does not
 /// introduce recursion of its own. It follows the same edges lopdf follows,
 /// including lopdf's reassignment of the start node to the root's `/First`
 /// when the root has one.
 ///
-/// `visited` is global to the walk rather than per-path, so a node reachable
+/// `visited` is global to each walk rather than per-path, so a node reachable
 /// by two routes is rejected even though it is acyclic. That is deliberate:
 /// an outline item has one `/Parent`, sharing is malformed, and the cost of
 /// the stricter rule is a fallback to font-size headings.
 fn outline_is_traversable(doc: &Document) -> bool {
-    // No catalog or no /Outlines: get_toc fails harmlessly on its own.
+    // No catalog: get_toc fails harmlessly on its own for both graphs below.
     let Ok(catalog) = doc.catalog() else {
         return true;
     };
+
+    if !named_destinations_are_traversable(doc, catalog) {
+        return false;
+    }
+
     let Some((root_id, root)) = edge(doc, catalog, b"Outlines") else {
         return true;
     };
@@ -213,6 +296,79 @@ mod tests {
     #[test]
     fn rejects_mutual_first_cycle() {
         assert!(outline_by_page(&mutual_first_cycle()).is_empty());
+    }
+
+    /// A well-formed minimal outline plus a `/Dests` name tree whose `/Kids`
+    /// points back at itself. `Document::get_named_destinations` recurses
+    /// `/Kids` with neither a visited set nor a depth bound -- the same
+    /// unbounded-recursion shape as `first_self_cycle` above, just reached
+    /// one call earlier: lopdf resolves and walks this tree before
+    /// `get_outlines` ever touches an outline node, so this would recurse
+    /// forever (and abort the process) even though the outline itself is
+    /// fine.
+    fn dests_kids_cycle() -> lopdf::Document {
+        let mut doc = lopdf::Document::with_version("1.5");
+        let item = doc.new_object_id();
+        doc.objects.insert(
+            item,
+            Object::Dictionary(dictionary! { "Title" => Object::string_literal("Heading") }),
+        );
+        let outline_root = doc.add_object(dictionary! { "Type" => "Outlines", "First" => item });
+
+        let dests = doc.new_object_id();
+        doc.objects.insert(
+            dests,
+            Object::Dictionary(dictionary! { "Kids" => vec![Object::Reference(dests)] }),
+        );
+
+        let cat = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Outlines" => outline_root,
+            "Dests" => dests,
+        });
+        doc.trailer.set("Root", cat);
+        doc
+    }
+
+    #[test]
+    fn rejects_dests_kids_cycle() {
+        assert!(outline_by_page(&dests_kids_cycle()).is_empty());
+    }
+
+    /// A normal, acyclic `/Dests` tree: a root whose `/Kids` reaches one leaf
+    /// carrying a `/Names` array. Proves the destination-tree walk is a
+    /// boundary, not a blanket refusal of every document with destinations.
+    /// Tested through the private `outline_is_traversable` rather than
+    /// `outline_by_page`: producing real headings would additionally require
+    /// a full page tree, which the traversability guard never inspects (it
+    /// only walks `/Kids`, never resolves a destination to a page).
+    fn acyclic_dests_tree() -> lopdf::Document {
+        let mut doc = lopdf::Document::with_version("1.5");
+        let leaf = doc.new_object_id();
+        doc.objects.insert(
+            leaf,
+            Object::Dictionary(dictionary! {
+                "Names" => vec![
+                    Object::string_literal("A"),
+                    Object::Dictionary(dictionary! {
+                        "D" => vec![Object::Integer(0), Object::Name(b"Fit".to_vec())],
+                    }),
+                ],
+            }),
+        );
+        let root = doc.new_object_id();
+        doc.objects.insert(
+            root,
+            Object::Dictionary(dictionary! { "Kids" => vec![Object::Reference(leaf)] }),
+        );
+        let cat = doc.add_object(dictionary! { "Type" => "Catalog", "Dests" => root });
+        doc.trailer.set("Root", cat);
+        doc
+    }
+
+    #[test]
+    fn accepts_acyclic_destination_tree() {
+        assert!(outline_is_traversable(&acyclic_dests_tree()));
     }
 
     /// An acyclic chain of `n` items linked by `key`: "First" makes it deep
