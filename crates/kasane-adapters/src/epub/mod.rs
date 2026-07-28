@@ -1,7 +1,6 @@
 mod opf;
 pub(crate) mod xhtml;
 
-use crate::guard::safe_entry_name;
 use crate::{Adapter, ParseError};
 use kasane_ir::*;
 
@@ -26,7 +25,8 @@ impl Adapter for EpubAdapter {
             crate::ziputil::read_entry_string(&mut zip, "META-INF/container.xml", &mut total_read)?;
         let opf_path =
             find_opf_path(&container).ok_or(ParseError::Malformed("no rootfile".into()))?;
-        let opf_path = crate::guard::safe_entry_name(&opf_path)
+        // container.xml's full-path is archive-root-relative, so the base is "".
+        let opf_path = crate::guard::resolve_rel("", &opf_path)
             .ok_or(ParseError::Malformed("unsafe rootfile path".into()))?;
         let opf_dir = opf_path
             .rsplit_once('/')
@@ -47,11 +47,11 @@ impl Adapter for EpubAdapter {
             std::collections::HashMap::new();
         let mut noteref_keys: std::collections::HashSet<(String, String)> = Default::default();
         for href in &parsed.spine_hrefs {
-            let Some(name) = safe_entry_name(href) else {
-                continue;
-            };
-            let Ok(xml) = crate::ziputil::read_entry_string(&mut zip, &name, &mut total_read)
-            else {
+            // parse_opf resolved and confined these, so they are usable as zip
+            // keys directly -- re-guarding here is what used to drop legal
+            // chapters whose names merely contained `..`.
+            let name = href;
+            let Ok(xml) = crate::ziputil::read_entry_string(&mut zip, name, &mut total_read) else {
                 continue;
             };
             let file_dir = name
@@ -597,6 +597,82 @@ mod tests {
         add(&mut w, "OEBPS/ch2.xhtml", ch2.as_bytes());
         w.finish().unwrap();
         buf.into_inner()
+    }
+
+    /// An EPUB whose spine mixes a filename that merely *contains* `..`, an href
+    /// that legitimately walks out of the OPF directory, and one that escapes the
+    /// archive root entirely.
+    fn build_epub_awkward_hrefs() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(&mut w, "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#);
+        add(
+            &mut w,
+            "OEBPS/content.opf",
+            br#"<package><metadata><dc:title>T</dc:title></metadata>
+            <manifest><item id="c1" href="..foo.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c2" href="../shared/ch.xhtml" media-type="application/xhtml+xml"/>
+            <item id="c3" href="../../outside.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/></spine></package>"#,
+        );
+        add(
+            &mut w,
+            "OEBPS/..foo.xhtml",
+            b"<body><p>dotdot chapter</p></body>",
+        );
+        add(
+            &mut w,
+            "shared/ch.xhtml",
+            b"<body><p>shared chapter</p></body>",
+        );
+        w.finish().unwrap();
+        buf.into_inner()
+    }
+
+    fn has_para_text(doc: &Document, needle: &str) -> bool {
+        doc.nodes.iter().any(|n| {
+            matches!(&n.block,
+                Block::Para(i) if i.iter().any(|x| matches!(x, Inline::Text(t) if t == needle)))
+        })
+    }
+
+    #[test]
+    fn awkward_but_legal_spine_hrefs_are_read_and_escaping_ones_are_not() {
+        let bytes = build_epub_awkward_hrefs();
+        let (doc, _) = EpubAdapter.parse(&bytes, "b.epub").unwrap();
+        // A filename containing `..` is not a traversal.
+        assert!(
+            has_para_text(&doc, "dotdot chapter"),
+            "chapter at OEBPS/..foo.xhtml was dropped"
+        );
+        // An href that walks out of the OPF dir but stays inside the archive.
+        assert!(
+            has_para_text(&doc, "shared chapter"),
+            "chapter at shared/ch.xhtml was dropped"
+        );
+        // Escaping the archive root is still rejected -- silently, not fatally:
+        // the other two chapters must still convert.
+        assert!(!has_para_text(&doc, "outside"));
+    }
+
+    #[test]
+    fn empty_rootfile_path_is_rejected_as_unsafe() {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        add(&mut w, "mimetype", b"application/epub+zip");
+        add(
+            &mut w,
+            "META-INF/container.xml",
+            br#"<container><rootfiles><rootfile full-path=""/></rootfiles></container>"#,
+        );
+        w.finish().unwrap();
+        let err = EpubAdapter.parse(&buf.into_inner(), "b.epub").unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe rootfile path"),
+            "expected the guard to reject an empty rootfile path, got: {err}"
+        );
     }
 
     fn first_link_target(doc: &Document) -> Option<RefTarget> {
