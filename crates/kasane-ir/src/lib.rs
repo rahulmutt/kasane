@@ -6,7 +6,7 @@ mod inline;
 
 pub use assets::{AssetBag, AssetItem};
 pub use block::{AssetRef, Block, Table};
-pub use doc::{DocMeta, Document, Node, Provenance};
+pub use doc::{teardown_document, DocMeta, Document, Node, Provenance};
 pub use ids::{BlockId, NoteId};
 pub use inline::{Inline, RefTarget};
 

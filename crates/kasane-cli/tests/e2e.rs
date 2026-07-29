@@ -37,6 +37,31 @@ fn converts_a_deeply_nested_epub_without_aborting() {
     assert!(status.success(), "conversion failed: {:?}", status);
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
     assert!(idx.contains("title: Deep Nesting"));
+    // `title: Deep Nesting` comes from the OPF's <dc:title>, not the chapter
+    // -- it is present even in the exact bug this seed exists to catch (the
+    // chapter silently dropped by guard.rs's zip-bomb ratio guard, book
+    // parsing to zero body nodes), so it alone proves nothing about the
+    // chapter surviving. Read the chapter file and check its actual content:
+    // "bottom" must be present, and it must be wrapped in a run of AT LEAST
+    // 64 `*` -- proving both that the chapter was not dropped, and that Task
+    // 2's epub::xhtml::MAX_INLINE_DEPTH (64) flattening bound reached the
+    // real CLI path (5000 nested <em> in, at most 64 nested emphasis out).
+    let chapter = std::fs::read_to_string(out_dir.join("01-deep.md"))
+        .expect("chapter file 01-deep.md must exist -- the chapter must not be dropped");
+    assert!(chapter.contains("bottom"), "chapter body text missing");
+    let stars_before = chapter
+        .split("bottom")
+        .next()
+        .unwrap()
+        .chars()
+        .rev()
+        .take_while(|&c| c == '*')
+        .count();
+    assert!(
+        stars_before >= 64,
+        "expected at least 64 '*' immediately before \"bottom\" (Task 2's flattening \
+         bound reaching the CLI path), got {stars_before} in: {chapter:?}"
+    );
 }
 
 #[test]

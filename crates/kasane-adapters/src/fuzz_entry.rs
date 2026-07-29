@@ -47,66 +47,25 @@ pub fn djvu(data: &[u8]) {
 
 /// A rejected parse is a perfectly good outcome — most fuzzer inputs are not
 /// valid documents. Only a *successful* parse has assets worth checking.
+///
+/// Order matters here. `max_inline_depth` is computed, and `doc` torn down
+/// via `kasane_ir::teardown_document`, BEFORE either assertion below runs.
+/// Both assertions can panic -- that is their job, on a genuine regression --
+/// and if `doc` were still an owned local when one did, unwinding back
+/// through this function's stack frame would drop it the ordinary way,
+/// recursing on whatever block/inline nesting triggered the failure in the
+/// first place. In a `panic = unwind` build (what `cargo test` uses), that
+/// turns a clean assertion failure into a second, independent stack-overflow
+/// abort on the way out -- exactly the "crash in the test code, not the code
+/// under test" confusion this whole check exists to avoid. Tearing `doc`
+/// down first means nothing borrows or owns it by the time an assertion can
+/// panic.
 fn adapter(a: &dyn Adapter, data: &[u8], source_path: &str) {
     if let Ok((doc, assets)) = a.parse(data, source_path) {
+        let depth = max_inline_depth(&doc);
+        kasane_ir::teardown_document(doc);
         assert_assets_contained(&assets);
-        assert_inline_depth_bounded(&doc);
-        // `assert_inline_depth_bounded` makes the WALK safe; without this,
-        // the ordinary, compiler-derived `Drop` when `doc` falls out of scope
-        // at the end of this `if let` would still abort the process on a
-        // hostile input's block nesting -- see `teardown_document`'s doc
-        // comment below, and `kasane_core::nav::teardown_document`, which
-        // this mirrors for the identical reason.
-        teardown_document(doc);
-    }
-}
-
-/// Tear `doc` down with an explicit worklist rather than letting the
-/// compiler-derived `Drop` on `Block`/`Inline` recurse on block/inline
-/// nesting depth. Block nesting (`Block::List`/`Block::Footnote`) has no
-/// depth bound anywhere in this codebase (see `assert_inline_depth_bounded`'s
-/// doc comment), so a hostile or fuzzer-found document's `Document` value can
-/// be arbitrarily deep, and dropping it the ordinary way would abort the
-/// process on the way out of `adapter()` even though every walk over it
-/// above is now bounded. This is the same fix, for the same reason, as
-/// `kasane_core::nav::teardown_document` -- duplicated here rather than
-/// shared because `kasane-core`'s copy is private to that crate and this is
-/// a small, self-contained utility.
-fn teardown_document(doc: Document) {
-    let mut blocks: Vec<Block> = doc.nodes.into_iter().map(|n| n.block).collect();
-    while let Some(b) = blocks.pop() {
-        match b {
-            Block::Heading { inlines, .. } | Block::Para(inlines) => teardown_inlines(inlines),
-            Block::List { items, .. } => {
-                for item in items {
-                    blocks.extend(item);
-                }
-            }
-            Block::Table(t) => {
-                for c in t.header {
-                    teardown_inlines(c);
-                }
-                for r in t.rows {
-                    for c in r {
-                        teardown_inlines(c);
-                    }
-                }
-            }
-            Block::Figure { caption, .. } => teardown_inlines(caption),
-            Block::Footnote { blocks: inner, .. } => blocks.extend(inner),
-            Block::CodeBlock { .. } | Block::MathBlock(_) | Block::Raw { .. } => {}
-        }
-    }
-}
-
-fn teardown_inlines(inls: Vec<Inline>) {
-    let mut stack = inls;
-    while let Some(i) = stack.pop() {
-        match i {
-            Inline::Emph(x) | Inline::Strong(x) => stack.extend(x),
-            Inline::Link { inlines, .. } => stack.extend(inlines),
-            Inline::Text(_) | Inline::Code(_) | Inline::Math(_) | Inline::FootnoteRef(_) => {}
-        }
+        assert_depth_bounded(depth);
     }
 }
 
@@ -114,7 +73,7 @@ fn teardown_inlines(inls: Vec<Inline>) {
 /// and `kasane-writer` walk INLINE nesting (`Inline::Emph`/`Strong`/`Link`)
 /// recursively, so IR nested past `kasane_ir::MAX_INLINE_DEPTH` aborts the
 /// process on a stack overflow rather than failing recoverably. No adapter
-/// may produce it. Asserted against the core's safety bound rather than any
+/// may produce it. Checked against the core's safety bound rather than any
 /// one adapter's flattening bound, because the core's is the value that
 /// decides whether the process survives.
 ///
@@ -123,22 +82,22 @@ fn teardown_inlines(inls: Vec<Inline>) {
 /// parser's `frames` stack, not in `kasane-core`, not here. A hostile or
 /// fuzzer-found document can nest lists or footnotes arbitrarily deep, and
 /// this function does not check that depth at all (nesting a list contributes
-/// nothing to the value asserted below -- only the inline content reachable
+/// nothing to the value computed below -- only the inline content reachable
 /// through it does).
 ///
 /// Both traversals below are therefore iterative, over an explicit worklist,
 /// rather than function-call recursion -- on the block side because that
 /// nesting is unbounded by construction, and on the inline side because the
-/// bound this assertion exists to check is exactly what a hostile input may
-/// be violating: assuming inline nesting is already shallow before checking
+/// bound this check exists to enforce is exactly what a hostile input may be
+/// violating: assuming inline nesting is already shallow before checking
 /// whether it's shallow is circular, and disabling an adapter's own flattening
 /// bound (as this task's design spec does, to prove its seed reaches the bug)
 /// demonstrates a recursive inline walk is not safe either. A recursive
-/// version of either traversal can overflow *this assertion's own* stack
-/// before ever reaching the `assert!` below -- in a fuzz seam that reads as a
+/// version of either traversal can overflow *this function's own* stack
+/// before ever returning a value to check -- in a fuzz seam that reads as a
 /// crash in the test code, not in the adapter or core code under test, which
 /// sends anyone triaging it in the wrong direction.
-fn assert_inline_depth_bounded(doc: &Document) {
+fn max_inline_depth(doc: &Document) -> usize {
     // Max nesting depth of Emph/Strong/Link wrappers reachable from `inls`,
     // via an explicit stack of (slice, depth-of-this-slice) frames. Each
     // wrapper records `depth + 1` as a candidate max and pushes its own
@@ -194,15 +153,31 @@ fn assert_inline_depth_bounded(doc: &Document) {
         max_depth
     }
 
-    for node in &doc.nodes {
-        let d = block_depth(&node.block);
-        assert!(
-            d <= kasane_ir::MAX_INLINE_DEPTH,
-            "inline nesting depth {} exceeds MAX_INLINE_DEPTH {}",
-            d,
-            kasane_ir::MAX_INLINE_DEPTH
-        );
-    }
+    doc.nodes
+        .iter()
+        .map(|node| block_depth(&node.block))
+        .max()
+        .unwrap_or(0)
+}
+
+fn assert_depth_bounded(depth: usize) {
+    assert!(
+        depth <= kasane_ir::MAX_INLINE_DEPTH,
+        "inline nesting depth {} exceeds MAX_INLINE_DEPTH {}",
+        depth,
+        kasane_ir::MAX_INLINE_DEPTH
+    );
+}
+
+/// Convenience wrapper over `max_inline_depth` + `assert_depth_bounded` for
+/// callers (tests only, hence `#[cfg(test)]`: `adapter()` needs the
+/// teardown-ordering dance and does not use this) that hold a `&Document` and
+/// want the check without also owning a deeply-nested `doc` past the call
+/// that a panic here would then have to unwind through and drop. See
+/// `adapter()`'s doc comment.
+#[cfg(test)]
+fn assert_inline_depth_bounded(doc: &Document) {
+    assert_depth_bounded(max_inline_depth(doc));
 }
 
 /// AGENTS.md: "No path traversal: sanitize archive entry names and asset
@@ -425,29 +400,10 @@ mod tests {
         }
     }
 
-    /// Block nesting (`Block::List`/`Block::Footnote`) has no depth bound
-    /// anywhere in this codebase -- see the doc comment on
-    /// `assert_inline_depth_bounded`. Before that traversal was made
-    /// iterative, walking a document shaped like this one overflowed the
-    /// assertion helper's OWN stack before it ever reached an `assert!` --
-    /// confirmed locally against the pre-fix recursive form at this depth:
-    /// `thread '...' has overflowed its stack` / `SIGABRT`, not a clean test
-    /// failure. In a fuzz seam that reads as a crash in the test code, not
-    /// the adapter or core code this assertion exists to check.
-    ///
-    /// 100_000 is comfortably past where the overflow was observed by hand
-    /// at 5_000 (see this task's report for the reproduction).
-    #[test]
-    fn assert_inline_depth_bounded_survives_deeply_nested_lists() {
-        const DEPTH: usize = 100_000;
-        let mut blocks = vec![Block::Para(vec![Inline::Text("bottom".into())])];
-        for _ in 0..DEPTH {
-            blocks = vec![Block::List {
-                ordered: false,
-                items: vec![blocks],
-            }];
-        }
-        let doc = Document {
+    /// Wraps `blocks` in a minimal `Document`, one node per top-level block --
+    /// shared boilerplate for the two deep-nesting regression tests below.
+    fn doc_from_blocks(blocks: Vec<Block>) -> Document {
+        Document {
             meta: DocMeta {
                 title: "T".into(),
                 authors: vec![],
@@ -462,18 +418,75 @@ mod tests {
                     prov: Provenance::default(),
                 })
                 .collect(),
-        };
+        }
+    }
+
+    /// Block nesting (`Block::List`/`Block::Footnote`) has no depth bound
+    /// anywhere in this codebase -- see the doc comment on
+    /// `max_inline_depth`. Before that traversal was made iterative, walking
+    /// a document shaped like this one overflowed the depth computation's OWN
+    /// stack before it ever returned a value -- confirmed locally against the
+    /// pre-fix recursive form at this depth: `thread '...' has overflowed its
+    /// stack` / `SIGABRT`, not a clean test failure. In a fuzz seam that
+    /// reads as a crash in the test code, not the adapter or core code this
+    /// check exists to guard.
+    ///
+    /// 100_000 is comfortably past where the overflow was observed by hand at
+    /// 5_000 (see this task's report for the reproduction).
+    #[test]
+    fn assert_inline_depth_bounded_survives_deeply_nested_lists() {
+        const DEPTH: usize = 100_000;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("bottom".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+        let doc = doc_from_blocks(blocks);
         // Must return normally rather than aborting the process. Block
         // nesting depth is not itself bounded or measured here -- only
         // inline nesting is -- so a document with zero inline nesting but
-        // 100_000-deep block nesting must pass cleanly.
+        // 100_000-deep block nesting must pass cleanly. Depth here is 0, so
+        // this cannot panic -- safe to call before tearing `doc` down (unlike
+        // `adapter()`, which cannot make that assumption about arbitrary
+        // fuzzer input).
         assert_inline_depth_bounded(&doc);
         // Mirrors `adapter()`: tear `doc` down explicitly rather than letting
-        // it fall out of scope here, which -- independent of the assertion
-        // above -- would recurse on this same 100_000-deep block nesting via
-        // the compiler-derived `Drop` and abort the process regardless of
-        // how the assertion traversal is implemented.
-        teardown_document(doc);
+        // it fall out of scope here, which -- independent of the check above
+        // -- would recurse on this same 100_000-deep block nesting via the
+        // compiler-derived `Drop` and abort the process regardless of how the
+        // traversal is implemented.
+        kasane_ir::teardown_document(doc);
+    }
+
+    /// Guards the iterative rewrite of `inline_depth` (inside
+    /// `max_inline_depth`) against a silent revert to the brief's recursive
+    /// form. The committed `fuzz/seeds/epub/deep-nesting.epub` only reaches
+    /// inline depth 64 (Task 2's adapter bound) -- comfortably inside
+    /// recursive-safe territory -- so replaying it alone would not catch a
+    /// regression here; a reverted recursive `inline_depth` would still pass
+    /// the whole suite otherwise.
+    ///
+    /// This calls `max_inline_depth` directly rather than
+    /// `assert_inline_depth_bounded`: 100_000 exceeds
+    /// `kasane_ir::MAX_INLINE_DEPTH`, so the latter would panic with `doc`
+    /// still an owned local, unwinding through this test's own stack frame --
+    /// exactly the ordering hazard `adapter()`'s doc comment describes. What's
+    /// under test here is only "does the depth computation complete without
+    /// aborting," not "does the bound-check fire" (a separate, one-line
+    /// comparison a recursion revert would not break).
+    #[test]
+    fn max_inline_depth_survives_deeply_nested_inlines() {
+        const DEPTH: usize = 100_000;
+        let mut inline = Inline::Text("bottom".into());
+        for _ in 0..DEPTH {
+            inline = Inline::Emph(vec![inline]);
+        }
+        let doc = doc_from_blocks(vec![Block::Para(vec![inline])]);
+        let depth = max_inline_depth(&doc); // must return normally, not abort
+        assert_eq!(depth, DEPTH);
+        kasane_ir::teardown_document(doc);
     }
 
     #[test]
