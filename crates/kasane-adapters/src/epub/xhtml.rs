@@ -58,6 +58,16 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 64;
 /// no text is lost -- but the cross-reference link is.
 pub(crate) const MAX_BLOCK_DEPTH: usize = 32;
 
+// The two-bound design is only sound while this holds: adapter IR must not
+// be able to reach the safety bound that the core and writer walks stop at.
+// A `const` assertion rather than a `#[test]` on purpose -- this is the one
+// invariant that spans both crates, and a bad edit should fail the BUILD
+// rather than wait for someone to run the suite.
+const _: () = assert!(
+    MAX_BLOCK_DEPTH * 4 <= kasane_ir::MAX_BLOCK_DEPTH,
+    "epub::xhtml::MAX_BLOCK_DEPTH must stay at most a quarter of kasane_ir::MAX_BLOCK_DEPTH"
+);
+
 // Open block containers. Finished blocks land in the top frame instead of the
 // output; closing the container folds the frame into its parent. This is what
 // makes nesting (list items holding paragraphs, lists holding lists)
