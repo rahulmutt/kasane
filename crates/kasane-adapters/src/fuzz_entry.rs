@@ -86,11 +86,13 @@ fn adapter(a: &dyn Adapter, data: &[u8], source_path: &str) {
 /// inline content reachable through it does.
 ///
 /// Both traversals below are therefore iterative, over an explicit worklist,
-/// rather than function-call recursion -- on the block side because that
-/// nesting is unbounded by construction, and on the inline side because the
-/// bound this check exists to enforce is exactly what a hostile input may be
-/// violating: assuming inline nesting is already shallow before checking
-/// whether it's shallow is circular, and disabling an adapter's own flattening
+/// rather than function-call recursion -- on the block side because the bound
+/// this check enforces is exactly what a hostile adapter may be producing, so
+/// assuming block nesting is already shallow before checking whether it's
+/// shallow is circular, and on the inline side because the bound this check
+/// exists to enforce is exactly what a hostile input may be violating:
+/// assuming inline nesting is already shallow before checking whether it's
+/// shallow is circular, and disabling an adapter's own flattening
 /// bound (as this task's design spec does, to prove its seed reaches the bug)
 /// demonstrates a recursive inline walk is not safe either. A recursive
 /// version of either traversal can overflow *this function's own* stack
@@ -490,15 +492,15 @@ mod tests {
         }
     }
 
-    /// Block nesting (`Block::List`/`Block::Footnote`) has no depth bound
-    /// anywhere in this codebase -- see the doc comment on
-    /// `max_inline_depth`. Before that traversal was made iterative, walking
-    /// a document shaped like this one overflowed the depth computation's OWN
-    /// stack before it ever returned a value -- confirmed locally against the
-    /// pre-fix recursive form at this depth: `thread '...' has overflowed its
-    /// stack` / `SIGABRT`, not a clean test failure. In a fuzz seam that
-    /// reads as a crash in the test code, not the adapter or core code this
-    /// check exists to guard.
+    /// Block nesting (`Block::List`/`Block::Footnote`) is bounded
+    /// (fidelity: `epub::xhtml::MAX_BLOCK_DEPTH` = 32, safety:
+    /// `kasane_ir::MAX_BLOCK_DEPTH` = 128); see `max_block_depth` below.
+    /// Before that traversal was made iterative, walking a document shaped like
+    /// this one overflowed the depth computation's OWN stack before it ever
+    /// returned a value -- confirmed locally against the pre-fix recursive form
+    /// at this depth: `thread '...' has overflowed its stack` / `SIGABRT`, not a
+    /// clean test failure. In a fuzz seam that reads as a crash in the test
+    /// code, not the adapter or core code this check exists to guard.
     ///
     /// 100_000 is comfortably past where the overflow was observed by hand at
     /// 5_000 (see this task's report for the reproduction).

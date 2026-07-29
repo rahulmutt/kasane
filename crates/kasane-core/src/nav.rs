@@ -18,18 +18,14 @@ pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     // abort the process on the way out of this published entry point even
     // though every INLINE walk over it is now bounded.
     //
-    // Inline, and only inline. BLOCK nesting (`Block::List`/`Block::Footnote`)
-    // is **not bounded anywhere in this codebase** — the same fact
-    // `kasane-adapters`'s `fuzz_entry::max_inline_depth` states at length: not
-    // in the EPUB parser's `frames` stack, not in `kasane-core`, not in the
-    // writer. `section::clone_block`, `balance::est_tokens_block`,
-    // `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still
-    // recurse on it, so a document nesting lists or footnotes deeply enough
-    // still aborts the process on a stack overflow (README's Known
-    // limitations records it; bounding it is open work). What the call below
-    // buys is narrower, and worth stating precisely: on the *drop* side block
-    // nesting IS bounded, because `teardown_document` pops blocks from an
-    // explicit worklist too. The walk and clone sides are not.
+    // Both kinds of nesting are now bounded on every side. Block nesting has
+    // its own pair of constants (`epub::xhtml::MAX_BLOCK_DEPTH` for fidelity,
+    // `kasane_ir::MAX_BLOCK_DEPTH` for safety) and every recursive block walk
+    // in this crate and the writer carries the safety bound. The drop side
+    // was already safe and stays so: `teardown_document` pops blocks from an
+    // explicit worklist, which is why this call is still here rather than
+    // letting `doc` fall out of scope — a bounded walk protects the walk, not
+    // the compiler-derived `Drop` that runs afterwards.
     //
     // `kasane_ir::teardown_document` (shared with `kasane-adapters`'s fuzz
     // seam, which has the identical hazard for the identical reason) lives

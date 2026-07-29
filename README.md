@@ -138,13 +138,18 @@ See AGENTS.md for the codebase map.
   `02-section.md` whose in-book links point at `#section` while the rendered
   headings anchor as `#第二章` in GitHub, so those links do not resolve there.
   Filenames lose the title the same way. Widening the slug is open work.
-- Block nesting has no depth bound. Inline nesting does (see AGENTS.md), but
-  lists and footnotes are still walked, cloned and rendered recursively, so a
-  document that nests them deeply enough aborts the process with `fatal runtime
-  error: stack overflow` (SIGABRT, shell exit 134) instead of failing with an
-  error. Reproduced with a ~540 KB EPUB holding a 30,000-deep `<ul>`, stored
-  1:1 — no decompression bomb is involved, so none of the bomb guards apply.
-  Bounding it is open work.
+- Block nesting is bounded, and deep nesting flattens rather than failing.
+  Lists and footnotes nested past the EPUB parser's fidelity bound stop
+  producing further nesting: an over-deep list's items become siblings at the
+  bound's level and an over-deep footnote container becomes transparent. Every
+  text run survives — only the nesting relationship past the bound is lost.
+  A ~540 KB EPUB holding a 30,000-deep `<ul>` converts normally, where older
+  builds aborted with `fatal runtime error: stack overflow` (SIGABRT, shell
+  exit 134). The bound applies to EPUB and MOBI/AZW3 alike, since MOBI
+  re-serializes through the same parser. A second, higher bound in
+  `kasane-ir` protects the structuring engine and writer from hand-built
+  `Document`s passed to `structure()` by external callers; past it a
+  truncation note is emitted in place of the over-deep subtree.
 - DRM-protected MOBI/AZW3 files are detected and rejected (exit code 2);
   kasane never breaks DRM.
 - Math is recovered as LaTeX: MathML (EPUB) and OMML (PPTX) equations convert to

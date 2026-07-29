@@ -57,6 +57,12 @@ const BLOCK_LEVEL: &[&str] = &[
 // mutual recursion (see `deeply_nested_input_does_not_overflow_the_stack`),
 // so 500 leaves a healthy margin while still being far beyond any real
 // e-book's markup nesting (which rarely exceeds a few dozen levels).
+//
+// This bound is about `serialize`'s own mutual recursion and nothing further
+// downstream. It is no longer the value that decides whether the process
+// survives: the XHTML parser this feeds flattens block nesting at
+// `epub::xhtml::MAX_BLOCK_DEPTH`, far tighter than 500, so IR reaching the
+// core is bounded by that instead.
 const MAX_DEPTH: usize = 500;
 
 /// Parse sloppy MOBI-era HTML with html5ever (which applies real HTML5
