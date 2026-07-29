@@ -117,7 +117,16 @@ fn max_inline_depth(doc: &Document) -> usize {
                         max_depth = max_depth.max(depth + 1);
                         stack.push((inlines, depth + 1));
                     }
-                    _ => {}
+                    // Leaves, enumerated rather than caught by a wildcard: a
+                    // new wrapper variant must break this build, not silently
+                    // fall through and make the depth this function reports —
+                    // and therefore `assert_depth_bounded` — blind to it. Same
+                    // reasoning as `kasane_ir::teardown_inlines`'s exhaustive
+                    // match, for the same enum.
+                    Inline::Text(_)
+                    | Inline::Code(_)
+                    | Inline::Math(_)
+                    | Inline::FootnoteRef(_) => {}
                 }
             }
         }
@@ -147,7 +156,12 @@ fn max_inline_depth(doc: &Document) -> usize {
                         max_depth = max_depth.max(inline_depth(cell));
                     }
                 }
-                _ => {}
+                // Blocks with no inline content and no nested blocks,
+                // enumerated rather than caught by a wildcard for the same
+                // reason as the inline match above: a new block variant that
+                // carries inlines must fail to compile here instead of
+                // silently under-reporting the depth this check asserts on.
+                Block::CodeBlock { .. } | Block::MathBlock(_) | Block::Raw { .. } => {}
             }
         }
         max_depth

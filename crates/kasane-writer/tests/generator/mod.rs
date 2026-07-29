@@ -243,32 +243,45 @@ pub fn case() -> impl Strategy<Value = Case> {
 /// A case whose paragraphs additionally carry internal cross-references — some
 /// pointing at real generated headings, some dangling, so both the resolve path
 /// and the strip path (`refs.rs:63-68`) are exercised.
+///
+/// The target is drawn from *any* generated heading, not the first one. That is
+/// load-bearing coverage, not a stylistic preference: `fold_sections` always
+/// pushes the first heading in document order as a direct child of root, and
+/// `balance_node`'s merge requires `node.level > 0`, so root's children are
+/// never merged. Targeting `heading_ids.first()` therefore made the merged-
+/// subsection anchor — a heading demoted into its parent's body, anchored by
+/// `assign_paths`' body scan — structurally unreachable from this property.
 pub fn case_with_links() -> impl Strategy<Value = Case> {
-    (case(), any::<bool>()).prop_map(|(mut c, dangle)| {
-        let heading_ids: Vec<BlockId> = c
-            .doc
-            .nodes
-            .iter()
-            .filter_map(|n| match &n.block {
-                Block::Heading { id, .. } => Some(*id),
-                _ => None,
-            })
-            .collect();
-        let target = match (heading_ids.first(), dangle) {
-            (Some(id), false) => *id,
-            // No heading generated, or deliberately dangling: an id far past
-            // anything the generator assigns.
-            _ => BlockId(9_999),
-        };
-        for n in c.doc.nodes.iter_mut() {
-            if let Block::Para(inls) = &mut n.block {
-                inls.push(Inline::Link {
-                    target: RefTarget::Internal(target),
-                    inlines: vec![Inline::Text("see".into())],
-                });
-                break;
+    (case(), any::<bool>())
+        .prop_flat_map(|(c, dangle)| {
+            let heading_ids: Vec<BlockId> = c
+                .doc
+                .nodes
+                .iter()
+                .filter_map(|n| match &n.block {
+                    Block::Heading { id, .. } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            let target: BoxedStrategy<BlockId> = if dangle || heading_ids.is_empty() {
+                // No heading generated, or deliberately dangling: an id far past
+                // anything the generator assigns.
+                Just(BlockId(9_999)).boxed()
+            } else {
+                proptest::sample::select(heading_ids).boxed()
+            };
+            (Just(c), target)
+        })
+        .prop_map(|(mut c, target)| {
+            for n in c.doc.nodes.iter_mut() {
+                if let Block::Para(inls) = &mut n.block {
+                    inls.push(Inline::Link {
+                        target: RefTarget::Internal(target),
+                        inlines: vec![Inline::Text("see".into())],
+                    });
+                    break;
+                }
             }
-        }
-        c
-    })
+            c
+        })
 }

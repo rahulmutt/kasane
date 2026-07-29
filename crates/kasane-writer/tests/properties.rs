@@ -51,6 +51,14 @@ fn resolve_relative(from_file: &str, rel: &str) -> Option<String> {
 }
 
 /// Every `[text](target)` in a rendered file.
+///
+/// A `](` inside a fenced code block would be collected as a link too — and
+/// unlike `heading_slugs`' analogous imprecision, this one runs the *unsafe*
+/// direction: an extra "link" is one more target P2 demands resolve, so a
+/// false positive here is a false test failure, not merely a permissive check.
+/// It is safe today only because the generator's `Shape::Code` body is a bare
+/// sentinel token with no brackets. A generator that ever puts arbitrary text
+/// in a code block needs a real fence-skipping pass here first.
 fn links_in(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
@@ -78,11 +86,22 @@ fn links_in(text: &str) -> Vec<String> {
 /// A `#`-prefixed line inside a fenced code block would be counted too. That
 /// only makes P2 more permissive, never less, so it is not worth a Markdown
 /// parser here.
+///
+/// The emphasis markers *are* stripped first, and that one is not optional.
+/// The engine anchors a heading at `slug(inlines)`, which reduces through
+/// `inline_text` and therefore never sees a marker character; the rendered line
+/// comes from `inlines_to_md`, which writes `*`/`**` around `Emph`/`Strong` and
+/// backticks around `Code`. A demoted heading rendered as `## Chapter*One*`
+/// would otherwise slug to `chapter-one` here against the engine's `chapterone`
+/// — a false failure of P2, not a real one. `_` is stripped for the same reason
+/// even though `inlines_to_md` never emits it, so a writer that switches
+/// emphasis markers does not silently reintroduce the mismatch.
 fn heading_slugs(text: &str) -> HashSet<String> {
     text.lines()
         .filter_map(|l| l.strip_prefix('#'))
         .map(|l| l.trim_start_matches('#').trim())
-        .map(|t| slug_of(&[kasane_ir::Inline::Text(t.to_string())]))
+        .map(|t| t.replace(['*', '_', '`'], ""))
+        .map(|t| slug_of(&[kasane_ir::Inline::Text(t)]))
         .collect()
 }
 
@@ -251,6 +270,106 @@ proptest! {
         let b: Vec<_> = render(&case).into_iter().map(|(p, t, _)| (p, t)).collect();
         prop_assert_eq!(a, b, "structure + render is not deterministic");
     }
+}
+
+/// The merged-subsection anchor, pinned end to end and deterministically.
+///
+/// `balance_node` demotes a tiny childless subsection's heading into its
+/// parent's body as a real `Block::Heading` carrying the original `BlockId`;
+/// `assign_paths`' body scan is what gives that heading an anchor, so a
+/// cross-reference into it resolves instead of degrading to plain text. Those
+/// two halves and `file_to_markdown`'s title heading are the pair the design
+/// spec calls "only worth making together" — a link needs both a real file and
+/// a real anchor.
+///
+/// P2 covers this shape now that `case_with_links` draws its target from a
+/// random heading, but only statistically. This test fixes the exact shape so
+/// the coverage cannot silently lapse, and it renders (rather than inspecting
+/// `assign_paths` in isolation, which `paths.rs`'s own unit test already does)
+/// because the claim is about text a reader's Markdown viewer will follow.
+#[test]
+fn merged_subsection_anchor_renders_as_a_heading() {
+    use kasane_ir::{AssetBag, BlockId, DocMeta, Document, Inline, Node, Provenance, RefTarget};
+
+    fn node(block: Block) -> Node {
+        Node {
+            block,
+            prov: Provenance::default(),
+        }
+    }
+    fn heading(level: u8, id: u32, title: &str) -> Node {
+        node(Block::Heading {
+            level,
+            id: BlockId(id),
+            inlines: vec![Inline::Text(title.into())],
+        })
+    }
+    fn para(text: &str) -> Node {
+        node(Block::Para(vec![Inline::Text(text.into())]))
+    }
+
+    let doc = Document {
+        meta: DocMeta {
+            title: "Pinned Book".into(),
+            authors: vec![],
+            language: None,
+            source_format: "epub".into(),
+            source_path: "pinned.epub".into(),
+        },
+        nodes: vec![
+            heading(1, 0, "Parent Chapter"),
+            para("some parent body text that keeps this section from being tiny itself"),
+            // Childless and far under `min_tokens`: exactly what the merge
+            // branch absorbs into the parent above.
+            heading(2, 1, "Tiny Child"),
+            para("tiny"),
+            // A separate top-level section, so the emitted reference is a real
+            // cross-file `path#slug` rather than a bare fragment.
+            heading(1, 2, "Other Chapter"),
+            node(Block::Para(vec![Inline::Link {
+                target: RefTarget::Internal(BlockId(1)),
+                inlines: vec![Inline::Text("the tiny bit".into())],
+            }])),
+        ],
+    };
+
+    let opts = kasane_core::Options {
+        max_tokens: 2000,
+        min_tokens: 100,
+    };
+    let files: HashMap<String, String> = structure(doc, &opts)
+        .files
+        .into_iter()
+        .map(|f| {
+            let text = kasane_writer::file_to_markdown(&f, &AssetBag::default());
+            (f.path.clone(), text)
+        })
+        .collect();
+
+    let other = files
+        .get("02-other-chapter.md")
+        .expect("the linking section is its own file");
+    let targets = links_in(other);
+    assert_eq!(
+        targets,
+        vec!["01-parent-chapter.md#tiny-child".to_string()],
+        "the merged subsection must be referenced by file and anchor, not stripped to plain text"
+    );
+
+    let (path, anchor) = targets[0].split_once('#').unwrap();
+    let parent = files.get(path).expect("the anchor's file must exist");
+    assert!(
+        parent.contains("## Tiny Child"),
+        "the demoted heading must be rendered in {path}, got:\n{parent}"
+    );
+    assert!(
+        heading_slugs(parent).contains(anchor),
+        "anchor #{anchor} must be a rendered heading in {path}, got:\n{parent}"
+    );
+    // It is the *demoted* heading, not the file's own title heading, that
+    // carries this anchor — the two must not be the same slug, or the test
+    // would pass without the merge path working at all.
+    assert_ne!(anchor, "parent-chapter");
 }
 
 /// Whether any inline anywhere in this block is still a symbolic internal ref.
