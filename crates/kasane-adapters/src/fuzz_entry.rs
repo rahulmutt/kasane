@@ -17,7 +17,7 @@ use crate::math::{capture_island, mathml_to_latex, omml_to_latex};
 use crate::mobi::palmdoc::decompress;
 use crate::xmltext::resolve_general_ref;
 use crate::{Adapter, DjvuAdapter, EpubAdapter, MobiAdapter, PdfAdapter, PptxAdapter};
-use kasane_ir::AssetBag;
+use kasane_ir::{AssetBag, Block, Document, Inline};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::io::Write as _;
@@ -48,8 +48,55 @@ pub fn djvu(data: &[u8]) {
 /// A rejected parse is a perfectly good outcome — most fuzzer inputs are not
 /// valid documents. Only a *successful* parse has assets worth checking.
 fn adapter(a: &dyn Adapter, data: &[u8], source_path: &str) {
-    if let Ok((_doc, assets)) = a.parse(data, source_path) {
+    if let Ok((doc, assets)) = a.parse(data, source_path) {
         assert_assets_contained(&assets);
+        assert_inline_depth_bounded(&doc);
+    }
+}
+
+/// Design spec `2026-07-29-core-property-tier-design.md` §2.2: `kasane-core` and
+/// `kasane-writer` walk inlines recursively, so IR nested past
+/// `kasane_ir::MAX_INLINE_DEPTH` aborts the process on a stack overflow rather
+/// than failing recoverably. No adapter may produce it. Asserted against the
+/// core's safety bound rather than any one adapter's flattening bound, because
+/// the core's is the value that decides whether the process survives.
+fn assert_inline_depth_bounded(doc: &Document) {
+    fn inline_depth(inls: &[Inline]) -> usize {
+        inls.iter()
+            .map(|i| match i {
+                Inline::Emph(x) | Inline::Strong(x) => 1 + inline_depth(x),
+                Inline::Link { inlines, .. } => 1 + inline_depth(inlines),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn block_depth(b: &Block) -> usize {
+        match b {
+            Block::Heading { inlines, .. } | Block::Para(inlines) => inline_depth(inlines),
+            Block::Figure { caption, .. } => inline_depth(caption),
+            Block::List { items, .. } => items.iter().flatten().map(block_depth).max().unwrap_or(0),
+            Block::Footnote { blocks, .. } => blocks.iter().map(block_depth).max().unwrap_or(0),
+            Block::Table(t) => t
+                .header
+                .iter()
+                .chain(t.rows.iter().flatten())
+                .map(|c| inline_depth(c))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    for node in &doc.nodes {
+        let d = block_depth(&node.block);
+        assert!(
+            d <= kasane_ir::MAX_INLINE_DEPTH,
+            "inline nesting depth {} exceeds MAX_INLINE_DEPTH {}",
+            d,
+            kasane_ir::MAX_INLINE_DEPTH
+        );
     }
 }
 

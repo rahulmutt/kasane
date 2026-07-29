@@ -21,6 +21,25 @@ fn converts_minimal_epub_to_tree() {
 }
 
 #[test]
+fn converts_a_deeply_nested_epub_without_aborting() {
+    // fuzz/seeds/epub/deep-nesting.epub nests <em> 5000 deep. Before the two
+    // depth bounds landed (design spec 2026-07-29 §2.2) this aborted the
+    // process on a stack overflow in the core's and writer's inline walks --
+    // which, in batch mode, would have taken every other worker down with it.
+    let out = tempfile::tempdir().unwrap();
+    let out_dir = out.path().join("deep");
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg("../../fuzz/seeds/epub/deep-nesting.epub")
+        .arg("-o")
+        .arg(&out_dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "conversion failed: {:?}", status);
+    let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
+    assert!(idx.contains("title: Deep Nesting"));
+}
+
+#[test]
 fn converts_rich_epub_with_full_fidelity() {
     let out = tempfile::tempdir().unwrap();
     let out_dir = out.path().join("rich");
