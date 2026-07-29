@@ -40,7 +40,7 @@ and hands it downstream intact. Every abort is in a consumer.
 
 - `crates/kasane-adapters/src/epub/xhtml.rs` — the fidelity bound (§2).
 - `crates/kasane-ir/src/lib.rs` — the safety constant (§3).
-- The seven recursive block walks across three crates (§3).
+- The six recursive block walks across three crates (§3).
 - `crates/kasane-adapters/src/fuzz_entry.rs` — a block-depth assertion, plus
   one new committed seed (§5).
 - `crates/kasane-writer/tests/generator/` — nested-list generation (§5).
@@ -74,10 +74,17 @@ check a single length comparison rather than a filtered count that has to be
 kept in sync with the enum.
 
 When a frame-pushing start tag arrives while `frames.len()` is already at
-`MAX_BLOCK_DEPTH`, no new frame is pushed. The tag's content is contributed to
-the enclosing item as sibling blocks instead. In practice the tags that reach
-this are `<ul>`, `<ol>` and the footnote container (`<aside>` carrying
+`MAX_BLOCK_DEPTH`, no new frame is pushed. In practice the tags that reach this
+are `<ul>`, `<ol>` and the footnote container (`<aside>` carrying
 `epub:type="footnote"`), since those are the two frame kinds that can chain.
+
+What that does to the output follows from the existing handlers, and is worth
+stating exactly rather than approximately. With no `List` frame pushed, the
+suppressed list's `<li>` handler pushes its item into the *enclosing* `List`
+frame — so the over-deep list's items become sibling **items** at the bound's
+level, not nested ones. A suppressed footnote `<aside>` becomes transparent and
+its blocks emit into the enclosing frame. Either way every text run survives
+and only the nesting relationship is lost.
 
 **Nothing is dropped.** Text past the bound survives; only the nesting
 structure collapses to the bound's level. This is the exact analogue of
@@ -85,10 +92,17 @@ structure collapses to the bound's level. This is the exact analogue of
 distinguishes this bound from MOBI's `normalize.rs` `MAX_DEPTH`, which drops.
 
 Because a suppressed open pushed no frame, the matching end tag must not pop
-one. The parser therefore carries a counter of suppressed opens and decrements
-it on the matching close before considering a real pop. Getting this wrong
-would unbalance `frames` and corrupt every block after the deep list, not just
-the deep list — so it is asserted directly (§5).
+one. This is a live hazard, not a theoretical one: the `</ul>` handler's guard
+is `matches!(frames.last(), Some(BlockFrame::List { .. }))`, which is still
+*true* when a suppressed `</ul>` closes inside an enclosing list — so without a
+tracker it would pop the parent list and unbalance `frames`, corrupting every
+block after the deep list rather than only the deep list.
+
+The parser already has the pattern to copy: `aside_pushed: Vec<bool>` mirrors
+`<aside>` nesting precisely so the End handler knows whether a given close
+corresponds to a frame it opened. Footnote suppression therefore needs no new
+mechanism — push `false` instead of `true`. Lists need the same tracker added,
+`list_pushed: Vec<bool>`. Frame balance is asserted directly (§5).
 
 ### 2.3 One site covers three formats
 
@@ -116,8 +130,8 @@ never reach it, because §2's fidelity bound is strictly lower — an ordering
 invariant stated in both constants' doc comments, exactly as the inline pair
 states it.
 
-`depth: usize` is threaded through all seven recursive block walks, the same
-shape as `clone_inlines_at` / `fix_inlines_at` / `inl_at`:
+`depth: usize` is threaded through all six recursive block walks, the same shape
+as `clone_inlines_at` / `fix_inlines_at` / `inl_at`:
 
 | Walk | Crate | Behaviour at the bound |
 |---|---|---|
@@ -127,7 +141,6 @@ shape as `clone_inlines_at` / `fix_inlines_at` / `inl_at`:
 | `markdown::render_block` | writer | emit the note text |
 | `epub::fix_block_links` | adapters | return |
 | `mobi::strip_empty_anchor_links` | adapters | return |
-| `mobi::any_empty_anchor_link_in_blocks` | adapters | return |
 
 `clone_block` is the first core walk to touch the IR, so truncation happens
 exactly once, and every later core and writer walk sees already-shallow blocks.
@@ -135,18 +148,23 @@ Their bounds are defence in depth, not the load-bearing check. Stating which
 walk is load-bearing is the point: a reader must not conclude from the table
 that four independent truncations can stack.
 
-The three adapter-side walks run on parser output that §2 already keeps
-shallow, so they are unreachable in practice. They get the bound anyway, so the
+The two adapter-side walks run on parser output that §2 already keeps shallow,
+so they are unreachable in practice. They get the bound anyway, so the
 invariant does not depend on which adapter fed them.
+
+A third recursive block walk exists in `mobi/mod.rs`,
+`any_empty_anchor_link_in_blocks`, but it is inside `mod tests` and runs only
+over a committed fixture. It is left alone deliberately: bounding a test helper
+would suggest it is part of the production hazard surface when it is not.
 
 ### 3.1 The inventory AGENTS.md gives is incomplete
 
 AGENTS.md names four walks (`section::clone_block`, `balance::est_tokens_block`,
-`refs::fix_block`, `kasane_writer::blocks_to_markdown`). There are seven. The
-three it omits are the adapter-side ones above — and `epub::fix_block_links`
-runs on **every** EPUB and MOBI parse, before `structure()` is ever called. A
-core-only bound would therefore not have fixed the reported reproducer. §6
-corrects the list.
+`refs::fix_block`, `kasane_writer::blocks_to_markdown`). There are six in
+production. The two it omits are the adapter-side ones above — and
+`epub::fix_block_links` runs on **every** EPUB and MOBI parse, before
+`structure()` is ever called. A core-only bound would therefore not have fixed
+the reported reproducer. §6 corrects the list.
 
 ## 4. Choosing the values
 
@@ -231,7 +249,7 @@ Plus the sentence on `normalize.rs`'s `MAX_DEPTH` from §2.3.
 
 ## 7. Approaches considered
 
-**Rewrite the seven walks iteratively, with no bound at all** (the shape
+**Rewrite the six walks iteratively, with no bound at all** (the shape
 `kasane_ir::teardown_document` already uses on the drop side). No constant, no
 fidelity/safety split, no depth at which anything is lost. Rejected on
 reviewability: `render_block` interleaves strings while descending — list items
