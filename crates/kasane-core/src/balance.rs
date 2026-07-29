@@ -72,15 +72,21 @@ pub(crate) fn est_tokens_blocks(blocks: &[Block]) -> usize {
 }
 
 fn est_tokens_block(b: &Block) -> usize {
-    fn inl(is: &[Inline]) -> usize {
+    fn inl_at(is: &[Inline], depth: usize) -> usize {
+        if depth >= kasane_ir::MAX_INLINE_DEPTH {
+            return 0;
+        }
         is.iter()
             .map(|i| match i {
                 Inline::Text(s) | Inline::Code(s) | Inline::Math(s) => s.len(),
-                Inline::Emph(x) | Inline::Strong(x) => inl(x),
-                Inline::Link { inlines, .. } => inl(inlines),
+                Inline::Emph(x) | Inline::Strong(x) => inl_at(x, depth + 1),
+                Inline::Link { inlines, .. } => inl_at(inlines, depth + 1),
                 Inline::FootnoteRef(_) => 4,
             })
             .sum()
+    }
+    fn inl(is: &[Inline]) -> usize {
+        inl_at(is, 0)
     }
     let chars = match b {
         Block::Heading { inlines, .. } | Block::Para(inlines) => inl(inlines),

@@ -83,15 +83,22 @@ pub(crate) fn slug(inlines: &[Inline]) -> String {
 
 pub(crate) fn inline_text(inlines: &[Inline]) -> String {
     let mut s = String::new();
+    inline_text_at(inlines, 0, &mut s);
+    s
+}
+
+fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return;
+    }
     for i in inlines {
         match i {
             Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => s.push_str(t),
-            Inline::Emph(x) | Inline::Strong(x) => s.push_str(&inline_text(x)),
-            Inline::Link { inlines, .. } => s.push_str(&inline_text(inlines)),
+            Inline::Emph(x) | Inline::Strong(x) => inline_text_at(x, depth + 1, s),
+            Inline::Link { inlines, .. } => inline_text_at(inlines, depth + 1, s),
             Inline::FootnoteRef(_) => {}
         }
     }
-    s
 }
 
 #[cfg(test)]
