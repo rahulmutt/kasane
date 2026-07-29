@@ -6,9 +6,35 @@ pub use library::{write_library_index, LibraryEntry, LibraryFailure};
 pub use markdown::blocks_to_markdown;
 
 use anyhow::{bail, Context, Result};
-use kasane_core::SiteTree;
+use kasane_core::{FileNode, SiteTree};
 use kasane_ir::AssetBag;
 use std::path::Path;
+
+/// Renders one file's body: its title as a heading, then its blocks.
+///
+/// The title heading is what makes cross-references resolvable. `fold_sections`
+/// consumes a section's heading into `SectionNode.title` and never re-emits it,
+/// while `assign_paths` records the section's anchor as `path#slug(title)` — so
+/// without a heading rendered here, every internal link points at an anchor no
+/// file contains (design spec `2026-07-29-core-property-tier-design.md` §2.1).
+///
+/// It lives here rather than in `blocks_to_markdown` because that function takes
+/// `&[Block]` and never sees a `Frontmatter`, and rather than in
+/// `write_tree_contents` because the property suite renders without touching the
+/// filesystem and must see byte-identical output.
+pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
+    let level = file.frontmatter.breadcrumb.len().clamp(1, 6);
+    let mut out = String::new();
+    for _ in 0..level {
+        out.push('#');
+    }
+    out.push(' ');
+    out.push_str(&file.frontmatter.title);
+    out.push('\n');
+    out.push('\n');
+    out.push_str(&blocks_to_markdown(&file.blocks, assets));
+    out
+}
 
 pub fn write_tree(tree: &SiteTree, assets: &AssetBag, out: &Path, force: bool) -> Result<()> {
     if out.exists() {
@@ -67,7 +93,7 @@ fn write_tree_contents(tree: &SiteTree, assets: &AssetBag, tmp: &Path) -> Result
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p)?;
         }
-        let body = blocks_to_markdown(&file.blocks, assets);
+        let body = file_to_markdown(file, assets);
         let content = format!(
             "---\n{}---\n\n{}",
             frontmatter::frontmatter_yaml(&file.frontmatter),
@@ -171,5 +197,47 @@ mod tests {
         let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
         assert!(idx.contains("# Book"));
         assert!(!out.join("old.md").exists());
+    }
+
+    #[test]
+    fn file_to_markdown_opens_with_the_title_heading() {
+        use crate::file_to_markdown;
+        let file = FileNode {
+            path: "01-intro/02-background.md".into(),
+            frontmatter: Frontmatter {
+                title: "Background".into(),
+                breadcrumb: vec!["Book".into(), "Intro".into(), "Background".into()],
+                parent: Some("index.md".into()),
+                prev: None,
+                next: None,
+                children: vec![],
+                source_pages: None,
+            },
+            blocks: vec![Block::Para(vec![Inline::Text("body".into())])],
+        };
+        let md = file_to_markdown(&file, &AssetBag::default());
+        // breadcrumb depth 3 -> "###"
+        assert!(md.starts_with("### Background\n"), "got: {:?}", md);
+        assert!(md.contains("body"));
+    }
+
+    #[test]
+    fn title_heading_level_is_clamped_to_six() {
+        use crate::file_to_markdown;
+        let file = FileNode {
+            path: "a/b/c/d/e/f/g.md".into(),
+            frontmatter: Frontmatter {
+                title: "Deep".into(),
+                breadcrumb: (0..9).map(|i| format!("L{}", i)).collect(),
+                parent: None,
+                prev: None,
+                next: None,
+                children: vec![],
+                source_pages: None,
+            },
+            blocks: vec![],
+        };
+        let md = file_to_markdown(&file, &AssetBag::default());
+        assert!(md.starts_with("###### Deep\n"), "got: {:?}", md);
     }
 }

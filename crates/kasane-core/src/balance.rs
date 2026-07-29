@@ -20,19 +20,33 @@ fn balance_node(node: &mut SectionNode, opts: &Options) {
             && child.children.is_empty()
             && est_tokens_blocks(&child.body) < opts.min_tokens;
         if small {
-            // demote heading to a bold lead-in para, then append its body
+            // Demote the heading into the parent's body. A real `Block::Heading`
+            // carrying the original `BlockId` is what lets `assign_paths` give
+            // it an anchor, so a cross-reference into a merged subsection
+            // resolves instead of degrading to plain text. A synthetic split
+            // part has `id: None` and nothing can link to it, so it keeps the
+            // bold lead-in.
+            //
+            // `balance` is exported and `SectionTree`/`SectionNode` are
+            // all-`pub` fields, so a caller can hand-build a tree with an
+            // arbitrarily deep title and call `balance` directly without ever
+            // going through `fold_sections`'s bounded clone. Clone through the
+            // same bounded helper here so this site can't reintroduce the
+            // unbounded-clone abort on that path.
             if !child.title.is_empty() {
-                // `balance` is exported and `SectionTree`/`SectionNode` are
-                // all-`pub` fields, so a caller can hand-build a tree with an
-                // arbitrarily deep title and call `balance` directly without
-                // ever going through `fold_sections`'s bounded clone. Clone
-                // through the same bounded helper here so this site can't
-                // reintroduce the unbounded-clone abort on that path.
-                node.body
-                    .push(Block::Para(vec![Inline::Strong(clone_inlines_at(
-                        &child.title,
-                        0,
-                    ))]));
+                match child.id {
+                    Some(id) => node.body.push(Block::Heading {
+                        level: child.level,
+                        id,
+                        inlines: clone_inlines_at(&child.title, 0),
+                    }),
+                    None => node
+                        .body
+                        .push(Block::Para(vec![Inline::Strong(clone_inlines_at(
+                            &child.title,
+                            0,
+                        ))])),
+                }
             }
             node.body.extend(child.body);
         } else {
