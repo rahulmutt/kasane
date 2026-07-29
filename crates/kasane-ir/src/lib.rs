@@ -28,6 +28,33 @@ pub use inline::{Inline, RefTarget};
 /// the tightest stack the suite runs on.
 pub const MAX_INLINE_DEPTH: usize = 256;
 
+/// Maximum block nesting the structuring engine and the writer will descend.
+///
+/// `Block::List` and `Block::Footnote` nest, and every block walk in
+/// `kasane-core` and `kasane-writer` recurses on that nesting. Past this
+/// bound they stop descending, because the alternative is a stack overflow —
+/// which aborts the process outright rather than surfacing as a recoverable
+/// error.
+///
+/// This is a *safety* bound, not a fidelity one. The EPUB parser flattens at
+/// a much lower depth without losing content
+/// (`epub::xhtml::MAX_BLOCK_DEPTH`, 32), and MOBI/AZW3 and PPTX both reach
+/// the core through bounds of their own, so adapter-produced IR never
+/// reaches this value. It exists for hand-built `Document`s from external
+/// callers of the published `structure()`. The ordering invariant the design
+/// depends on is `epub::xhtml::MAX_BLOCK_DEPTH` (32) < `kasane_ir::MAX_BLOCK_DEPTH`
+/// (128).
+///
+/// Measured, not guessed: in a debug build, a rayon worker in batch mode —
+/// the tightest stack the code actually runs on — completes block depth 750
+/// and aborts at 875, while a libtest thread completes 512 and aborts at
+/// 1024. 128 is the largest power of two under a quarter of 875, so it keeps
+/// at least a 4x margin under the binding thread. The measurement composed a
+/// full-depth inline chain underneath the block chain, because a block walk
+/// at depth d can call an inline walk `MAX_INLINE_DEPTH` deep and the two
+/// budgets add.
+pub const MAX_BLOCK_DEPTH: usize = 128;
+
 #[cfg(test)]
 mod tests {
     use crate::*;
@@ -59,5 +86,19 @@ mod tests {
             doc.nodes[0].block,
             Block::Heading { level: 1, .. }
         ));
+    }
+
+    /// The two-bound design only works if adapter IR cannot reach the safety
+    /// bound. `kasane-ir` cannot name the adapter constant (it depends on
+    /// nothing), so this asserts the safety side of the contract: the value
+    /// is large enough that the documented fidelity bound sits well under it.
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn block_bound_leaves_room_under_the_inline_bound_convention() {
+        assert!(
+            MAX_BLOCK_DEPTH >= 4,
+            "a bound under 4 cannot host a /4 fidelity bound"
+        );
+        assert!(MAX_BLOCK_DEPTH.is_power_of_two());
     }
 }
