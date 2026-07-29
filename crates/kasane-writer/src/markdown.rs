@@ -14,6 +14,11 @@ fn blocks_to_markdown_at(blocks: &[Block], assets: &AssetBag, depth: usize) -> S
 }
 
 fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
+    // Defence in depth: section::clone_block already truncated anything that
+    // reached the engine through an adapter or a caller into a shallow
+    // Block::Raw, so this guard is not a second truncation stacked on that
+    // one -- it covers a caller who builds a `Vec<Block>` by hand and calls
+    // `blocks_to_markdown` directly, bypassing `structure()` entirely.
     if depth >= kasane_ir::MAX_BLOCK_DEPTH {
         out.push_str("<!-- nesting truncated at the block depth bound -->\n");
         return;
@@ -205,6 +210,16 @@ mod tests {
                 items: vec![blocks],
             }];
         }
+        // Wrap in a Footnote so this test also exercises the
+        // `Block::Footnote` arm, which routes back through
+        // `blocks_to_markdown_at` at `depth + 1` -- the site where an
+        // increment applied in both `render_block` and
+        // `blocks_to_markdown_at` would silently halve the effective bound.
+        // Without this, nothing deep ever reached that arm.
+        blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks,
+        }];
 
         // Must return normally, not abort.
         let md = blocks_to_markdown(&blocks, &kasane_ir::AssetBag { items: vec![] });
@@ -234,5 +249,38 @@ mod tests {
         });
 
         assert!(!md.is_empty());
+    }
+
+    /// `rendering_survives_deep_block_nesting` only proves the guard fires
+    /// -- `assert!(!md.is_empty())` would still pass at an effective bound of
+    /// 1, since a lone truncation comment is non-empty too. Pin the other
+    /// half: at a depth far under `kasane_ir::MAX_BLOCK_DEPTH` (128), nothing
+    /// truncates, so the innermost payload text must survive verbatim into
+    /// the rendered output.
+    #[test]
+    fn rendering_preserves_content_well_under_the_block_bound() {
+        const DEPTH: usize = 10;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("innermost payload".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+        blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks,
+        }];
+
+        let md = blocks_to_markdown(&blocks, &kasane_ir::AssetBag { items: vec![] });
+
+        assert!(
+            md.contains("innermost payload"),
+            "payload text must survive this far under the bound: {md}"
+        );
+        assert!(
+            !md.contains("nesting truncated"),
+            "the guard must not fire this shallow: {md}"
+        );
     }
 }

@@ -134,6 +134,12 @@ fn est_tokens_block(b: &Block, depth: usize) -> usize {
     if depth >= kasane_ir::MAX_BLOCK_DEPTH {
         // Not zero: a truncated subtree still renders as a Raw note, so the
         // size guard must not believe it is free.
+        //
+        // Defence in depth, not a second truncation: section::clone_block
+        // already cut anything from adapter or caller IR down to a shallow
+        // Block::Raw before this walk ever sees it. This guard only fires
+        // for a hand-built `Vec<Block>` that reaches `est_tokens`/`balance`
+        // without going through that bounded clone.
         return 1;
     }
     fn inl_at(is: &[Inline], depth: usize) -> usize {
