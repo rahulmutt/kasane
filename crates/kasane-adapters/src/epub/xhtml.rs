@@ -883,6 +883,7 @@ pub fn xhtml_to_blocks(
                     }
                     b"a" => {
                         let x = inline_stack.pop().unwrap_or_default();
+                        let depth = inline_stack.len();
                         let target = match link_href.take() {
                             // EPUB internal links (both same-file `#frag` and cross-file
                             // `file.xhtml#frag` forms) currently pass through unresolved as
@@ -892,7 +893,11 @@ pub fn xhtml_to_blocks(
                             None => RefTarget::External(String::new()),
                         };
                         if let Some(top) = inline_stack.last_mut() {
-                            top.push(Inline::Link { target, inlines: x });
+                            if depth > MAX_INLINE_DEPTH {
+                                top.push(Inline::Text(inlines_text(&x)));
+                            } else {
+                                top.push(Inline::Link { target, inlines: x });
+                            }
                         }
                     }
                     b"code" => {
@@ -2451,6 +2456,50 @@ mod tests {
         assert!(
             inlines_text(inls).contains("deep"),
             "flattening must keep the text"
+        );
+    }
+
+    #[test]
+    fn deep_anchor_nesting_is_flattened_not_preserved() {
+        fn depth_of(inls: &[Inline]) -> usize {
+            inls.iter()
+                .map(|i| match i {
+                    Inline::Emph(x) | Inline::Strong(x) => 1 + depth_of(x),
+                    Inline::Link { inlines, .. } => 1 + depth_of(inlines),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+
+        // 300 nested <a>, well past MAX_INLINE_DEPTH.
+        // Anchors are invalid XHTML but quick_xml is non-validating and emits Start/End
+        // for whatever the byte stream contains.
+        let n = 300;
+        let xml = format!(
+            "<body><p>{}<a href=\"#\">text</a>{}</p></body>",
+            "<a href=\"#\">".repeat(n),
+            "</a>".repeat(n)
+        );
+        let blocks = parse_blocks(&xml);
+
+        let inls = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert!(
+            depth_of(inls) <= MAX_INLINE_DEPTH,
+            "anchor nesting must be flattened to the bound, got {}",
+            depth_of(inls)
+        );
+        // Flattening preserves content: the anchor text survives.
+        assert!(
+            inlines_text(inls).contains("text"),
+            "flattening must keep the text, got {}",
+            inlines_text(inls)
         );
     }
 }
