@@ -13,11 +13,28 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `fuzz/artifacts/**` through those same functions on stable, so fuzz coverage
   reaches PR CI without a nightly toolchain.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
+  `balance`'s SPLIT fires on any node whose own body is over `max_tokens`, not
+  only on leaves: a container's body is the run of blocks between its heading
+  and its first subheading (for the root, the whole preamble), and leaving that
+  in the container's file at any size broke the size guard for `index.md`
+  itself. The synthetic `Part N` sections are *prepended* to the existing
+  children so pre-order flattening still reads in document order — which means
+  they also take the leading path numbers (`01-part-1.md`, `02-part-2.md`, then
+  `03-real-chapter.md`). This is a user-visible **path** change, not just a
+  content one; README's "Output shape" is the user-facing statement of it.
   `est_tokens` and `slug_of` are `#[doc(hidden)] pub` test seams, not API — the
   same convention `kasane-adapters` uses for `fuzz_entry`, and for the same
   reason: the property tier needs the engine's own token estimate and slug rule,
   and a copy in the test would drift.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing. Also emits the batch library index (`library.rs`).
+  `file_to_markdown` opens every file with its frontmatter title as a heading.
+  That is load-bearing, not cosmetic: `fold_sections` consumes a section's
+  heading into `SectionNode.title` and never re-emits it, while `assign_paths`
+  records the anchor as `path#slug(title)` — without the heading here, every
+  in-book cross-reference pointed at an anchor no file contained. Its sibling
+  half is `assign_paths`' scan of top-level body blocks, which anchors a
+  heading `balance` demoted into its parent's body when it merged a tiny
+  subsection; the two only work together.
   `tests/properties.rs` is design spec §9's property tier: it generates
   adapter-realistic `Document`s (`tests/generator/`), runs `structure()`, renders
   each file with `file_to_markdown`, and asserts six invariants against the
@@ -69,4 +86,11 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
   recursive walks, which adapter-produced IR can never reach. Unbounded, deep
   nesting aborts the process on a stack overflow.
+  BLOCK nesting (`Block::List`/`Block::Footnote`) is bounded **nowhere**. Only
+  the drop side is safe, via `kasane_ir::teardown_document`'s explicit
+  worklist; `section::clone_block`, `balance::est_tokens_block`,
+  `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still recurse
+  on it, so a deep enough list or footnote still aborts the process. Open work,
+  recorded under README's Known limitations — do not write a comment anywhere
+  that implies every walk is bounded.
 - Every change ships green under `mise run lint && mise run test`.

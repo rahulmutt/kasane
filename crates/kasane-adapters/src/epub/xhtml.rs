@@ -275,7 +275,13 @@ fn inlines_text(inls: &[Inline]) -> String {
 /// `MAX_INLINE_DEPTH` — in which case the content is contributed as flat text.
 ///
 /// `depth` is the inline-frame depth *after* the frame being closed was popped,
-/// so it is the depth of the frame that will receive the result.
+/// so it is the depth of the frame that will receive the result — that is, the
+/// nesting level the wrapper this call returns would *occupy*, not the number of
+/// levels already descended. Hence `>` here where `kasane-core` and
+/// `kasane-writer` write `depth >= kasane_ir::MAX_INLINE_DEPTH`: with `depth`
+/// counting the resulting level, `>` admits exactly `MAX_INLINE_DEPTH` levels of
+/// nesting, the same count `>=` admits over there. The two idioms differ only in
+/// what `depth` names; both bounds are inclusive of `MAX_INLINE_DEPTH` levels.
 fn wrap_inline(depth: usize, wrap: fn(Vec<Inline>) -> Inline, x: Vec<Inline>) -> Inline {
     if depth > MAX_INLINE_DEPTH {
         Inline::Text(inlines_text(&x))

@@ -16,11 +16,26 @@ pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     // clones bounded elsewhere in this module — an externally supplied
     // `Document` can be arbitrarily deep, and dropping it normally would
     // abort the process on the way out of this published entry point even
-    // though every walk over it is now bounded. `kasane_ir::teardown_document`
-    // (shared with `kasane-adapters`'s fuzz seam, which has the identical
-    // hazard for the identical reason) lives beside `Block`/`Inline` rather
-    // than here so the exhaustive match inside it stays a single copy the
-    // compiler checks once, not two copies that can silently drift apart.
+    // though every INLINE walk over it is now bounded.
+    //
+    // Inline, and only inline. BLOCK nesting (`Block::List`/`Block::Footnote`)
+    // is **not bounded anywhere in this codebase** — the same fact
+    // `kasane-adapters`'s `fuzz_entry::max_inline_depth` states at length: not
+    // in the EPUB parser's `frames` stack, not in `kasane-core`, not in the
+    // writer. `section::clone_block`, `balance::est_tokens_block`,
+    // `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still
+    // recurse on it, so a document nesting lists or footnotes deeply enough
+    // still aborts the process on a stack overflow (README's Known
+    // limitations records it; bounding it is open work). What the call below
+    // buys is narrower, and worth stating precisely: on the *drop* side block
+    // nesting IS bounded, because `teardown_document` pops blocks from an
+    // explicit worklist too. The walk and clone sides are not.
+    //
+    // `kasane_ir::teardown_document` (shared with `kasane-adapters`'s fuzz
+    // seam, which has the identical hazard for the identical reason) lives
+    // beside `Block`/`Inline` rather than here so the exhaustive match inside
+    // it stays a single copy the compiler checks once, not two copies that can
+    // silently drift apart.
     kasane_ir::teardown_document(doc);
     balance(&mut tree, opts);
     let mut result = assign_paths(tree);

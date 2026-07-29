@@ -34,6 +34,25 @@ produced. One file's failure never aborts the run.
 | 2 | every failure was an unsupported format, DRM, or encryption |
 | 3 | some documents converted, some failed |
 
+### Output shape
+
+Every emitted file opens, after its YAML frontmatter, with its own title as a
+Markdown heading. That heading is what an in-book cross-reference
+(`some/file.md#slug`) lands on; before, such links pointed at an anchor no file
+contained. Which slug they use — and where that diverges from GitHub's — is
+under Known limitations.
+
+A section's file holds the blocks between its heading and its first subheading.
+When that run is over the token budget it is split into synthetic `Part N`
+files — and that now applies to a *container* file such as `index.md` too, not
+only to leaves. A book with a long preface therefore emits
+`01-part-1.md`, `02-part-2.md`, … for material that older builds left inside
+`index.md`, and the real chapters shift down the numbering with it. Re-running
+kasane over an input converted by an earlier build can therefore change which
+paths exist, not just what is in them. `write_tree` replaces the output
+directory wholesale, so nothing stale is left behind — but anything outside the
+tree that referenced the old paths needs updating.
+
 ## Install
     cargo install kasane-cli   # installs the `kasane` binary
 
@@ -49,6 +68,12 @@ are asserted against the rendered text — every block appears exactly once, eve
 internal link resolves to a real file and a real anchor, the size guard holds,
 `prev`/`next` forms a complete chain, no path escapes the tree, and rendering is
 deterministic. They run in `mise run test` with no extra setup.
+
+Read the link invariant precisely: it holds *against kasane's own slug rule*,
+and the generator draws adapter-realistic ASCII titles and shallow block
+nesting. It therefore says nothing about whether GitHub resolves the same
+anchor, nor about non-Latin headings or deep list/footnote nesting — both are
+under Known limitations below.
 
 When a property fails it writes `crates/kasane-writer/tests/properties.proptest-regressions`.
 **Commit that file** — like a fuzz reproducer, it is what replays the failing
@@ -103,6 +128,23 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
+- Heading anchors use kasane's own slug rule, not GitHub's. It keeps ASCII
+  letters and digits only (`slug()` in `crates/kasane-core/src/paths.rs`) and
+  turns every other run of characters into a single `-`. Two consequences:
+  punctuation diverges from GFM — `## Don't Panic` is anchored `#don-t-panic`
+  where GitHub computes `#dont-panic` — and a heading with no ASCII
+  alphanumerics at all, i.e. any purely non-Latin script, collapses to the
+  literal `section`. A two-chapter Japanese book emits `01-section.md` and
+  `02-section.md` whose in-book links point at `#section` while the rendered
+  headings anchor as `#第二章` in GitHub, so those links do not resolve there.
+  Filenames lose the title the same way. Widening the slug is open work.
+- Block nesting has no depth bound. Inline nesting does (see AGENTS.md), but
+  lists and footnotes are still walked, cloned and rendered recursively, so a
+  document that nests them deeply enough aborts the process with `fatal runtime
+  error: stack overflow` (SIGABRT, shell exit 134) instead of failing with an
+  error. Reproduced with a ~540 KB EPUB holding a 30,000-deep `<ul>`, stored
+  1:1 — no decompression bomb is involved, so none of the bomb guards apply.
+  Bounding it is open work.
 - DRM-protected MOBI/AZW3 files are detected and rejected (exit code 2);
   kasane never breaks DRM.
 - Math is recovered as LaTeX: MathML (EPUB) and OMML (PPTX) equations convert to
