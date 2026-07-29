@@ -133,7 +133,7 @@ fn clone_block(b: &Block) -> Block {
     }
 }
 
-fn clone_inlines_at(inls: &[Inline], depth: usize) -> Vec<Inline> {
+pub(crate) fn clone_inlines_at(inls: &[Inline], depth: usize) -> Vec<Inline> {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return Vec::new();
     }

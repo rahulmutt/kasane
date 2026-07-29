@@ -1,4 +1,4 @@
-use crate::section::{SectionNode, SectionTree};
+use crate::section::{clone_inlines_at, SectionNode, SectionTree};
 use crate::Options;
 use kasane_ir::{Block, Inline};
 
@@ -22,8 +22,17 @@ fn balance_node(node: &mut SectionNode, opts: &Options) {
         if small {
             // demote heading to a bold lead-in para, then append its body
             if !child.title.is_empty() {
+                // `balance` is exported and `SectionTree`/`SectionNode` are
+                // all-`pub` fields, so a caller can hand-build a tree with an
+                // arbitrarily deep title and call `balance` directly without
+                // ever going through `fold_sections`'s bounded clone. Clone
+                // through the same bounded helper here so this site can't
+                // reintroduce the unbounded-clone abort on that path.
                 node.body
-                    .push(Block::Para(vec![Inline::Strong(child.title.clone())]));
+                    .push(Block::Para(vec![Inline::Strong(clone_inlines_at(
+                        &child.title,
+                        0,
+                    ))]));
             }
             node.body.extend(child.body);
         } else {
@@ -165,5 +174,58 @@ mod tests {
         let top = &tree.root.children[0];
         assert!(top.children.is_empty(), "tiny child folded up");
         assert!(!top.body.is_empty(), "child body absorbed into parent");
+    }
+
+    #[test]
+    fn merging_a_deeply_nested_title_does_not_abort() {
+        // `balance` is exported and `SectionTree`/`SectionNode` are all-`pub`,
+        // so a caller can hand-build a tree and call `balance` directly
+        // without ever going through `fold_sections`'s bounded clone. Before
+        // the fix, the merge branch's `child.title.clone()` recursed on the
+        // derived `Clone` with no bound and aborted at this depth.
+        let mut deep_title = Inline::Text("x".into());
+        for _ in 0..10_000 {
+            deep_title = Inline::Emph(vec![deep_title]);
+        }
+        // Merging only fires for a node with `level > 0` (root's own direct
+        // children are preserved as top-level sections), so the deep-titled
+        // leaf must be a grandchild: root -> level-1 parent -> level-2 leaf.
+        let mut tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![],
+                children: vec![SectionNode {
+                    id: None,
+                    level: 1,
+                    title: vec![Inline::Text("Parent".into())],
+                    body: vec![],
+                    children: vec![SectionNode {
+                        id: None,
+                        level: 2,
+                        title: vec![deep_title],
+                        body: vec![Block::Para(vec![Inline::Text("tiny".into())])],
+                        children: vec![],
+                        pages: None,
+                    }],
+                    pages: None,
+                }],
+                pages: None,
+            },
+        };
+        balance(
+            &mut tree,
+            &Options {
+                max_tokens: 10_000,
+                min_tokens: 100,
+            },
+        );
+        let parent = &tree.root.children[0];
+        assert!(
+            parent.children.is_empty(),
+            "tiny deep-titled leaf folded up"
+        );
+        assert_eq!(parent.body.len(), 2, "demoted title + absorbed body");
     }
 }

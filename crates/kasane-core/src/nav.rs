@@ -9,6 +9,15 @@ use kasane_ir::{Block, Document, Inline, RefTarget};
 pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     let root_title = doc.meta.title.clone();
     let mut tree = fold_sections(&doc);
+    // `doc` is fully cloned into `tree` above; nothing after this point reads
+    // it. Tear it down explicitly instead of letting it fall out of scope:
+    // `Inline` has no manual `Drop`, so the ordinary, compiler-derived one
+    // recurses on inline nesting depth exactly like the walks and clones
+    // bounded elsewhere in this module — an externally supplied `Document`
+    // can be arbitrarily deep, and dropping it normally would abort the
+    // process on the way out of this published entry point even though every
+    // walk over it is now bounded.
+    teardown_document(doc);
     balance(&mut tree, opts);
     let mut result = assign_paths(tree);
     resolve_refs(&mut result.root, &result.anchors);
@@ -31,6 +40,53 @@ fn collect_order(p: &Placed, out: &mut Vec<String>) {
     out.push(p.path.clone());
     for c in &p.children {
         collect_order(c, out);
+    }
+}
+
+// Tear `doc` down with an explicit worklist rather than letting the derived
+// `Drop` on `Block`/`Inline` recurse on nesting depth. Each `Vec` here plays
+// the role of an explicit call stack: popping and matching one value moves
+// its owned children onto the same `Vec` instead of the runtime recursing
+// into their drop glue, so no single `drop` ever costs more than one level
+// regardless of how deep the input was. (`impl Drop for Inline` is not an
+// option here — it would forbid moving out of `Inline`, which every
+// depth-bounded walk in this crate does via `match inl { Inline::Emph(x) =>
+// ... }`.)
+fn teardown_document(doc: Document) {
+    let mut blocks: Vec<Block> = doc.nodes.into_iter().map(|n| n.block).collect();
+    while let Some(b) = blocks.pop() {
+        match b {
+            Block::Heading { inlines, .. } | Block::Para(inlines) => teardown_inlines(inlines),
+            Block::List { items, .. } => {
+                for item in items {
+                    blocks.extend(item);
+                }
+            }
+            Block::Table(t) => {
+                for c in t.header {
+                    teardown_inlines(c);
+                }
+                for r in t.rows {
+                    for c in r {
+                        teardown_inlines(c);
+                    }
+                }
+            }
+            Block::Figure { caption, .. } => teardown_inlines(caption),
+            Block::Footnote { blocks: inner, .. } => blocks.extend(inner),
+            Block::CodeBlock { .. } | Block::MathBlock(_) | Block::Raw { .. } => {}
+        }
+    }
+}
+
+fn teardown_inlines(inls: Vec<Inline>) {
+    let mut stack = inls;
+    while let Some(i) = stack.pop() {
+        match i {
+            Inline::Emph(x) | Inline::Strong(x) => stack.extend(x),
+            Inline::Link { inlines, .. } => stack.extend(inlines),
+            Inline::Text(_) | Inline::Code(_) | Inline::Math(_) | Inline::FootnoteRef(_) => {}
+        }
     }
 }
 
@@ -61,6 +117,10 @@ fn walk(
     let child_paths: Vec<String> = p.children.iter().map(|c| c.path.clone()).collect();
 
     // Body: for a directory node with children, prepend an auto TOC.
+    // Plain `.clone()` is safe here only because everything downstream of
+    // `fold_sections`'s bounded clone (this `walk` included) never sees
+    // inline nesting past `kasane_ir::MAX_INLINE_DEPTH`; don't reintroduce a
+    // hand-built, unbounded `Placed` into this path without re-checking that.
     let mut blocks = p.node.body.clone();
     if !p.children.is_empty() {
         let toc = Block::List {
