@@ -1,15 +1,23 @@
 use kasane_ir::{AssetBag, Block, Inline, RefTarget, Table};
 
 pub fn blocks_to_markdown(blocks: &[Block], assets: &AssetBag) -> String {
+    blocks_to_markdown_at(blocks, assets, 0)
+}
+
+fn blocks_to_markdown_at(blocks: &[Block], assets: &AssetBag, depth: usize) -> String {
     let mut out = String::new();
     for b in blocks {
-        render_block(b, assets, &mut out);
+        render_block(b, assets, &mut out, depth);
         out.push('\n');
     }
     out
 }
 
-fn render_block(b: &Block, assets: &AssetBag, out: &mut String) {
+fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        out.push_str("<!-- nesting truncated at the block depth bound -->\n");
+        return;
+    }
     match b {
         Block::Heading { level, inlines, .. } => {
             for _ in 0..(*level).min(6) {
@@ -33,7 +41,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String) {
                 // render first block inline, subsequent blocks indented
                 let mut inner = String::new();
                 for bb in item {
-                    render_block(bb, assets, &mut inner);
+                    render_block(bb, assets, &mut inner, depth + 1);
                 }
                 out.push_str(inner.trim_end());
                 out.push('\n');
@@ -69,7 +77,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String) {
         }
         Block::MathBlock(s) => out.push_str(&format!("$$\n{}\n$$\n", s)),
         Block::Footnote { id, blocks } => {
-            let body = blocks_to_markdown(blocks, assets);
+            let body = blocks_to_markdown_at(blocks, assets, depth + 1);
             out.push_str(&format!("[^{}]: {}\n", id.0, body.trim()));
         }
         Block::Raw { note } => out.push_str(&format!("<!-- {} -->\n", note)),
@@ -185,5 +193,46 @@ mod tests {
         assert!(md.contains("| A | B |"));
         assert!(md.contains("| --- | --- |"));
         assert!(md.contains("| 1 | 2 |"));
+    }
+
+    #[test]
+    fn rendering_survives_deep_block_nesting() {
+        const DEPTH: usize = 100_000;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("bottom".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+
+        // Must return normally, not abort.
+        let md = blocks_to_markdown(&blocks, &kasane_ir::AssetBag { items: vec![] });
+
+        // Order matters, exactly as `fuzz_entry::adapter`'s comment spells
+        // out. `blocks` is 100_000 deep and `Block`'s derived `Drop` recurses,
+        // so letting it fall out of scope aborts the process on the way out --
+        // a second, independent stack overflow that would read as the code
+        // under test failing when it had already returned cleanly. Tear it
+        // down through the explicit worklist BEFORE the assertion, so nothing
+        // owns it when a panic could unwind through this frame.
+        kasane_ir::teardown_document(kasane_ir::Document {
+            meta: kasane_ir::DocMeta {
+                title: "T".into(),
+                authors: vec![],
+                language: None,
+                source_format: "test".into(),
+                source_path: "t".into(),
+            },
+            nodes: blocks
+                .into_iter()
+                .map(|block| kasane_ir::Node {
+                    block,
+                    prov: kasane_ir::Provenance::default(),
+                })
+                .collect(),
+        });
+
+        assert!(!md.is_empty());
     }
 }

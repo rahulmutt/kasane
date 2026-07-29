@@ -246,4 +246,56 @@ mod tests {
         };
         assert_eq!(toc, vec!["Part 1", "Part 2"]);
     }
+
+    /// The block-nesting analogue of
+    /// `kasane_ir`'s `teardown_document_survives_deep_block_and_inline_nesting`:
+    /// the drop side was already safe, the walk side was not. Depth 100_000
+    /// is far past anything a real document holds -- the point is that the
+    /// bound makes depth irrelevant, so an absurd value is the honest test.
+    #[test]
+    fn structure_survives_deep_block_nesting() {
+        const DEPTH: usize = 100_000;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("bottom".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+        blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks,
+        }];
+        let mut nodes = vec![Node {
+            block: Block::Heading {
+                level: 1,
+                id: BlockId(0),
+                inlines: vec![Inline::Text("T".into())],
+            },
+            prov: Provenance::default(),
+        }];
+        nodes.extend(blocks.into_iter().map(|block| Node {
+            block,
+            prov: Provenance::default(),
+        }));
+        let doc = Document {
+            meta: DocMeta {
+                title: "T".into(),
+                authors: vec![],
+                language: None,
+                source_format: "test".into(),
+                source_path: "t".into(),
+            },
+            nodes,
+        };
+        // Must return normally, not abort.
+        let site = structure(
+            doc,
+            &Options {
+                max_tokens: 4000,
+                min_tokens: 100,
+            },
+        );
+        assert!(!site.files.is_empty());
+    }
 }

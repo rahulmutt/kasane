@@ -6,14 +6,17 @@ pub fn resolve_refs(placed: &mut Placed, anchors: &HashMap<BlockId, String>) {
     let from = placed.path.clone();
     fix_inlines(&mut placed.node.title, &from, anchors);
     for b in &mut placed.node.body {
-        fix_block(b, &from, anchors);
+        fix_block(b, &from, anchors, 0);
     }
     for child in &mut placed.children {
         resolve_refs(child, anchors);
     }
 }
 
-fn fix_block(b: &mut Block, from: &str, anchors: &HashMap<BlockId, String>) {
+fn fix_block(b: &mut Block, from: &str, anchors: &HashMap<BlockId, String>, depth: usize) {
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     match b {
         Block::Para(inls) | Block::Heading { inlines: inls, .. } => {
             fix_inlines(inls, from, anchors)
@@ -21,13 +24,13 @@ fn fix_block(b: &mut Block, from: &str, anchors: &HashMap<BlockId, String>) {
         Block::List { items, .. } => {
             for it in items {
                 for bb in it {
-                    fix_block(bb, from, anchors);
+                    fix_block(bb, from, anchors, depth + 1);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for bb in blocks {
-                fix_block(bb, from, anchors);
+                fix_block(bb, from, anchors, depth + 1);
             }
         }
         Block::Figure { caption, .. } => fix_inlines(caption, from, anchors),

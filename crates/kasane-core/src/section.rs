@@ -66,7 +66,7 @@ pub fn fold_sections(doc: &Document) -> SectionTree {
             }
             other => {
                 let top = stack.last_mut().unwrap();
-                top.body.push(clone_block(other));
+                top.body.push(clone_block(other, 0));
                 top.merge_pages(node.prov.source_pages);
             }
         }
@@ -81,13 +81,23 @@ pub fn fold_sections(doc: &Document) -> SectionTree {
     }
 }
 
-// `Block` and `Inline` derive `Clone`, but that derive recurses on inline
-// nesting depth just like the hand-written walks it sits next to — an
-// unbounded `Document` clones straight into a stack overflow before any of
-// those walks even run. These mirror the same depth-bounded shape (see
-// `kasane_ir::MAX_INLINE_DEPTH`): past the bound they stop descending and
-// contribute nothing, rather than recursing into the derived `Clone`.
-fn clone_block(b: &Block) -> Block {
+// `Block` and `Inline` derive `Clone`, but that derive recurses on nesting
+// depth just like the hand-written walks it sits next to — an unbounded
+// `Document` clones straight into a stack overflow before any of those walks
+// even run. `clone_inlines_at` bounds inline nesting (see
+// `kasane_ir::MAX_INLINE_DEPTH`): past the bound it stops descending and
+// contributes nothing, rather than recursing into the derived `Clone`.
+//
+// `clone_block` below is the load-bearing truncation for BLOCK nesting. This
+// is the first core walk to touch adapter or caller IR, so past this point
+// every later core and writer walk sees already-shallow blocks -- their own
+// guards are defence in depth, not a second truncation stacked on this one.
+fn clone_block(b: &Block, depth: usize) -> Block {
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return Block::Raw {
+            note: "nesting truncated at the block depth bound".into(),
+        };
+    }
     match b {
         Block::Heading { level, id, inlines } => Block::Heading {
             level: *level,
@@ -99,7 +109,7 @@ fn clone_block(b: &Block) -> Block {
             ordered: *ordered,
             items: items
                 .iter()
-                .map(|item| item.iter().map(clone_block).collect())
+                .map(|item| item.iter().map(|b| clone_block(b, depth + 1)).collect())
                 .collect(),
         },
         Block::Table(t) => Block::Table(Table {
@@ -127,7 +137,7 @@ fn clone_block(b: &Block) -> Block {
         Block::MathBlock(s) => Block::MathBlock(s.clone()),
         Block::Footnote { id, blocks } => Block::Footnote {
             id: *id,
-            blocks: blocks.iter().map(clone_block).collect(),
+            blocks: blocks.iter().map(|b| clone_block(b, depth + 1)).collect(),
         },
         Block::Raw { note } => Block::Raw { note: note.clone() },
     }
