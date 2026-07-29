@@ -76,7 +76,10 @@ fn balance_node(node: &mut SectionNode, opts: &Options) {
             .enumerate()
             .map(|(i, blocks)| SectionNode {
                 id: None,
-                level: node.level + 1,
+                // Saturating, not wrapping: adapters clamp levels to 1..=6, but
+                // `structure()` is public and `level` is a `u8`, so a caller can
+                // hand us 255 and a plain `+ 1` panics in debug.
+                level: node.level.saturating_add(1),
                 title: vec![Inline::Text(format!("Part {}", i + 1))],
                 body: blocks,
                 children: vec![],
@@ -299,5 +302,23 @@ mod tests {
             "tiny deep-titled leaf folded up"
         );
         assert_eq!(parent.body.len(), 2, "demoted title + absorbed body");
+    }
+
+    #[test]
+    fn splitting_a_max_level_heading_does_not_overflow() {
+        // Every adapter clamps heading levels to 1..=6, but `Block::Heading.level`
+        // is a `u8` and `structure()` is public, so a caller can hand us 255.
+        // Splitting it computes level + 1.
+        let mut tree = fold_sections(&doc(vec![h(255, 0, "Max"), big_para(1200), big_para(1200)]));
+        balance(
+            &mut tree,
+            &Options {
+                max_tokens: 400,
+                min_tokens: 10,
+            },
+        );
+        let sec = &tree.root.children[0];
+        assert!(sec.children.len() >= 2, "expected split into parts");
+        assert_eq!(sec.children[0].level, 255, "level must saturate, not wrap");
     }
 }
