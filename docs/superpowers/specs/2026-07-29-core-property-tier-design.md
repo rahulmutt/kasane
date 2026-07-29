@@ -92,11 +92,32 @@ fidelity bug in its own right.
 **Fix.** The writer emits the file's title as a heading at the top of the body,
 from `Frontmatter.title`, so the anchor `resolve_refs` points at exists. Its
 level follows `breadcrumb.len()`, clamped to 1..=6, so the root `index.md` opens
-with `#` and a depth-two section with `##`. In the same change, `balance`'s merge
-path demotes an absorbed child to a real `Block::Heading` rather than
-`Block::Para(vec![Inline::Strong(title)])` (`balance.rs:26-27`), so a merged
-subsection's anchor is live too — otherwise the fix covers section files and
-silently leaves merged ones dead.
+with `#` and a depth-two section with `##`.
+
+**Merged subsections are a different case, and not a defect.** `balance` removes
+an absorbed child from the tree before `assign_paths` runs, so no anchor is ever
+recorded for it; `refs.rs:63-68` finds nothing in the map and strips the link to
+plain text. That is the documented pass-4 behavior — "dangling refs degrade to
+plain text, never a broken link" — so merged subsections lose links rather than
+breaking them.
+
+They can do better, and this item makes them. Two changes, which are only worth
+making together:
+
+1. `balance`'s merge path demotes an absorbed child to a real `Block::Heading`
+   carrying its original `BlockId`, rather than
+   `Block::Para(vec![Inline::Strong(title)])` (`balance.rs:24-28`). A synthetic
+   split part has `id: None` and nothing can link to it, so that case keeps the
+   bold lead-in.
+2. `place` (`paths.rs:23`) additionally scans each node's top-level `body` for
+   `Block::Heading { id, inlines, .. }` and records
+   `anchors[id] = "{self_path}#{slug(inlines)}"`.
+
+Without (2), (1) is purely cosmetic — `### Tiny` instead of `**Tiny**`. With
+both, a cross-reference into a merged subsection resolves to the exact heading it
+names instead of degrading to text. Only top-level body blocks are scanned: a
+heading nested inside a list item was never folded into a section either, and
+giving it an anchor would invent structure the engine does not otherwise model.
 
 `blocks_to_markdown` takes `&[Block]` and never sees a `Frontmatter`, so the
 title heading cannot be prepended there, and prepending it inside
@@ -135,16 +156,29 @@ in batch mode it takes every other document's worker down with it.
 1. **At the adapter boundary,** where the repo's convention puts guards
    ("Adapters must never trust input"): the EPUB XHTML parser flattens inline
    nesting past a documented depth constant, in the style of the existing
-   `guard.rs` bounds — `MAX_INLINE_DEPTH = 64`, past which nested inline
-   elements contribute their text content without adding a level of `Inline`
-   nesting. 64 is far past any real book's `<em><strong><a>` layering and far
-   short of the overflow. A fuzz seed carrying the shape is committed.
+   `guard.rs` bounds — `MAX_INLINE_DEPTH = 64` in `epub/xhtml.rs`, past which a
+   closing inline tag contributes its text content instead of adding another
+   `Inline` level. No content is lost. 64 is far past any real book's
+   `<em><strong><a>` layering.
 2. **In the core and writer,** so `kasane-core`'s published `structure()` is
    safe for any caller and not only for kasane's own adapters: the four
-   recursive inline walks carry a depth counter and, past the same bound, stop
-   descending — flattening the remaining nesting to its concatenated text rather
-   than recursing further. `kasane-core` is a published crate whose input type is
-   public; a guard that lives only in a sibling crate does not protect it.
+   recursive inline walks carry a depth counter and stop descending past
+   `kasane_ir::MAX_INLINE_DEPTH = 256`, contributing nothing below it. The
+   constant lives in `kasane-ir` because both crates need the same value.
+
+The two bounds differ deliberately. The adapter's 64 is a *fidelity* bound that
+preserves content, and it is what every real document meets. The core's 256 is a
+*safety* bound that drops content past it, and adapter-produced IR can never
+reach it — it exists only for a hand-built `Document` from an external caller.
+
+The values are measured, not guessed. In a debug build on a libtest thread,
+nesting depth 256 and 1024 both complete; 4096 aborts. 256 leaves at least a
+4× margin under the tightest stack the test suite runs on.
+
+A fuzz seed carrying the shape is committed, and the shared `adapter()` helper in
+`fuzz_entry` gains an inline-depth assertion (against the core's 256, the bound
+that actually matters for safety) so every format adapter is held to it, in the
+same style as the existing `assert_assets_contained`.
 
 ## 3. Architecture
 
