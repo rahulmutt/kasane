@@ -79,7 +79,7 @@ enum Shape {
     Heading(u8),
     Para,
     List(bool),
-    Table,
+    Table(bool),
     Figure(bool),
     Code,
     Math,
@@ -92,7 +92,7 @@ fn shape() -> impl Strategy<Value = Shape> {
         3 => (1u8..=6).prop_map(Shape::Heading),
         8 => Just(Shape::Para),
         2 => any::<bool>().prop_map(Shape::List),
-        1 => Just(Shape::Table),
+        1 => any::<bool>().prop_map(Shape::Table),
         1 => any::<bool>().prop_map(Shape::Figure),
         1 => Just(Shape::Code),
         1 => Just(Shape::Math),
@@ -132,11 +132,17 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
             },
             Expect::Exactly(1),
         ),
-        Shape::Table => (
+        // markdown.rs:79-106: both render paths call `inlines_to_md` exactly
+        // once for the single generated row's single cell -- the merged
+        // branch via `<td>{esc(c)}</td>` (line 92), the pipe-table branch via
+        // the `cells` closure (lines 99-101) -- so the token renders exactly
+        // once whether or not `has_merged` is set. Generating the flag (not
+        // pinning it) is what makes the HTML branch reachable at all.
+        Shape::Table(merged) => (
             Block::Table(Table {
                 header: vec![text("col")],
                 rows: vec![vec![text(token)]],
-                has_merged: false,
+                has_merged: *merged,
             }),
             Expect::Exactly(1),
         ),
