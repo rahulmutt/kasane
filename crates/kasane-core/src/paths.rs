@@ -68,6 +68,16 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
+/// Slug for a heading's inlines, as `assign_paths` computes it.
+///
+/// `#[doc(hidden)]` test seam, same rationale as `est_tokens`: the link
+/// invariant has to compare a rendered heading against the anchor the engine
+/// emitted, using the engine's own slug rule rather than a copy of it.
+#[doc(hidden)]
+pub fn slug_of(inlines: &[Inline]) -> String {
+    slug(inlines)
+}
+
 pub(crate) fn slug(inlines: &[Inline]) -> String {
     let text = inline_text(inlines);
     let mut out = String::new();

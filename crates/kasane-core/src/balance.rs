@@ -55,19 +55,36 @@ fn balance_node(node: &mut SectionNode, opts: &Options) {
     }
     node.children = kept;
 
-    // SPLIT: an oversized leaf (no children) gets synthetic Part sections
-    if node.children.is_empty() && est_tokens_blocks(&node.body) > opts.max_tokens {
+    // SPLIT: an oversized body gets synthetic Part sections.
+    //
+    // This fires for a node that already has children, not only for a leaf. A
+    // node's own body is the run of blocks between its heading and its first
+    // subheading — for the root, the whole preamble before the first heading
+    // (`section.rs`'s `preamble_before_first_heading_stays_on_root`). Gating
+    // the split on `children.is_empty()` left that body in the container's own
+    // file at any size, so a book with a long preface produced an `index.md`
+    // arbitrarily over `max_tokens` with nothing to bound it. The size guard
+    // has to hold for every file, not just for leaves.
+    //
+    // The parts are *prepended* to the existing children: `nav::collect_order`
+    // walks pre-order, so a container's own body still reads ahead of its real
+    // subsections.
+    if est_tokens_blocks(&node.body) > opts.max_tokens {
         let parts = split_blocks(std::mem::take(&mut node.body), opts.max_tokens);
-        for (i, blocks) in parts.into_iter().enumerate() {
-            node.children.push(SectionNode {
+        let mut sections: Vec<SectionNode> = parts
+            .into_iter()
+            .enumerate()
+            .map(|(i, blocks)| SectionNode {
                 id: None,
                 level: node.level + 1,
                 title: vec![Inline::Text(format!("Part {}", i + 1))],
                 body: blocks,
                 children: vec![],
                 pages: node.pages,
-            });
-        }
+            })
+            .collect();
+        sections.append(&mut node.children);
+        node.children = sections;
     }
 }
 
@@ -88,6 +105,18 @@ fn split_blocks(blocks: Vec<Block>, max_tokens: usize) -> Vec<Vec<Block>> {
         parts.push(cur);
     }
     parts
+}
+
+/// Token estimate for a block slice.
+///
+/// `#[doc(hidden)]` because it is a test seam, not API — the same convention
+/// `kasane-adapters` uses for `fuzz_entry`. The property suite's size-guard
+/// invariant needs the engine's own estimator; re-implementing it in the test
+/// would create a second source of truth that drifts silently, passing against
+/// its own arithmetic while the engine's changed.
+#[doc(hidden)]
+pub fn est_tokens(blocks: &[Block]) -> usize {
+    est_tokens_blocks(blocks)
 }
 
 pub(crate) fn est_tokens_blocks(blocks: &[Block]) -> usize {
@@ -172,6 +201,35 @@ mod tests {
         let sec = &tree.root.children[0];
         assert!(sec.children.len() >= 2, "expected split into parts");
         assert!(sec.body.is_empty(), "body moved into parts");
+    }
+
+    #[test]
+    fn splits_an_oversized_body_that_also_has_children() {
+        // A preamble before the first heading lives in the root's own body
+        // while the headings become its children. Splitting only leaves left
+        // that body in `index.md` at any size, breaking the size guard for the
+        // one file every reader opens first.
+        let mut tree = fold_sections(&doc(vec![
+            big_para(1200),
+            big_para(1200),
+            h(1, 0, "Real Chapter"),
+        ]));
+        balance(
+            &mut tree,
+            &Options {
+                max_tokens: 400,
+                min_tokens: 10,
+            },
+        );
+        assert!(tree.root.body.is_empty(), "preamble moved into parts");
+        let titles: Vec<String> = tree
+            .root
+            .children
+            .iter()
+            .map(|c| crate::paths::inline_text(&c.title))
+            .collect();
+        // Parts precede the real chapter: pre-order flattening is reading order.
+        assert_eq!(titles, vec!["Part 1", "Part 2", "Real Chapter"]);
     }
 
     #[test]

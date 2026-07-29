@@ -88,7 +88,15 @@ fn walk(
                 .map(|c| {
                     vec![Block::Para(vec![Inline::Link {
                         target: RefTarget::External(crate::refs::relativize(&p.path, &c.path)),
-                        inlines: vec![Inline::Text(child_title(c, doc_title))],
+                        // A child is never the root, so it always has a title
+                        // of its own: a real heading's inlines, or `Part N` for
+                        // a synthetic split part. The `title` binding above
+                        // substitutes the document title only for the root, and
+                        // only because `trail.is_empty()` pins it there; the
+                        // TOC used to key off `id.is_none()` alone, which is
+                        // also true of every synthetic part, so a split body
+                        // produced a TOC of N entries all named after the book.
+                        inlines: vec![Inline::Text(inline_text(&c.node.title))],
                     }])]
                 })
                 .collect(),
@@ -112,14 +120,6 @@ fn walk(
 
     for c in &p.children {
         walk(c, doc_title, &breadcrumb, Some(&p.path), order, files);
-    }
-}
-
-fn child_title(p: &Placed, doc_title: &str) -> String {
-    if p.node.id.is_none() {
-        doc_title.to_string()
-    } else {
-        inline_text(&p.node.title)
     }
 }
 
@@ -179,5 +179,56 @@ mod tests {
             root.frontmatter.children,
             vec!["01-intro.md", "02-methods.md"]
         );
+    }
+
+    #[test]
+    fn toc_names_synthetic_parts_by_their_own_title() {
+        // A split body becomes `Part N` children. Labelling a TOC entry with
+        // the document title whenever the child has no `BlockId` made every
+        // one of them read "My Book".
+        let doc = Document {
+            meta: DocMeta {
+                title: "My Book".into(),
+                authors: vec![],
+                language: None,
+                source_format: "epub".into(),
+                source_path: "b.epub".into(),
+            },
+            nodes: vec![
+                Node {
+                    block: Block::Para(vec![Inline::Text("x".repeat(1200))]),
+                    prov: Provenance::default(),
+                },
+                Node {
+                    block: Block::Para(vec![Inline::Text("x".repeat(1200))]),
+                    prov: Provenance::default(),
+                },
+            ],
+        };
+        let site = structure(
+            doc,
+            &Options {
+                max_tokens: 200,
+                min_tokens: 10,
+            },
+        );
+        let root = site.files.iter().find(|f| f.path == "index.md").unwrap();
+        let toc = match &root.blocks[0] {
+            Block::List { items, .. } => items
+                .iter()
+                .map(|it| match &it[0] {
+                    Block::Para(inls) => match &inls[0] {
+                        Inline::Link { inlines, .. } => match &inlines[0] {
+                            Inline::Text(t) => t.clone(),
+                            _ => panic!("expected link text"),
+                        },
+                        _ => panic!("expected link"),
+                    },
+                    _ => panic!("expected para"),
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!("expected a TOC list"),
+        };
+        assert_eq!(toc, vec!["Part 1", "Part 2"]);
     }
 }

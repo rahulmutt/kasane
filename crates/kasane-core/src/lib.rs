@@ -6,10 +6,10 @@ mod refs;
 mod section;
 mod sitetree;
 
-pub use balance::balance;
+pub use balance::{balance, est_tokens};
 pub use nav::structure;
 pub use options::Options;
-pub use paths::{assign_paths, PlaceResult, Placed};
+pub use paths::{assign_paths, slug_of, PlaceResult, Placed};
 pub use refs::resolve_refs;
 pub use section::{fold_sections, SectionNode, SectionTree};
 pub use sitetree::{FileNode, Frontmatter, SiteTree};
