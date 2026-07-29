@@ -345,6 +345,11 @@ fn unwrap_solo_images(xhtml: &str) -> String {
 /// actually uses, since that's cheap and future-proofs against the
 /// marker position changing.
 fn strip_empty_anchor_links(blocks: &mut Vec<Block>, depth: usize) {
+    // Unreachable via this adapter: MOBI/AZW3 text is normalized through the
+    // EPUB XHTML parser, which already flattens at `xhtml::MAX_BLOCK_DEPTH` (32).
+    // The guard stays anyway, as in `epub::fix_block_links`, so the invariant
+    // does not depend on which adapter feeds this walk -- it is the guard that
+    // makes the safety independent, not the parser's own flattening.
     if depth >= kasane_ir::MAX_BLOCK_DEPTH {
         return;
     }
