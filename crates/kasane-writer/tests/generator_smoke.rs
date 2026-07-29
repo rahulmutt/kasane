@@ -40,7 +40,7 @@ fn has_nested_inline(inls: &[Inline]) -> bool {
 
 /// Not a `proptest!` property: proptest draws each property's cases
 /// independently, so no single `case()` draw can be relied on to contain
-/// every `Shape` variant (the rarest carry weight 1 of 19) or any nested
+/// every `Shape` variant (the rarest carry weight 1 of 21) or any nested
 /// inline (`deco` only takes a nesting branch with probability 0.2). This
 /// draws many cases directly from the same strategy and asserts what is only
 /// true in aggregate: that the generator still produces every block shape and
@@ -52,8 +52,8 @@ fn has_nested_inline(inls: &[Inline]) -> bool {
 fn generator_covers_every_shape_and_some_nesting() {
     // 200 draws, each case holding 1..40 blocks (average ~20): roughly 4,000
     // independent shape picks in total. The rarest `Shape` variant has weight
-    // 1 of 19, so its expected count here is ~210 and the probability it
-    // never appears is (18/19)^4000 -- effectively zero, so this is
+    // 1 of 21, so its expected count here is ~190 and the probability it
+    // never appears is (20/21)^4000 -- effectively zero, so this is
     // deterministic in practice -- while still running far fewer total cases
     // than the proptest suite above (256 cases x 3 properties).
     const DRAWS: usize = 200;

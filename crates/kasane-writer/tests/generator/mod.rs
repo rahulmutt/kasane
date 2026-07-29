@@ -79,6 +79,11 @@ enum Shape {
     Heading(u8),
     Para,
     List(bool),
+    /// `ordered` plus a nesting depth. Kept well under
+    /// `epub::xhtml::MAX_BLOCK_DEPTH` on purpose: this tier is
+    /// adapter-realistic by design, and IR deeper than any adapter can
+    /// produce is the safety bound's unit tests' job, not this tier's.
+    NestedList(bool, u8),
     Table(bool),
     Figure(bool),
     Code,
@@ -92,6 +97,7 @@ fn shape() -> impl Strategy<Value = Shape> {
         3 => (1u8..=6).prop_map(Shape::Heading),
         8 => Just(Shape::Para),
         2 => any::<bool>().prop_map(Shape::List),
+        2 => (any::<bool>(), 2u8..=4).prop_map(|(o, d)| Shape::NestedList(o, d)),
         1 => any::<bool>().prop_map(Shape::Table),
         1 => any::<bool>().prop_map(Shape::Figure),
         1 => Just(Shape::Code),
@@ -132,6 +138,23 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
             },
             Expect::Exactly(1),
         ),
+        // The token sits at the bottom of the chain and renders exactly once,
+        // so the conservation invariant's arithmetic is unchanged from the
+        // flat-list case -- what changes is the depth the walks must survive
+        // to reach it.
+        Shape::NestedList(ordered, depth) => {
+            let mut inner = vec![Block::Para(text(token))];
+            for _ in 0..*depth {
+                inner = vec![Block::List {
+                    ordered: *ordered,
+                    items: vec![inner],
+                }];
+            }
+            (
+                inner.pop().expect("depth >= 1 builds one list"),
+                Expect::Exactly(1),
+            )
+        }
         // markdown.rs:79-106: both render paths call `inlines_to_md` exactly
         // once for the single generated row's single cell -- the merged
         // branch via `<td>{esc(c)}</td>` (line 92), the pipe-table branch via
