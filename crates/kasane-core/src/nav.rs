@@ -9,6 +9,34 @@ use kasane_ir::{Block, Document, Inline, RefTarget};
 pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     let root_title = doc.meta.title.clone();
     let mut tree = fold_sections(&doc);
+    // `doc` is fully cloned into `tree` above; nothing after this point reads
+    // it. Tear it down explicitly instead of letting it fall out of scope:
+    // `Inline` has no manual `Drop`, so the ordinary, compiler-derived one
+    // recurses on block/inline nesting depth exactly like the walks and
+    // clones bounded elsewhere in this module — an externally supplied
+    // `Document` can be arbitrarily deep, and dropping it normally would
+    // abort the process on the way out of this published entry point even
+    // though every INLINE walk over it is now bounded.
+    //
+    // Inline, and only inline. BLOCK nesting (`Block::List`/`Block::Footnote`)
+    // is **not bounded anywhere in this codebase** — the same fact
+    // `kasane-adapters`'s `fuzz_entry::max_inline_depth` states at length: not
+    // in the EPUB parser's `frames` stack, not in `kasane-core`, not in the
+    // writer. `section::clone_block`, `balance::est_tokens_block`,
+    // `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still
+    // recurse on it, so a document nesting lists or footnotes deeply enough
+    // still aborts the process on a stack overflow (README's Known
+    // limitations records it; bounding it is open work). What the call below
+    // buys is narrower, and worth stating precisely: on the *drop* side block
+    // nesting IS bounded, because `teardown_document` pops blocks from an
+    // explicit worklist too. The walk and clone sides are not.
+    //
+    // `kasane_ir::teardown_document` (shared with `kasane-adapters`'s fuzz
+    // seam, which has the identical hazard for the identical reason) lives
+    // beside `Block`/`Inline` rather than here so the exhaustive match inside
+    // it stays a single copy the compiler checks once, not two copies that can
+    // silently drift apart.
+    kasane_ir::teardown_document(doc);
     balance(&mut tree, opts);
     let mut result = assign_paths(tree);
     resolve_refs(&mut result.root, &result.anchors);
@@ -61,6 +89,10 @@ fn walk(
     let child_paths: Vec<String> = p.children.iter().map(|c| c.path.clone()).collect();
 
     // Body: for a directory node with children, prepend an auto TOC.
+    // Plain `.clone()` is safe here only because everything downstream of
+    // `fold_sections`'s bounded clone (this `walk` included) never sees
+    // inline nesting past `kasane_ir::MAX_INLINE_DEPTH`; don't reintroduce a
+    // hand-built, unbounded `Placed` into this path without re-checking that.
     let mut blocks = p.node.body.clone();
     if !p.children.is_empty() {
         let toc = Block::List {
@@ -71,7 +103,15 @@ fn walk(
                 .map(|c| {
                     vec![Block::Para(vec![Inline::Link {
                         target: RefTarget::External(crate::refs::relativize(&p.path, &c.path)),
-                        inlines: vec![Inline::Text(child_title(c, doc_title))],
+                        // A child is never the root, so it always has a title
+                        // of its own: a real heading's inlines, or `Part N` for
+                        // a synthetic split part. The `title` binding above
+                        // substitutes the document title only for the root, and
+                        // only because `trail.is_empty()` pins it there; the
+                        // TOC used to key off `id.is_none()` alone, which is
+                        // also true of every synthetic part, so a split body
+                        // produced a TOC of N entries all named after the book.
+                        inlines: vec![Inline::Text(inline_text(&c.node.title))],
                     }])]
                 })
                 .collect(),
@@ -95,14 +135,6 @@ fn walk(
 
     for c in &p.children {
         walk(c, doc_title, &breadcrumb, Some(&p.path), order, files);
-    }
-}
-
-fn child_title(p: &Placed, doc_title: &str) -> String {
-    if p.node.id.is_none() {
-        doc_title.to_string()
-    } else {
-        inline_text(&p.node.title)
     }
 }
 
@@ -162,5 +194,56 @@ mod tests {
             root.frontmatter.children,
             vec!["01-intro.md", "02-methods.md"]
         );
+    }
+
+    #[test]
+    fn toc_names_synthetic_parts_by_their_own_title() {
+        // A split body becomes `Part N` children. Labelling a TOC entry with
+        // the document title whenever the child has no `BlockId` made every
+        // one of them read "My Book".
+        let doc = Document {
+            meta: DocMeta {
+                title: "My Book".into(),
+                authors: vec![],
+                language: None,
+                source_format: "epub".into(),
+                source_path: "b.epub".into(),
+            },
+            nodes: vec![
+                Node {
+                    block: Block::Para(vec![Inline::Text("x".repeat(1200))]),
+                    prov: Provenance::default(),
+                },
+                Node {
+                    block: Block::Para(vec![Inline::Text("x".repeat(1200))]),
+                    prov: Provenance::default(),
+                },
+            ],
+        };
+        let site = structure(
+            doc,
+            &Options {
+                max_tokens: 200,
+                min_tokens: 10,
+            },
+        );
+        let root = site.files.iter().find(|f| f.path == "index.md").unwrap();
+        let toc = match &root.blocks[0] {
+            Block::List { items, .. } => items
+                .iter()
+                .map(|it| match &it[0] {
+                    Block::Para(inls) => match &inls[0] {
+                        Inline::Link { inlines, .. } => match &inlines[0] {
+                            Inline::Text(t) => t.clone(),
+                            _ => panic!("expected link text"),
+                        },
+                        _ => panic!("expected link"),
+                    },
+                    _ => panic!("expected para"),
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!("expected a TOC list"),
+        };
+        assert_eq!(toc, vec!["Part 1", "Part 2"]);
     }
 }

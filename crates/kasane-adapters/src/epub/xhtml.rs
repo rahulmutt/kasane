@@ -2,6 +2,19 @@ use kasane_ir::{AssetRef, Block, BlockId, Inline, NoteId, RefTarget};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+/// Maximum inline nesting this parser preserves as nested `Inline` values.
+///
+/// The frame stack that builds inlines is iterative, so parsing arbitrarily
+/// nested `<em>`/`<strong>`/`<a>` never overflows here — but it hands the core
+/// and the writer an `Inline` tree they walk recursively. Bounding the produced
+/// depth is what keeps a hostile book from reaching
+/// `kasane_ir::MAX_INLINE_DEPTH`.
+///
+/// This is a *fidelity* bound, not a safety one: past it a closing inline tag
+/// contributes its text instead of another wrapper, so no content is lost. 64 is
+/// far past any real book's `<em><strong><a>` layering.
+pub(crate) const MAX_INLINE_DEPTH: usize = 64;
+
 // Open block containers. Finished blocks land in the top frame instead of the
 // output; closing the container folds the frame into its parent. This is what
 // makes nesting (list items holding paragraphs, lists holding lists)
@@ -256,6 +269,25 @@ fn inlines_text(inls: &[Inline]) -> String {
         }
     }
     s
+}
+
+/// Wraps `x` in `wrap`, unless doing so would push nesting past
+/// `MAX_INLINE_DEPTH` — in which case the content is contributed as flat text.
+///
+/// `depth` is the inline-frame depth *after* the frame being closed was popped,
+/// so it is the depth of the frame that will receive the result — that is, the
+/// nesting level the wrapper this call returns would *occupy*, not the number of
+/// levels already descended. Hence `>` here where `kasane-core` and
+/// `kasane-writer` write `depth >= kasane_ir::MAX_INLINE_DEPTH`: with `depth`
+/// counting the resulting level, `>` admits exactly `MAX_INLINE_DEPTH` levels of
+/// nesting, the same count `>=` admits over there. The two idioms differ only in
+/// what `depth` names; both bounds are inclusive of `MAX_INLINE_DEPTH` levels.
+fn wrap_inline(depth: usize, wrap: fn(Vec<Inline>) -> Inline, x: Vec<Inline>) -> Inline {
+    if depth > MAX_INLINE_DEPTH {
+        Inline::Text(inlines_text(&x))
+    } else {
+        wrap(x)
+    }
 }
 
 // Inline-level tags do NOT terminate an implicit paragraph; everything else
@@ -843,18 +875,21 @@ pub fn xhtml_to_blocks(
                 match e.local_name().as_ref() {
                     b"strong" | b"b" => {
                         let x = inline_stack.pop().unwrap_or_default();
+                        let depth = inline_stack.len();
                         if let Some(top) = inline_stack.last_mut() {
-                            top.push(Inline::Strong(x));
+                            top.push(wrap_inline(depth, Inline::Strong, x));
                         }
                     }
                     b"em" | b"i" => {
                         let x = inline_stack.pop().unwrap_or_default();
+                        let depth = inline_stack.len();
                         if let Some(top) = inline_stack.last_mut() {
-                            top.push(Inline::Emph(x));
+                            top.push(wrap_inline(depth, Inline::Emph, x));
                         }
                     }
                     b"a" => {
                         let x = inline_stack.pop().unwrap_or_default();
+                        let depth = inline_stack.len();
                         let target = match link_href.take() {
                             // EPUB internal links (both same-file `#frag` and cross-file
                             // `file.xhtml#frag` forms) currently pass through unresolved as
@@ -864,7 +899,11 @@ pub fn xhtml_to_blocks(
                             None => RefTarget::External(String::new()),
                         };
                         if let Some(top) = inline_stack.last_mut() {
-                            top.push(Inline::Link { target, inlines: x });
+                            if depth > MAX_INLINE_DEPTH {
+                                top.push(Inline::Text(inlines_text(&x)));
+                            } else {
+                                top.push(Inline::Link { target, inlines: x });
+                            }
                         }
                     }
                     b"code" => {
@@ -2382,6 +2421,91 @@ mod tests {
             blocks.iter().any(|b| matches!(b, Block::Para(i)
                 if i.iter().any(|x| matches!(x, Inline::Text(t) if t.contains("AFTER"))))),
             "content after the over-deep island must survive, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn deep_inline_nesting_is_flattened_not_preserved() {
+        fn depth_of(inls: &[Inline]) -> usize {
+            inls.iter()
+                .map(|i| match i {
+                    Inline::Emph(x) | Inline::Strong(x) => 1 + depth_of(x),
+                    Inline::Link { inlines, .. } => 1 + depth_of(inlines),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+
+        // 300 nested <em>, well past MAX_INLINE_DEPTH.
+        let n = 300;
+        let xml = format!(
+            "<body><p>{}deep{}</p></body>",
+            "<em>".repeat(n),
+            "</em>".repeat(n)
+        );
+        let blocks = parse_blocks(&xml);
+
+        let inls = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert!(
+            depth_of(inls) <= MAX_INLINE_DEPTH,
+            "nesting must be flattened to the bound, got {}",
+            depth_of(inls)
+        );
+        // Flattening preserves content: this is a fidelity bound, not a safety one.
+        assert!(
+            inlines_text(inls).contains("deep"),
+            "flattening must keep the text"
+        );
+    }
+
+    #[test]
+    fn deep_anchor_nesting_is_flattened_not_preserved() {
+        fn depth_of(inls: &[Inline]) -> usize {
+            inls.iter()
+                .map(|i| match i {
+                    Inline::Emph(x) | Inline::Strong(x) => 1 + depth_of(x),
+                    Inline::Link { inlines, .. } => 1 + depth_of(inlines),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+
+        // 300 nested <a>, well past MAX_INLINE_DEPTH.
+        // Anchors are invalid XHTML but quick_xml is non-validating and emits Start/End
+        // for whatever the byte stream contains.
+        let n = 300;
+        let xml = format!(
+            "<body><p>{}<a href=\"#\">text</a>{}</p></body>",
+            "<a href=\"#\">".repeat(n),
+            "</a>".repeat(n)
+        );
+        let blocks = parse_blocks(&xml);
+
+        let inls = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert!(
+            depth_of(inls) <= MAX_INLINE_DEPTH,
+            "anchor nesting must be flattened to the bound, got {}",
+            depth_of(inls)
+        );
+        // Flattening preserves content: the anchor text survives.
+        assert!(
+            inlines_text(inls).contains("text"),
+            "flattening must keep the text, got {}",
+            inlines_text(inls)
         );
     }
 }

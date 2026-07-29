@@ -1,5 +1,5 @@
 use crate::section::{SectionNode, SectionTree};
-use kasane_ir::{BlockId, Inline};
+use kasane_ir::{Block, BlockId, Inline};
 use std::collections::HashMap;
 
 pub struct Placed {
@@ -28,6 +28,16 @@ fn place(
 ) -> Placed {
     if let Some(id) = node.id {
         anchors.insert(id, format!("{}#{}", self_path, slug(&node.title)));
+    }
+    // A merged subsection's heading lives in its parent's body (balance.rs
+    // demotes it there), and nothing else would give it an anchor. Only
+    // top-level body blocks are scanned: a heading nested inside a list item was
+    // never folded into a section either, and giving it an anchor would invent
+    // structure the engine does not model.
+    for b in &node.body {
+        if let Block::Heading { id, inlines, .. } = b {
+            anchors.insert(*id, format!("{}#{}", self_path, slug(inlines)));
+        }
     }
     let children = std::mem::take(&mut node.children);
     let mut placed = Vec::new();
@@ -58,6 +68,16 @@ fn join(dir: &str, name: &str) -> String {
     }
 }
 
+/// Slug for a heading's inlines, as `assign_paths` computes it.
+///
+/// `#[doc(hidden)]` test seam, same rationale as `est_tokens`: the link
+/// invariant has to compare a rendered heading against the anchor the engine
+/// emitted, using the engine's own slug rule rather than a copy of it.
+#[doc(hidden)]
+pub fn slug_of(inlines: &[Inline]) -> String {
+    slug(inlines)
+}
+
 pub(crate) fn slug(inlines: &[Inline]) -> String {
     let text = inline_text(inlines);
     let mut out = String::new();
@@ -83,15 +103,22 @@ pub(crate) fn slug(inlines: &[Inline]) -> String {
 
 pub(crate) fn inline_text(inlines: &[Inline]) -> String {
     let mut s = String::new();
+    inline_text_at(inlines, 0, &mut s);
+    s
+}
+
+fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return;
+    }
     for i in inlines {
         match i {
             Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => s.push_str(t),
-            Inline::Emph(x) | Inline::Strong(x) => s.push_str(&inline_text(x)),
-            Inline::Link { inlines, .. } => s.push_str(&inline_text(inlines)),
+            Inline::Emph(x) | Inline::Strong(x) => inline_text_at(x, depth + 1, s),
+            Inline::Link { inlines, .. } => inline_text_at(inlines, depth + 1, s),
             Inline::FootnoteRef(_) => {}
         }
     }
-    s
 }
 
 #[cfg(test)]
@@ -139,5 +166,27 @@ mod tests {
         assert_eq!(placed.root.children[1].path, "02-methods.md"); // leaf -> file
                                                                    // anchor map points at the file+slug
         assert_eq!(placed.anchors[&BlockId(2)], "02-methods.md#methods");
+    }
+
+    #[test]
+    fn body_headings_get_anchors_too() {
+        // A merged subsection's heading lives in its parent's body after balance.
+        // It must still be reachable by a cross-reference.
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![Block::Heading {
+                    level: 2,
+                    id: BlockId(9),
+                    inlines: vec![Inline::Text("Merged Bit".into())],
+                }],
+                children: vec![],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree);
+        assert_eq!(placed.anchors[&BlockId(9)], "index.md#merged-bit");
     }
 }

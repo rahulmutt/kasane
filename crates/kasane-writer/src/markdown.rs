@@ -111,19 +111,30 @@ fn render_table(t: &Table, out: &mut String) {
 }
 
 pub(crate) fn inlines_to_md(inls: &[Inline]) -> String {
+    inlines_to_md_at(inls, 0)
+}
+
+fn inlines_to_md_at(inls: &[Inline], depth: usize) -> String {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return String::new();
+    }
     let mut s = String::new();
     for i in inls {
         match i {
             Inline::Text(t) => s.push_str(t),
-            Inline::Emph(x) => s.push_str(&format!("*{}*", inlines_to_md(x))),
-            Inline::Strong(x) => s.push_str(&format!("**{}**", inlines_to_md(x))),
+            Inline::Emph(x) => s.push_str(&format!("*{}*", inlines_to_md_at(x, depth + 1))),
+            Inline::Strong(x) => s.push_str(&format!("**{}**", inlines_to_md_at(x, depth + 1))),
             Inline::Code(t) => s.push_str(&format!("`{}`", t)),
             Inline::Math(t) => s.push_str(&format!("${}$", t)),
             Inline::Link {
                 target: RefTarget::External(u),
                 inlines,
-            } => s.push_str(&format!("[{}]({})", inlines_to_md(inlines), u)),
-            Inline::Link { inlines, .. } => s.push_str(&inlines_to_md(inlines)), // unresolved -> text
+            } => s.push_str(&format!(
+                "[{}]({})",
+                inlines_to_md_at(inlines, depth + 1),
+                u
+            )),
+            Inline::Link { inlines, .. } => s.push_str(&inlines_to_md_at(inlines, depth + 1)), // unresolved -> text
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
     }

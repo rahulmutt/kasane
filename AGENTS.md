@@ -13,7 +13,37 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `fuzz/artifacts/**` through those same functions on stable, so fuzz coverage
   reaches PR CI without a nightly toolchain.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
+  `balance`'s SPLIT fires on any node whose own body is over `max_tokens`, not
+  only on leaves: a container's body is the run of blocks between its heading
+  and its first subheading (for the root, the whole preamble), and leaving that
+  in the container's file at any size broke the size guard for `index.md`
+  itself. The synthetic `Part N` sections are *prepended* to the existing
+  children so pre-order flattening still reads in document order — which means
+  they also take the leading path numbers (`01-part-1.md`, `02-part-2.md`, then
+  `03-real-chapter.md`). This is a user-visible **path** change, not just a
+  content one; README's "Output shape" is the user-facing statement of it.
+  `est_tokens` and `slug_of` are `#[doc(hidden)] pub` test seams, not API — the
+  same convention `kasane-adapters` uses for `fuzz_entry`, and for the same
+  reason: the property tier needs the engine's own token estimate and slug rule,
+  and a copy in the test would drift.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing. Also emits the batch library index (`library.rs`).
+  `file_to_markdown` opens every file with its frontmatter title as a heading.
+  That is load-bearing, not cosmetic: `fold_sections` consumes a section's
+  heading into `SectionNode.title` and never re-emits it, while `assign_paths`
+  records the anchor as `path#slug(title)` — without the heading here, every
+  in-book cross-reference pointed at an anchor no file contained. Its sibling
+  half is `assign_paths`' scan of top-level body blocks, which anchors a
+  heading `balance` demoted into its parent's body when it merged a tiny
+  subsection; the two only work together.
+  `tests/properties.rs` is design spec §9's property tier: it generates
+  adapter-realistic `Document`s (`tests/generator/`), runs `structure()`, renders
+  each file with `file_to_markdown`, and asserts six invariants against the
+  resulting Markdown — conservation, link resolution, the size guard, the
+  prev/next chain, path well-formedness, determinism. It reaches the writer
+  rather than stopping at `kasane-core` because §9's link invariant is about a
+  real file *and a real anchor*, which only rendered text can answer.
+  `file_to_markdown` is what both the property suite and `write_tree_contents`
+  render through, so what CI asserts is what a conversion writes.
 - `crates/kasane-cli`     `kasane` binary; wires the pipeline; owns exit codes.
   `convert.rs` converts one document (`WorkItem` -> `Converted`) and returns a
   `Result` rather than exiting, which is what makes per-file failure isolation
@@ -48,4 +78,19 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   so the stable suite stays green without dropping the input; remove the entry
   when the fix lands.
 - The nightly toolchain pin, like the Rust and cargo-deny pins, is a manual bump.
+- A failing property writes `crates/kasane-writer/tests/properties.proptest-regressions`.
+  Commit it, for the same reason a fuzz reproducer is committed: it is what makes
+  the found case a permanent regression test.
+- Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
+  (64) is a fidelity bound that flattens without losing content;
+  `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
+  recursive walks, which adapter-produced IR can never reach. Unbounded, deep
+  nesting aborts the process on a stack overflow.
+  BLOCK nesting (`Block::List`/`Block::Footnote`) is bounded **nowhere**. Only
+  the drop side is safe, via `kasane_ir::teardown_document`'s explicit
+  worklist; `section::clone_block`, `balance::est_tokens_block`,
+  `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still recurse
+  on it, so a deep enough list or footnote still aborts the process. Open work,
+  recorded under README's Known limitations — do not write a comment anywhere
+  that implies every walk is bounded.
 - Every change ships green under `mise run lint && mise run test`.

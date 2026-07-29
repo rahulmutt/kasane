@@ -46,20 +46,32 @@ fn fix_block(b: &mut Block, from: &str, anchors: &HashMap<BlockId, String>) {
 }
 
 fn fix_inlines(inls: &mut Vec<Inline>, from: &str, anchors: &HashMap<BlockId, String>) {
+    fix_inlines_at(inls, from, anchors, 0);
+}
+
+fn fix_inlines_at(
+    inls: &mut Vec<Inline>,
+    from: &str,
+    anchors: &HashMap<BlockId, String>,
+    depth: usize,
+) {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return;
+    }
     let mut out = Vec::with_capacity(inls.len());
     for inl in std::mem::take(inls) {
-        out.push(fix_inline(inl, from, anchors));
+        out.push(fix_inline(inl, from, anchors, depth));
     }
     *inls = out;
 }
 
-fn fix_inline(inl: Inline, from: &str, anchors: &HashMap<BlockId, String>) -> Inline {
+fn fix_inline(inl: Inline, from: &str, anchors: &HashMap<BlockId, String>, depth: usize) -> Inline {
     match inl {
         Inline::Link {
             target: RefTarget::Internal(id),
             mut inlines,
         } => {
-            fix_inlines(&mut inlines, from, anchors);
+            fix_inlines_at(&mut inlines, from, anchors, depth + 1);
             match anchors.get(&id) {
                 Some(target) => Inline::Link {
                     target: RefTarget::External(relativize(from, target)),
@@ -72,15 +84,15 @@ fn fix_inline(inl: Inline, from: &str, anchors: &HashMap<BlockId, String>) -> In
             target,
             mut inlines,
         } => {
-            fix_inlines(&mut inlines, from, anchors);
+            fix_inlines_at(&mut inlines, from, anchors, depth + 1);
             Inline::Link { target, inlines }
         }
         Inline::Emph(mut x) => {
-            fix_inlines(&mut x, from, anchors);
+            fix_inlines_at(&mut x, from, anchors, depth + 1);
             Inline::Emph(x)
         }
         Inline::Strong(mut x) => {
-            fix_inlines(&mut x, from, anchors);
+            fix_inlines_at(&mut x, from, anchors, depth + 1);
             Inline::Strong(x)
         }
         other => other,
