@@ -41,6 +41,19 @@ produced. One file's failure never aborts the run.
     mise run test    # run all tests
     mise run lint    # fmt check + clippy -D warnings
 
+### Property tests
+
+`kasane-core`'s structuring engine is checked with `proptest`: generated
+documents run through `structure()` and the Markdown writer, and six invariants
+are asserted against the rendered text — every block appears exactly once, every
+internal link resolves to a real file and a real anchor, the size guard holds,
+`prev`/`next` forms a complete chain, no path escapes the tree, and rendering is
+deterministic. They run in `mise run test` with no extra setup.
+
+When a property fails it writes `crates/kasane-writer/tests/properties.proptest-regressions`.
+**Commit that file** — like a fuzz reproducer, it is what replays the failing
+case on every subsequent run.
+
 ### Fuzzing
 
 Every adapter parses untrusted input, so the boundary is fuzzed with

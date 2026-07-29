@@ -13,7 +13,20 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `fuzz/artifacts/**` through those same functions on stable, so fuzz coverage
   reaches PR CI without a nightly toolchain.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
+  `est_tokens` and `slug_of` are `#[doc(hidden)] pub` test seams, not API — the
+  same convention `kasane-adapters` uses for `fuzz_entry`, and for the same
+  reason: the property tier needs the engine's own token estimate and slug rule,
+  and a copy in the test would drift.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing. Also emits the batch library index (`library.rs`).
+  `tests/properties.rs` is design spec §9's property tier: it generates
+  adapter-realistic `Document`s (`tests/generator/`), runs `structure()`, renders
+  each file with `file_to_markdown`, and asserts six invariants against the
+  resulting Markdown — conservation, link resolution, the size guard, the
+  prev/next chain, path well-formedness, determinism. It reaches the writer
+  rather than stopping at `kasane-core` because §9's link invariant is about a
+  real file *and a real anchor*, which only rendered text can answer.
+  `file_to_markdown` is what both the property suite and `write_tree_contents`
+  render through, so what CI asserts is what a conversion writes.
 - `crates/kasane-cli`     `kasane` binary; wires the pipeline; owns exit codes.
   `convert.rs` converts one document (`WorkItem` -> `Converted`) and returns a
   `Result` rather than exiting, which is what makes per-file failure isolation
@@ -48,4 +61,12 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   so the stable suite stays green without dropping the input; remove the entry
   when the fix lands.
 - The nightly toolchain pin, like the Rust and cargo-deny pins, is a manual bump.
+- A failing property writes `crates/kasane-writer/tests/properties.proptest-regressions`.
+  Commit it, for the same reason a fuzz reproducer is committed: it is what makes
+  the found case a permanent regression test.
+- Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
+  (64) is a fidelity bound that flattens without losing content;
+  `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
+  recursive walks, which adapter-produced IR can never reach. Unbounded, deep
+  nesting aborts the process on a stack overflow.
 - Every change ships green under `mise run lint && mise run test`.

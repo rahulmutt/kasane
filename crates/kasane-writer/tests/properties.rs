@@ -5,9 +5,11 @@
 //! §9's link invariant is about a real file and a real anchor, and only the
 //! rendered text can answer that.
 //!
-//! A failure writes `proptest-regressions/properties.txt`. **Commit it.** That
-//! file is what turns a bug the search found into a permanent regression test,
-//! exactly as `fuzz/artifacts/` reproducers are.
+//! A failure writes `crates/kasane-writer/tests/properties.proptest-regressions`
+//! (proptest's `SourceParallel` strategy falls back to `WithSource` here, since
+//! there is no `lib.rs`/`main.rs` above a `tests/` file for it to key on).
+//! **Commit it.** That file is what turns a bug the search found into a
+//! permanent regression test, exactly as `fuzz/artifacts/` reproducers are.
 
 mod generator;
 
