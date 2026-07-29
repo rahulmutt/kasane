@@ -208,7 +208,7 @@ pub(crate) fn fix_links(
 ) {
     for n in nodes {
         let file = n.prov.source_href.clone().unwrap_or_default();
-        fix_block_links(&mut n.block, &file, map, footnote_map, noteref_keys);
+        fix_block_links(&mut n.block, &file, map, footnote_map, noteref_keys, 0);
     }
 }
 
@@ -218,7 +218,15 @@ fn fix_block_links(
     map: &std::collections::HashMap<(String, String), BlockId>,
     footnote_map: &std::collections::HashMap<(String, String), NoteId>,
     noteref_keys: &std::collections::HashSet<(String, String)>,
+    depth: usize,
 ) {
+    // Unreachable via this crate's own parser, which flattens at
+    // `xhtml::MAX_BLOCK_DEPTH` -- but this walk runs on every EPUB and MOBI
+    // parse, so the guard is what makes its safety independent of who built
+    // the IR rather than contingent on it.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     match b {
         Block::Para(inls) | Block::Heading { inlines: inls, .. } => {
             fix_inline_vec(inls, file, map, footnote_map, noteref_keys)
@@ -226,13 +234,13 @@ fn fix_block_links(
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    fix_block_links(ib, file, map, footnote_map, noteref_keys);
+                    fix_block_links(ib, file, map, footnote_map, noteref_keys, depth + 1);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                fix_block_links(ib, file, map, footnote_map, noteref_keys);
+                fix_block_links(ib, file, map, footnote_map, noteref_keys, depth + 1);
             }
         }
         Block::Table(t) => {
