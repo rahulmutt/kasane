@@ -201,6 +201,36 @@ fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
     }
 }
 
+/// Assigns anchors to one file's headings in render order, uniquifying
+/// duplicates the way GitHub does.
+///
+/// One instance per file. The first occurrence of a base keeps it, the next
+/// gets `-1`, then `-2`. GitHub does not re-check whether the suffixed form
+/// itself collides with an existing id, and neither does this -- mirroring the
+/// quirk is the point.
+pub(crate) struct AnchorCounter {
+    seen: std::collections::HashMap<String, usize>,
+}
+
+impl AnchorCounter {
+    pub(crate) fn new() -> Self {
+        Self {
+            seen: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The anchor for the next heading in render order. Every heading the file
+    /// renders must pass through here, including ones that get no anchor of
+    /// their own -- they still consume a slot on the rendered page.
+    pub(crate) fn next(&mut self, inlines: &[Inline]) -> String {
+        let base = anchor_slug(inlines);
+        let n = self.seen.entry(base.clone()).or_insert(0);
+        let out = if *n == 0 { base } else { format!("{base}-{n}") };
+        *n += 1;
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 use crate::section::{SectionNode, SectionTree};
-use crate::slug::{anchor_slug, path_slug};
-use kasane_ir::{Block, BlockId};
+use crate::slug::{path_slug, AnchorCounter};
+use kasane_ir::{Block, BlockId, Inline};
 use std::collections::HashMap;
 
 pub struct Placed {
@@ -14,32 +14,52 @@ pub struct PlaceResult {
     pub anchors: HashMap<BlockId, String>,
 }
 
-pub fn assign_paths(tree: SectionTree) -> PlaceResult {
+/// `doc_title` is what `file_to_markdown` renders as `index.md`'s heading --
+/// the root `SectionNode`'s own title is empty, and `nav::walk` substitutes
+/// the document title there. The anchor counter has to see the text the file
+/// actually renders or the root's duplicate suffixes are off by one.
+pub fn assign_paths(tree: SectionTree, doc_title: &str) -> PlaceResult {
     let mut anchors = HashMap::new();
-    let root = place(tree.root, "index.md", "", &mut anchors);
+    let root = place(tree.root, "index.md", "", doc_title, &mut anchors);
     PlaceResult { root, anchors }
 }
 
 // self_path: this node's markdown file path. dir: directory children live in.
+// doc_title: only meaningful for the root; see `assign_paths`.
 fn place(
     mut node: SectionNode,
     self_path: &str,
     dir: &str,
+    doc_title: &str,
     anchors: &mut HashMap<BlockId, String>,
 ) -> Placed {
+    // One counter per file, fed in the order `file_to_markdown` renders: the
+    // title heading it prepends, then the body.
+    let mut counter = AnchorCounter::new();
+
+    // Every file renders a title heading, so every file consumes this slot --
+    // including `index.md`, whose heading is the document title rather than
+    // the (empty) root node title. `nav::walk` pins the substitution on
+    // `id.is_none() && trail.is_empty()`; `dir.is_empty()` is the same
+    // condition here.
+    let title_anchor = if node.id.is_none() && dir.is_empty() {
+        counter.next(&[Inline::Text(doc_title.to_string())])
+    } else {
+        counter.next(&node.title)
+    };
     if let Some(id) = node.id {
-        anchors.insert(id, format!("{}#{}", self_path, anchor_slug(&node.title)));
+        anchors.insert(id, format!("{}#{}", self_path, title_anchor));
     }
+
     // A merged subsection's heading lives in its parent's body (balance.rs
     // demotes it there), and nothing else would give it an anchor. Only
-    // top-level body blocks are scanned: a heading nested inside a list item was
-    // never folded into a section either, and giving it an anchor would invent
-    // structure the engine does not model.
-    for b in &node.body {
-        if let Block::Heading { id, inlines, .. } = b {
-            anchors.insert(*id, format!("{}#{}", self_path, anchor_slug(inlines)));
-        }
-    }
+    // top-level body blocks are ANCHORED: a heading nested inside a list item
+    // was never folded into a section either, and giving it an anchor would
+    // invent structure the engine does not model. Every rendered heading is
+    // still COUNTED, nested ones included, because GitHub assigns them ids and
+    // they therefore consume duplicate-suffix slots.
+    count_headings(&node.body, 0, true, self_path, &mut counter, anchors);
+
     let children = std::mem::take(&mut node.children);
     let mut placed = Vec::new();
     for (i, child) in children.into_iter().enumerate() {
@@ -47,17 +67,55 @@ fn place(
         let child_slug = path_slug(&child.title);
         if child.children.is_empty() {
             let p = join(dir, &format!("{:02}-{}.md", n, child_slug));
-            placed.push(place(child, &p, dir, anchors));
+            placed.push(place(child, &p, dir, doc_title, anchors));
         } else {
             let cdir = join(dir, &format!("{:02}-{}", n, child_slug));
             let p = format!("{}/index.md", cdir);
-            placed.push(place(child, &p, &cdir, anchors));
+            placed.push(place(child, &p, &cdir, doc_title, anchors));
         }
     }
     Placed {
         path: self_path.to_string(),
         node,
         children: placed,
+    }
+}
+
+/// Walks a file's blocks in render order, feeding every heading to the
+/// counter and anchoring only the top-level ones.
+///
+/// Recursive on block nesting, so it carries `kasane_ir::MAX_BLOCK_DEPTH` like
+/// every other block walk in this crate. Past the bound the subtree renders as
+/// a truncation note with no headings in it, so stopping here costs nothing.
+fn count_headings(
+    blocks: &[Block],
+    depth: usize,
+    top_level: bool,
+    self_path: &str,
+    counter: &mut AnchorCounter,
+    anchors: &mut HashMap<BlockId, String>,
+) {
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
+    for b in blocks {
+        match b {
+            Block::Heading { id, inlines, .. } => {
+                let a = counter.next(inlines);
+                if top_level {
+                    anchors.insert(*id, format!("{}#{}", self_path, a));
+                }
+            }
+            Block::List { items, .. } => {
+                for item in items {
+                    count_headings(item, depth + 1, false, self_path, counter, anchors);
+                }
+            }
+            Block::Footnote { blocks, .. } => {
+                count_headings(blocks, depth + 1, false, self_path, counter, anchors);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -106,7 +164,7 @@ mod tests {
             h(2, 1, "Background & Notes"),
             h(1, 2, "Methods"),
         ]));
-        let placed = assign_paths(tree);
+        let placed = assign_paths(tree, "B");
         assert_eq!(placed.root.path, "index.md");
         let intro = &placed.root.children[0];
         assert_eq!(intro.path, "01-intro/index.md"); // has a child -> dir
@@ -134,7 +192,174 @@ mod tests {
                 pages: None,
             },
         };
-        let placed = assign_paths(tree);
+        let placed = assign_paths(tree, "");
         assert_eq!(placed.anchors[&BlockId(9)], "index.md#merged-bit");
+    }
+
+    #[test]
+    fn duplicate_titles_get_github_style_suffixes() {
+        // Two body headings with the same title. GitHub gives the first the
+        // bare id and the second `-1`; before this, both got `#notes` and one
+        // cross-reference silently landed on the other's heading.
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![
+                    Block::Heading {
+                        level: 2,
+                        id: BlockId(1),
+                        inlines: vec![Inline::Text("Notes".into())],
+                    },
+                    Block::Heading {
+                        level: 2,
+                        id: BlockId(2),
+                        inlines: vec![Inline::Text("Notes".into())],
+                    },
+                ],
+                children: vec![],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert_eq!(placed.anchors[&BlockId(1)], "index.md#notes");
+        assert_eq!(placed.anchors[&BlockId(2)], "index.md#notes-1");
+    }
+
+    #[test]
+    fn the_files_own_title_consumes_the_first_slot() {
+        // `file_to_markdown` prepends the file's title as a heading, so a body
+        // heading repeating that title is the SECOND occurrence on the page.
+        //
+        // Built as a literal `SectionTree`, like `body_headings_get_anchors_too`
+        // above: `fold_sections` never folds a heading into a parent's `body`
+        // (only `balance` does, by demoting a merged subsection's heading
+        // there), so a `Block::Heading` node run through `fold_sections` would
+        // become a genuine nested child section -- its own file -- rather than
+        // a body heading sharing this file with "Notes".
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![],
+                children: vec![SectionNode {
+                    id: Some(BlockId(0)),
+                    level: 1,
+                    title: vec![Inline::Text("Notes".into())],
+                    body: vec![Block::Heading {
+                        level: 3,
+                        id: BlockId(5),
+                        inlines: vec![Inline::Text("Notes".into())],
+                    }],
+                    children: vec![],
+                    pages: None,
+                }],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert_eq!(placed.anchors[&BlockId(0)], "01-notes.md#notes");
+        assert_eq!(placed.anchors[&BlockId(5)], "01-notes.md#notes-1");
+    }
+
+    #[test]
+    fn the_root_file_counts_the_document_title() {
+        // index.md renders the DOCUMENT title as its heading -- the root
+        // node's own `title` is empty. Counting `node.title` here would slug
+        // `section` and leave the body heading unsuffixed against a page that
+        // really does have two `#book` ids.
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![Block::Heading {
+                    level: 2,
+                    id: BlockId(3),
+                    inlines: vec![Inline::Text("Book".into())],
+                }],
+                children: vec![],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert_eq!(placed.anchors[&BlockId(3)], "index.md#book-1");
+    }
+
+    #[test]
+    fn a_nested_heading_consumes_a_slot_without_getting_an_anchor() {
+        // A heading inside a list item was never folded into a section, so it
+        // gets no anchor -- but GitHub still gives it an id when it renders,
+        // so it takes `notes-1` and pushes the next top-level heading to
+        // `notes-2`. Counting only top-level headings would put `-1` on the
+        // wrong heading.
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![
+                    Block::Heading {
+                        level: 2,
+                        id: BlockId(1),
+                        inlines: vec![Inline::Text("Notes".into())],
+                    },
+                    Block::List {
+                        ordered: false,
+                        items: vec![vec![Block::Heading {
+                            level: 3,
+                            id: BlockId(2),
+                            inlines: vec![Inline::Text("Notes".into())],
+                        }]],
+                    },
+                    Block::Heading {
+                        level: 2,
+                        id: BlockId(3),
+                        inlines: vec![Inline::Text("Notes".into())],
+                    },
+                ],
+                children: vec![],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert_eq!(placed.anchors[&BlockId(1)], "index.md#notes");
+        assert!(
+            !placed.anchors.contains_key(&BlockId(2)),
+            "a nested heading must not gain an anchor"
+        );
+        assert_eq!(placed.anchors[&BlockId(3)], "index.md#notes-2");
+    }
+
+    /// Pins the bound's position, matching how the other core walks are
+    /// tested: nesting past `MAX_BLOCK_DEPTH` must return rather than recurse,
+    /// and a heading below the bound must simply be unreachable.
+    #[test]
+    fn the_counting_walk_is_bounded() {
+        let mut inner = vec![Block::Heading {
+            level: 3,
+            id: BlockId(99),
+            inlines: vec![Inline::Text("Deep".into())],
+        }];
+        for _ in 0..(kasane_ir::MAX_BLOCK_DEPTH + 2) {
+            inner = vec![Block::List {
+                ordered: false,
+                items: vec![inner],
+            }];
+        }
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: inner,
+                children: vec![],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert!(!placed.anchors.contains_key(&BlockId(99)));
     }
 }

@@ -35,7 +35,7 @@ pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     // silently drift apart.
     kasane_ir::teardown_document(doc);
     balance(&mut tree, opts);
-    let mut result = assign_paths(tree);
+    let mut result = assign_paths(tree, &root_title);
     resolve_refs(&mut result.root, &result.anchors);
 
     // Flatten in reading order (pre-order), carrying breadcrumb trail.
