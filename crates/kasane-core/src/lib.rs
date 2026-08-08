@@ -1,3 +1,5 @@
+pub mod fuzz_entry;
+
 mod balance;
 mod nav;
 mod options;

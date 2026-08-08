@@ -33,11 +33,12 @@ fn target(name: &str) -> Option<fn(&[u8])> {
         "palmdoc" => fuzz_entry::palmdoc,
         "guards" => fuzz_entry::guards,
         "xmltext" => fuzz_entry::xmltext,
+        "slug" => kasane_core::fuzz_entry::slug,
         _ => return None,
     })
 }
 
-const TARGET_COUNT: usize = 12;
+const TARGET_COUNT: usize = 13;
 
 /// Reproducers whose underlying bug is still open, keyed on (target
 /// directory, filename) rather than filename alone -- unambiguous if two
@@ -151,6 +152,7 @@ fn every_target_is_reachable_by_name() {
         "palmdoc",
         "guards",
         "xmltext",
+        "slug",
     ];
     assert_eq!(names.len(), TARGET_COUNT);
     for n in names {
