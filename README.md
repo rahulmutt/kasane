@@ -146,10 +146,11 @@ See AGENTS.md for the codebase map.
   `#第二章`, both of which resolve on GitHub. Note that exact parity means
   some anchors look wrong and are not: `## Background & Notes` anchors as
   `#background--notes`, because GFM removes the `&` and turns each surviving
-  space into a hyphen. The exception is a heading with no letter, digit or
-  mark at all (`## ***`): GitHub gives it an empty id, and kasane emits
+  space into a hyphen. The exception is a heading with no letter, digit, mark
+  or `_` at all (`## ***`): GitHub gives it an empty id, and kasane emits
   `#section` instead, because an empty anchor is a dead link.
-  Filenames carry the title in any script, capped at 64 bytes per component.
+  Filenames carry the title in any script, capped at 64 bytes of title per
+  component.
   What they do not carry is total path length: depth comes from heading
   nesting plus whatever `-o` you pass, so a deep book in a deep output
   directory can still exceed Windows' 260-character default path limit.

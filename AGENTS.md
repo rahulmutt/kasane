@@ -12,9 +12,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   panic is the finding. `tests/fuzz_corpus.rs` replays `fuzz/seeds/**` and
   `fuzz/artifacts/**` through those same functions on stable, so fuzz coverage
   reaches PR CI without a nightly toolchain. `kasane-core` has its own
-  `fuzz_entry.rs` for the same reason, reaching `slug::path_slug`; the stable
-  replay for both lives in `kasane-adapters/tests/fuzz_corpus.rs`, which takes
-  `kasane-core` as a dev-dependency so one harness covers every target.
+  `fuzz_entry.rs` for the same reason, reaching `slug::path_slug` and
+  `slug::anchor_slug`; the stable replay for both lives in
+  `kasane-adapters/tests/fuzz_corpus.rs`, which takes `kasane-core` as a
+  dev-dependency so one harness covers every target.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
   `balance`'s SPLIT fires on any node whose own body is over `max_tokens`, not
   only on leaves: a container's body is the run of blocks between its heading
@@ -48,7 +49,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `file_to_markdown` opens every file with its frontmatter title as a heading.
   That is load-bearing, not cosmetic: `fold_sections` consumes a section's
   heading into `SectionNode.title` and never re-emits it, while `assign_paths`
-  records the anchor as `path#slug(title)` — without the heading here, every
+  records the anchor as `path#anchor_slug(title)` — without the heading here, every
   in-book cross-reference pointed at an anchor no file contained. Its sibling
   half is `assign_paths`' scan of top-level body blocks, which anchors a
   heading `balance` demoted into its parent's body when it merged a tiny
