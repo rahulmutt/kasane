@@ -57,8 +57,8 @@ before the rules, because a reader who does not know them will over-build:
 - Per-file duplicate-anchor suffixing, matching GFM (§3.1).
 - A byte cap on path components (§3.2).
 - The character-set argument that keeps destinations raw, pinned by a test
-  (§4), and the untrusted-text-to-filename argument, pinned by the existing
-  `guards` fuzz target (§5.3).
+  (§4), and the untrusted-text-to-filename argument, pinned by a new `slug`
+  fuzz target (§5.3).
 - Two new direct dependencies for `kasane-core` (§2.3).
 - Documentation of the churn and of the one divergence that survives (§6).
 
@@ -240,6 +240,17 @@ The generator is widened to draw non-Latin and punctuation-bearing titles, so
 the link invariant exercises this rule rather than staying on the ASCII path
 README currently describes.
 
+One existing line in that helper inverts under the new rule and would
+otherwise produce a false P2 failure. `heading_slugs` strips `*`, `_`, and
+`` ` `` from a rendered heading line before slugging it, because
+`inlines_to_md` writes those around `Emph`/`Strong`/`Code` while the engine
+slugs `inline_text`, which never sees a marker. `_` was in that set defensively
+— the writer never emits it — but `_` is a Word character, so the engine now
+*keeps* a literal underscore that the helper would strip: a heading `foo_bar`
+anchors as `foo_bar` and the helper would compute `foobar`. `_` comes out of
+the strip set, `*` and `` ` `` stay, and the generator draws a `foo_bar`-shaped
+word so the regression is caught rather than reasoned about.
+
 ### 5.3 Fuzzing
 
 This item makes `kasane-core` write filenames derived from untrusted adapter
@@ -250,11 +261,29 @@ lives. The convention holds anyway, by construction rather than by a guard:
 control-character injection are impossible in the output, and §3.2 bounds the
 length.
 
-Repo habit is to pin such an argument with something executable. The existing
-`guards` fuzz target gains `path_slug` assertions — output contains no path
+Repo habit is to pin such an argument with something executable. A **new
+`slug` target** asserts the postconditions: the output contains no path
 separator, is never a bare `.` or `..`, is never empty, and respects the byte
-cap — plus a seed. No new target: this is a `fuzz_entry` function and an
-assertion inside a target that already exists.
+cap.
+
+It has to be a new target rather than an assertion inside `guards`.
+`fuzz_entry` lives in `kasane-adapters`, which depends on `kasane-ir` alone —
+it cannot reach `kasane-core`, and giving it a dependency on core would invert
+the crate layering for a test seam. So `kasane-core` grows its own
+`fuzz_entry.rs`, mirroring the adapters convention and for the same stated
+reason (a test seam, not API), and `fuzz/Cargo.toml` takes `kasane-core` as a
+second path dependency plus a `[[bin]]` entry.
+
+The stable replay stays in one place. `crates/kasane-adapters/tests/fuzz_corpus.rs`
+dispatches every corpus directory by name and **panics on a directory it does
+not recognize**, precisely so a renamed target cannot silently stop being
+replayed — so `fuzz/seeds/slug/` must be registered there whatever else
+happens. That file is a test target, so it takes `kasane-core` as a
+`[dev-dependencies]` entry of `kasane-adapters`: acyclic, confined to tests,
+and cheaper than standing up a second replay harness that would duplicate the
+`KNOWN_OPEN` quarantine machinery.
+
+`TARGET_COUNT` goes 12 → 13, and README's "Twelve targets" with it.
 
 ### 5.4 End-to-end
 
@@ -276,9 +305,11 @@ Existing end-to-end content assertions that name paths move with the churn
   precisely currently says the generator draws ASCII titles and that the
   invariant says nothing about GitHub resolving the same anchor. Both clauses
   change (§5.2).
+- **README, Fuzzing.** "Twelve targets" becomes thirteen, and the sentence
+  listing what the targets cover gains the slug rule.
 - **AGENTS.md.** `kasane-core` gains `slug.rs` in the map, with the two-rule
   split and the reason for it; the bounded-walk inventory count and prose move
-  with §3.1.
+  with §3.1; the `fuzz_entry.rs` note gains its `kasane-core` counterpart.
 
 ## 7. Approaches considered
 
