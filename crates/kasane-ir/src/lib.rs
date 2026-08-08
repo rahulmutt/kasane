@@ -37,13 +37,17 @@ pub const MAX_INLINE_DEPTH: usize = 256;
 /// error.
 ///
 /// This is a *safety* bound, not a fidelity one. The EPUB parser flattens at
-/// a much lower depth without losing content
-/// (`epub::xhtml::MAX_BLOCK_DEPTH`, 32), and MOBI/AZW3 and PPTX both reach
-/// the core through bounds of their own, so adapter-produced IR never
-/// reaches this value. It exists for hand-built `Document`s from external
-/// callers of the published `structure()`. The ordering invariant the design
-/// depends on is `epub::xhtml::MAX_BLOCK_DEPTH` (32) < `kasane_ir::MAX_BLOCK_DEPTH`
-/// (128).
+/// a much lower depth without losing content (`epub::xhtml::MAX_BLOCK_DEPTH`,
+/// 32); MOBI/AZW3 inherits that same bound by re-serializing through the
+/// same parser; and PPTX carries its own fidelity bound,
+/// `pptx::slide::MAX_LIST_LEVEL`. Each of these fidelity bounds is pinned to
+/// this constant by its own compile-time assertion, so adapter-produced IR
+/// never reaches this value. It exists for hand-built `Document`s from
+/// external callers of the published `structure()`. The ordering invariant
+/// the design depends on is `epub::xhtml::MAX_BLOCK_DEPTH` (32) <
+/// `kasane_ir::MAX_BLOCK_DEPTH` (128) — and, separately,
+/// `pptx::slide::MAX_LIST_LEVEL` (31, 0-based) kept to the same quarter
+/// margin.
 ///
 /// Measured, not guessed: in a debug build, a rayon worker in batch mode —
 /// the tightest stack the code actually runs on — completes block depth 750

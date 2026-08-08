@@ -39,8 +39,9 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 64;
 ///
 /// One site covers three formats: MOBI/AZW3 re-serializes through this
 /// parser (`mobi::normalize_html`), so it inherits this bound. PPTX nests
-/// via `slide.rs`'s `build_list`, already capped at 256 because its `level`
-/// is a `u8`. PDF and DjVu never nest blocks.
+/// via `slide.rs`'s `build_list`, which carries its own fidelity bound,
+/// `pptx::slide::MAX_LIST_LEVEL`, with its own compile-time assertion
+/// against `kasane_ir::MAX_BLOCK_DEPTH`. PDF and DjVu never nest blocks.
 ///
 /// The bound is enforced against `frames.len()`, the depth of the whole
 /// open-container stack (`List`, `Table`, `Figure`, `Footnote` alike), not

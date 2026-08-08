@@ -3,11 +3,28 @@ use kasane_ir::{AssetRef, Block, BlockId, Inline, RefTarget};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+/// Fidelity bound for PPTX bullet nesting — the analogue of
+/// `epub::xhtml::MAX_BLOCK_DEPTH`. `build_list` recurses once per level step,
+/// so this is what keeps PPTX IR under `kasane_ir::MAX_BLOCK_DEPTH`.
+/// 0-based, so 31 means 32 nesting levels.
+///
+/// Past it, a deeper bullet becomes a sibling at this level instead of
+/// nesting further — the same flatten-not-truncate contract the EPUB parser
+/// keeps, so no text is lost.
+pub(crate) const MAX_LIST_LEVEL: u8 = 31;
+
+const _: () = assert!(
+    (MAX_LIST_LEVEL as usize + 1) * 4 <= kasane_ir::MAX_BLOCK_DEPTH,
+    "pptx::slide::MAX_LIST_LEVEL must stay at most a quarter of kasane_ir::MAX_BLOCK_DEPTH"
+);
+
 pub(crate) struct Paragraph {
     // `build_list` recurses once per distinct level as it nests deeper
-    // paragraphs under their ancestors, so this type's width is a hard,
-    // untrusted-input-facing bound on recursion depth (max 256): it caps how
-    // deep an adversarial bullet-level jump can drive the call stack.
+    // paragraphs under their ancestors, so this type's width would otherwise
+    // be a hard, untrusted-input-facing bound on recursion depth (up to 256,
+    // since `level` is a `u8`). Both parse sites below clamp to
+    // `MAX_LIST_LEVEL`, so the real bound on `build_list`'s recursion depth
+    // is `MAX_LIST_LEVEL + 1` (32), not 256.
     pub level: u8,
     pub inlines: Vec<Inline>,
 }
@@ -125,7 +142,7 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                     let mut level = 0u8;
                     // <a:pPr lvl="N"> may be the next event; capture inline attr if empty-expanded
                     if let Some(l) = attr_str(&e, b"lvl") {
-                        level = l.parse().unwrap_or(0);
+                        level = l.parse().unwrap_or(0).min(MAX_LIST_LEVEL);
                     }
                     cur_para = Some(Paragraph {
                         level,
@@ -134,7 +151,7 @@ pub(crate) fn parse_shapes(xml: &str, rels: &SlideRels) -> (Vec<Shape>, bool) {
                 }
                 b"pPr" => {
                     if let (Some(p), Some(l)) = (cur_para.as_mut(), attr_str(&e, b"lvl")) {
-                        p.level = l.parse().unwrap_or(0);
+                        p.level = l.parse().unwrap_or(0).min(MAX_LIST_LEVEL);
                     }
                 }
                 b"r" if in_sp => {
@@ -1074,11 +1091,12 @@ mod tests {
 
     #[test]
     fn deeply_nested_bullet_levels_do_not_overflow_the_stack() {
-        // ~300 paragraphs each one level deeper than the last. `Paragraph.level`
-        // is a u8, so any "lvl" value that doesn't fit in u8 (>255) fails to
-        // parse and falls back to 0, which bounds `build_list`'s recursion
-        // depth to at most 256 regardless of how deep an adversarial document
-        // claims to nest. This must not stack-overflow.
+        // ~300 paragraphs each one level deeper than the last. Both `lvl`
+        // parse sites clamp to `MAX_LIST_LEVEL` (31), which bounds
+        // `build_list`'s recursion depth to at most 32 regardless of how deep
+        // an adversarial document claims to nest -- well under the old
+        // (pre-clamp) 256 ceiling that came from `level` merely being a
+        // `u8`. This must not stack-overflow.
         let mut body = String::new();
         for lvl in 0..300u32 {
             body.push_str(&format!(
@@ -1098,5 +1116,123 @@ mod tests {
         assert!(blocks
             .iter()
             .any(|b| matches!(b, Block::List { .. } | Block::Para(_))));
+    }
+
+    // Iterative (explicit worklist, not function-call recursion) max block
+    // nesting depth over a `&[Block]` tree -- mirrors
+    // `fuzz_entry::max_block_depth`'s reasoning: this is exactly the value a
+    // hostile/adversarial `lvl` jump could blow past, so a recursive checker
+    // could itself overflow on the very input it is meant to be checking.
+    fn max_block_depth(blocks: &[Block]) -> usize {
+        let mut max_depth = 0;
+        let mut stack: Vec<(&Block, usize)> = blocks.iter().map(|b| (b, 0)).collect();
+        while let Some((b, depth)) = stack.pop() {
+            match b {
+                Block::List { items, .. } => {
+                    max_depth = max_depth.max(depth + 1);
+                    for item in items {
+                        stack.extend(item.iter().map(|bb| (bb, depth + 1)));
+                    }
+                }
+                Block::Footnote { blocks, .. } => {
+                    max_depth = max_depth.max(depth + 1);
+                    stack.extend(blocks.iter().map(|bb| (bb, depth + 1)));
+                }
+                Block::Heading { .. }
+                | Block::Para(_)
+                | Block::Table(_)
+                | Block::Figure { .. }
+                | Block::CodeBlock { .. }
+                | Block::MathBlock(_)
+                | Block::Raw { .. } => {}
+            }
+        }
+        max_depth
+    }
+
+    // Same reasoning as `max_block_depth` above: an explicit worklist rather
+    // than recursion, since this walks the same untrusted-shape tree.
+    fn contains_text(blocks: &[Block], needle: &str) -> bool {
+        fn inline_has(inls: &[Inline], needle: &str) -> bool {
+            let mut stack: Vec<&Inline> = inls.iter().collect();
+            while let Some(i) = stack.pop() {
+                match i {
+                    Inline::Text(s) | Inline::Code(s) | Inline::Math(s) => {
+                        if s == needle {
+                            return true;
+                        }
+                    }
+                    Inline::Emph(v) | Inline::Strong(v) => stack.extend(v.iter()),
+                    Inline::Link { inlines, .. } => stack.extend(inlines.iter()),
+                    Inline::FootnoteRef(_) => {}
+                }
+            }
+            false
+        }
+        let mut stack: Vec<&Block> = blocks.iter().collect();
+        while let Some(b) = stack.pop() {
+            match b {
+                Block::Heading { inlines, .. } | Block::Para(inlines) => {
+                    if inline_has(inlines, needle) {
+                        return true;
+                    }
+                }
+                Block::List { items, .. } => {
+                    for item in items {
+                        stack.extend(item.iter());
+                    }
+                }
+                Block::Footnote { blocks, .. } => stack.extend(blocks.iter()),
+                Block::Table(_)
+                | Block::Figure { .. }
+                | Block::CodeBlock { .. }
+                | Block::MathBlock(_)
+                | Block::Raw { .. } => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn a_pptx_lvl_beyond_max_list_level_flattens_instead_of_truncating() {
+        // A slide whose bullets jump from lvl="0" straight to lvl="200" --
+        // well past both `u8::MAX` headroom and `MAX_LIST_LEVEL` (31). Before
+        // the clamp landed, this produced 201 nested `Block::List`s, past
+        // `kasane_ir::MAX_BLOCK_DEPTH` (128), so the core's block walk
+        // truncated the tree and silently dropped the deep paragraph's text
+        // (finding 1 of the whole-branch review). The clamp must flatten
+        // instead: the deep paragraph's text survives, landing as a sibling
+        // at level `MAX_LIST_LEVEL`, and the produced nesting never exceeds
+        // `MAX_LIST_LEVEL + 1` (32).
+        let xml = r#"<p:sld xmlns:a="a" xmlns:p="p"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+            <p:txBody>
+              <a:p><a:pPr lvl="0"/><a:r><a:t>SHALLOW</a:t></a:r></a:p>
+              <a:p><a:pPr lvl="200"/><a:r><a:t>DEEPMARKER</a:t></a:r></a:p>
+              <a:p><a:pPr lvl="250"/><a:r><a:t>SIBLING1</a:t></a:r></a:p>
+              <a:p><a:pPr lvl="45"/><a:r><a:t>SIBLING2</a:t></a:r></a:p>
+            </p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let mut id = 0u32;
+        let blocks = slide_to_blocks(xml, &mut id, &SlideRels::empty());
+
+        assert!(
+            contains_text(&blocks, "DEEPMARKER"),
+            "deep paragraph's text must survive flattening, not be truncated: {blocks:?}"
+        );
+        assert!(
+            contains_text(&blocks, "SHALLOW"),
+            "shallow paragraph's text must also survive: {blocks:?}"
+        );
+        assert!(
+            contains_text(&blocks, "SIBLING1") && contains_text(&blocks, "SIBLING2"),
+            "the other over-deep paragraphs must also flatten to siblings, not be dropped: {blocks:?}"
+        );
+
+        let depth = max_block_depth(&blocks);
+        assert!(
+            depth <= 32,
+            "expected block nesting clamped to at most 32 (MAX_LIST_LEVEL + 1), got {depth}"
+        );
     }
 }

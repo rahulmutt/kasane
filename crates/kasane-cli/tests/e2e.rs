@@ -96,11 +96,33 @@ fn batch_mode_converts_a_deeply_block_nested_epub_without_aborting() {
     // The library index proves batch mode ran, not single-file mode.
     assert!(out_dir.join("index.md").exists(), "library index missing");
     // And the content survived the flattening rather than being truncated:
-    // the innermost list item's text is the seed's only body text.
-    let all = read_all_md(&out_dir);
+    // the innermost list item's text is the seed's only body text. Pinned to
+    // the actual chapter file rather than the whole-tree concatenation --
+    // `read_all_md`'s output also contains every library index's navigation
+    // links (e.g. the literal string "index.md"), which already contain an
+    // 'x' and would make this assertion pass even if the chapter body were
+    // emitted completely empty.
+    let (_, files) = read_all_md_with_files(&out_dir);
+    let chapter = files
+        .iter()
+        .find(|(p, _)| p.file_name().is_some_and(|f| f == "01-deep.md"))
+        .map(|(_, s)| s.as_str())
+        .expect("converted chapter missing");
+
     assert!(
-        all.contains('x'),
-        "innermost list item text missing -- the bound must flatten, not truncate"
+        chapter.contains("\n- x\n"),
+        "innermost list item text missing -- the bound must flatten, not truncate: {chapter:.400}"
+    );
+
+    let deepest = chapter
+        .lines()
+        .filter(|l| !l.is_empty() && l.chars().all(|c| c == '-' || c == ' '))
+        .map(|l| l.matches("- ").count())
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        deepest, 32,
+        "expected exactly 32 nested list markers (Task 2's flattening bound) on the CLI batch path, got {deepest}"
     );
 }
 
