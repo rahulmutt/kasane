@@ -449,8 +449,8 @@ fn collect_note_refs(
     depth: usize,
 ) {
     // Unreachable via the EPUB parser, which flattens at `xhtml::MAX_BLOCK_DEPTH` (32),
-    // far below 128. The guard stays anyway so the invariant does not depend on which
-    // caller structure feeds it, rather than being contingent on it.
+    // far below 128. The guard stays anyway -- it is the guard that makes the invariant
+    // independent, not the parser's own flattening.
     if depth >= kasane_ir::MAX_BLOCK_DEPTH {
         return;
     }

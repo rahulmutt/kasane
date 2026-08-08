@@ -166,6 +166,11 @@ production. The two it omits are the adapter-side ones above — and
 `structure()` is ever called. A core-only bound would therefore not have fixed
 the reported reproducer. §6 corrects the list.
 
+**Addendum (post-spec):** A final sweep during implementation discovered
+four more: `epub::collect_figure_keys`, `epub::degrade_failed_figures`,
+`epub::collect_note_refs`, and `epub::xhtml::flatten_block_inlines`. The
+true total is ten; AGENTS.md carries the authoritative inventory.
+
 ## 4. Choosing the values
 
 Measured, not guessed — the discipline `MAX_INLINE_DEPTH`'s comment already
