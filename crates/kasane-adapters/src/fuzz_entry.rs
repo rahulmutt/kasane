@@ -48,10 +48,11 @@ pub fn djvu(data: &[u8]) {
 /// A rejected parse is a perfectly good outcome — most fuzzer inputs are not
 /// valid documents. Only a *successful* parse has assets worth checking.
 ///
-/// Order matters here. `max_inline_depth` is computed, and `doc` torn down
-/// via `kasane_ir::teardown_document`, BEFORE either assertion below runs.
-/// Both assertions can panic -- that is their job, on a genuine regression --
-/// and if `doc` were still an owned local when one did, unwinding back
+/// Order matters here. Both `max_inline_depth` and `max_block_depth` are
+/// computed, and `doc` torn down via `kasane_ir::teardown_document`, BEFORE
+/// any assertion below runs. All three assertions can panic -- that is their
+/// job, on a genuine regression -- and if `doc` were still an owned local
+/// when one did, unwinding back
 /// through this function's stack frame would drop it the ordinary way,
 /// recursing on whatever block/inline nesting triggered the failure in the
 /// first place. In a `panic = unwind` build (what `cargo test` uses), that
@@ -63,9 +64,11 @@ pub fn djvu(data: &[u8]) {
 fn adapter(a: &dyn Adapter, data: &[u8], source_path: &str) {
     if let Ok((doc, assets)) = a.parse(data, source_path) {
         let depth = max_inline_depth(&doc);
+        let block_depth = max_block_depth(&doc);
         kasane_ir::teardown_document(doc);
         assert_assets_contained(&assets);
         assert_depth_bounded(depth);
+        assert_block_depth_bounded(block_depth);
     }
 }
 
@@ -78,19 +81,18 @@ fn adapter(a: &dyn Adapter, data: &[u8], source_path: &str) {
 /// decides whether the process survives.
 ///
 /// BLOCK nesting (`Block::List`/`Block::Footnote`) is a different property
-/// and is **not bounded anywhere in this codebase** -- not in the EPUB
-/// parser's `frames` stack, not in `kasane-core`, not here. A hostile or
-/// fuzzer-found document can nest lists or footnotes arbitrarily deep, and
-/// this function does not check that depth at all (nesting a list contributes
-/// nothing to the value computed below -- only the inline content reachable
-/// through it does).
+/// with its own bound and its own check -- see `max_block_depth` below.
+/// Nesting a list contributes nothing to the value computed here; only the
+/// inline content reachable through it does.
 ///
 /// Both traversals below are therefore iterative, over an explicit worklist,
-/// rather than function-call recursion -- on the block side because that
-/// nesting is unbounded by construction, and on the inline side because the
-/// bound this check exists to enforce is exactly what a hostile input may be
-/// violating: assuming inline nesting is already shallow before checking
-/// whether it's shallow is circular, and disabling an adapter's own flattening
+/// rather than function-call recursion -- on the block side because the bound
+/// this check enforces is exactly what a hostile adapter may be producing, so
+/// assuming block nesting is already shallow before checking whether it's
+/// shallow is circular, and on the inline side because the bound this check
+/// exists to enforce is exactly what a hostile input may be violating:
+/// assuming inline nesting is already shallow before checking whether it's
+/// shallow is circular, and disabling an adapter's own flattening
 /// bound (as this task's design spec does, to prove its seed reaches the bug)
 /// demonstrates a recursive inline walk is not safe either. A recursive
 /// version of either traversal can overflow *this function's own* stack
@@ -180,6 +182,61 @@ fn assert_depth_bounded(depth: usize) {
         "inline nesting depth {} exceeds MAX_INLINE_DEPTH {}",
         depth,
         kasane_ir::MAX_INLINE_DEPTH
+    );
+}
+
+/// Design spec `2026-07-29-block-nesting-depth-bound-design.md`: `kasane-core`
+/// and `kasane-writer` walk BLOCK nesting (`Block::List`/`Block::Footnote`)
+/// recursively, so IR nested past `kasane_ir::MAX_BLOCK_DEPTH` aborts the
+/// process on a stack overflow rather than failing recoverably. No adapter
+/// may produce it. Checked against the core's safety bound rather than any
+/// one adapter's flattening bound, because the core's is the value that
+/// decides whether the process survives -- the same rule
+/// `assert_depth_bounded` applies to inline nesting.
+///
+/// The traversal is iterative for the reason `max_inline_depth`'s comment
+/// gives at length: assuming the nesting is already shallow before checking
+/// whether it's shallow is circular, and a recursive checker overflows its
+/// own stack on exactly the input it exists to catch -- which reads as a
+/// crash in the test code rather than in the code under test.
+fn max_block_depth(doc: &Document) -> usize {
+    let mut max_depth = 0;
+    let mut stack: Vec<(&Block, usize)> = doc.nodes.iter().map(|n| (&n.block, 0)).collect();
+    while let Some((b, depth)) = stack.pop() {
+        match b {
+            Block::List { items, .. } => {
+                max_depth = max_depth.max(depth + 1);
+                for item in items {
+                    stack.extend(item.iter().map(|bb| (bb, depth + 1)));
+                }
+            }
+            Block::Footnote { blocks, .. } => {
+                max_depth = max_depth.max(depth + 1);
+                stack.extend(blocks.iter().map(|bb| (bb, depth + 1)));
+            }
+            // Leaves, enumerated rather than caught by a wildcard: a new
+            // nesting variant must break this build, not silently make the
+            // depth this function reports blind to it. Same reasoning as
+            // `kasane_ir::teardown_document`'s exhaustive match.
+            Block::Heading { .. }
+            | Block::Para(_)
+            | Block::Table(_)
+            | Block::Figure { .. }
+            | Block::CodeBlock { .. }
+            | Block::MathBlock(_)
+            | Block::Raw { .. } => {}
+        }
+    }
+    max_depth
+}
+
+fn assert_block_depth_bounded(depth: usize) {
+    assert!(
+        depth <= kasane_ir::MAX_BLOCK_DEPTH,
+        "adapter produced block nesting {depth} deep, past kasane_ir::MAX_BLOCK_DEPTH ({}). \
+         Every core and writer block walk recurses on this, so the next stage would abort \
+         the process on a stack overflow.",
+        kasane_ir::MAX_BLOCK_DEPTH
     );
 }
 
@@ -435,15 +492,15 @@ mod tests {
         }
     }
 
-    /// Block nesting (`Block::List`/`Block::Footnote`) has no depth bound
-    /// anywhere in this codebase -- see the doc comment on
-    /// `max_inline_depth`. Before that traversal was made iterative, walking
-    /// a document shaped like this one overflowed the depth computation's OWN
-    /// stack before it ever returned a value -- confirmed locally against the
-    /// pre-fix recursive form at this depth: `thread '...' has overflowed its
-    /// stack` / `SIGABRT`, not a clean test failure. In a fuzz seam that
-    /// reads as a crash in the test code, not the adapter or core code this
-    /// check exists to guard.
+    /// Block nesting (`Block::List`/`Block::Footnote`) is bounded
+    /// (fidelity: `epub::xhtml::MAX_BLOCK_DEPTH` = 32, safety:
+    /// `kasane_ir::MAX_BLOCK_DEPTH` = 128); see `max_block_depth` below.
+    /// Before that traversal was made iterative, walking a document shaped like
+    /// this one overflowed the depth computation's OWN stack before it ever
+    /// returned a value -- confirmed locally against the pre-fix recursive form
+    /// at this depth: `thread '...' has overflowed its stack` / `SIGABRT`, not a
+    /// clean test failure. In a fuzz seam that reads as a crash in the test
+    /// code, not the adapter or core code this check exists to guard.
     ///
     /// 100_000 is comfortably past where the overflow was observed by hand at
     /// 5_000 (see this task's report for the reproduction).

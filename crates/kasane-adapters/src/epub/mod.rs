@@ -96,26 +96,31 @@ impl Adapter for EpubAdapter {
         let mut assets = AssetBag::default();
         let mut seen: std::collections::HashMap<String, bool> = Default::default(); // key -> readable
         for n in &nodes {
-            collect_figure_keys(&n.block, &mut |key: &str| {
-                if seen.contains_key(key) {
-                    return;
-                }
-                match crate::ziputil::read_entry_bytes(&mut zip, key, &mut total_read) {
-                    Ok(data) => {
-                        let filename = crate::guard::safe_media_filename(key, assets.items.len());
-                        assets.items.push(AssetItem {
-                            key: key.to_string(),
-                            filename,
-                            bytes: data,
-                        });
-                        seen.insert(key.to_string(), true);
+            collect_figure_keys(
+                &n.block,
+                &mut |key: &str| {
+                    if seen.contains_key(key) {
+                        return;
                     }
-                    Err(_) => {
-                        eprintln!("warning: image entry unreadable, degrading figure: {key}");
-                        seen.insert(key.to_string(), false);
+                    match crate::ziputil::read_entry_bytes(&mut zip, key, &mut total_read) {
+                        Ok(data) => {
+                            let filename =
+                                crate::guard::safe_media_filename(key, assets.items.len());
+                            assets.items.push(AssetItem {
+                                key: key.to_string(),
+                                filename,
+                                bytes: data,
+                            });
+                            seen.insert(key.to_string(), true);
+                        }
+                        Err(_) => {
+                            eprintln!("warning: image entry unreadable, degrading figure: {key}");
+                            seen.insert(key.to_string(), false);
+                        }
                     }
-                }
-            });
+                },
+                0,
+            );
         }
         let failed: std::collections::HashSet<String> = seen
             .into_iter()
@@ -124,7 +129,7 @@ impl Adapter for EpubAdapter {
             .collect();
         if !failed.is_empty() {
             for n in &mut nodes {
-                degrade_failed_figures(&mut n.block, &failed);
+                degrade_failed_figures(&mut n.block, &failed, 0);
             }
         }
 
@@ -147,26 +152,44 @@ impl Adapter for EpubAdapter {
 }
 
 // Figures can sit inside lists/footnotes, so walk recursively.
-pub(crate) fn collect_figure_keys(b: &Block, f: &mut impl FnMut(&str)) {
+pub(crate) fn collect_figure_keys(b: &Block, f: &mut impl FnMut(&str), depth: usize) {
+    // Unreachable via the EPUB parser, which flattens at `xhtml::MAX_BLOCK_DEPTH` (32),
+    // and the MOBI adapter also parses through that same bound. The guard stays anyway
+    // to make this function's safety independent of its callers' structure, rather than
+    // contingent on today's entry points.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     match b {
         Block::Figure { image, .. } => f(&image.key),
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    collect_figure_keys(ib, f);
+                    collect_figure_keys(ib, f, depth + 1);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                collect_figure_keys(ib, f);
+                collect_figure_keys(ib, f, depth + 1);
             }
         }
         _ => {}
     }
 }
 
-pub(crate) fn degrade_failed_figures(b: &mut Block, failed: &std::collections::HashSet<String>) {
+pub(crate) fn degrade_failed_figures(
+    b: &mut Block,
+    failed: &std::collections::HashSet<String>,
+    depth: usize,
+) {
+    // Unreachable via the EPUB parser, which flattens at `xhtml::MAX_BLOCK_DEPTH` (32),
+    // and the MOBI adapter also parses through that same bound. The guard stays anyway
+    // to make this function's safety independent of its callers' structure, rather than
+    // contingent on today's entry points.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     match b {
         Block::Figure { image, caption, .. } if failed.contains(&image.key) => {
             *b = if caption.is_empty() {
@@ -180,13 +203,13 @@ pub(crate) fn degrade_failed_figures(b: &mut Block, failed: &std::collections::H
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    degrade_failed_figures(ib, failed);
+                    degrade_failed_figures(ib, failed, depth + 1);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                degrade_failed_figures(ib, failed);
+                degrade_failed_figures(ib, failed, depth + 1);
             }
         }
         _ => {}
@@ -208,7 +231,7 @@ pub(crate) fn fix_links(
 ) {
     for n in nodes {
         let file = n.prov.source_href.clone().unwrap_or_default();
-        fix_block_links(&mut n.block, &file, map, footnote_map, noteref_keys);
+        fix_block_links(&mut n.block, &file, map, footnote_map, noteref_keys, 0);
     }
 }
 
@@ -218,7 +241,15 @@ fn fix_block_links(
     map: &std::collections::HashMap<(String, String), BlockId>,
     footnote_map: &std::collections::HashMap<(String, String), NoteId>,
     noteref_keys: &std::collections::HashSet<(String, String)>,
+    depth: usize,
 ) {
+    // Unreachable via this crate's own parser, which flattens at
+    // `xhtml::MAX_BLOCK_DEPTH` -- but this walk runs on every EPUB and MOBI
+    // parse, so the guard is what makes its safety independent of who built
+    // the IR rather than contingent on it.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     match b {
         Block::Para(inls) | Block::Heading { inlines: inls, .. } => {
             fix_inline_vec(inls, file, map, footnote_map, noteref_keys)
@@ -226,13 +257,13 @@ fn fix_block_links(
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    fix_block_links(ib, file, map, footnote_map, noteref_keys);
+                    fix_block_links(ib, file, map, footnote_map, noteref_keys, depth + 1);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                fix_block_links(ib, file, map, footnote_map, noteref_keys);
+                fix_block_links(ib, file, map, footnote_map, noteref_keys, depth + 1);
             }
         }
         Block::Table(t) => {
@@ -365,7 +396,7 @@ fn relocate_footnotes(nodes: Vec<Node>) -> Vec<Node> {
     let mut referenced: HashSet<NoteId> = HashSet::new();
     for n in &nodes {
         let mut refs = Vec::new();
-        collect_note_refs(&n.block, &mut refs, &mut HashSet::new());
+        collect_note_refs(&n.block, &mut refs, &mut HashSet::new(), 0);
         referenced.extend(refs);
     }
     // Phase 1: pull out every referenced Footnote node (a Footnote block never
@@ -389,7 +420,7 @@ fn relocate_footnotes(nodes: Vec<Node>) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::with_capacity(rest.len() + parked.len());
     for n in rest {
         let mut refs_here = Vec::new();
-        collect_note_refs(&n.block, &mut refs_here, &mut HashSet::new());
+        collect_note_refs(&n.block, &mut refs_here, &mut HashSet::new(), 0);
         out.push(n);
         for id in refs_here {
             if let Some(fnote) = parked.remove(&id) {
@@ -415,19 +446,26 @@ fn collect_note_refs(
     b: &Block,
     out: &mut Vec<NoteId>,
     seen: &mut std::collections::HashSet<NoteId>,
+    depth: usize,
 ) {
+    // Unreachable via the EPUB parser, which flattens at `xhtml::MAX_BLOCK_DEPTH` (32),
+    // far below 128. The guard stays anyway -- it is the guard that makes the invariant
+    // independent, not the parser's own flattening.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     match b {
         Block::Para(inls) | Block::Heading { inlines: inls, .. } => inline_refs(inls, out, seen),
         Block::List { items, .. } => {
             for item in items {
                 for ib in item {
-                    collect_note_refs(ib, out, seen);
+                    collect_note_refs(ib, out, seen, depth + 1);
                 }
             }
         }
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
-                collect_note_refs(ib, out, seen);
+                collect_note_refs(ib, out, seen, depth + 1);
             }
         }
         Block::Table(t) => {

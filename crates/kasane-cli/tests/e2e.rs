@@ -65,6 +65,68 @@ fn converts_a_deeply_nested_epub_without_aborting() {
 }
 
 #[test]
+fn batch_mode_converts_a_deeply_block_nested_epub_without_aborting() {
+    // fuzz/seeds/epub/deep-blocks.epub nests <ul> 30,000 deep. Batch mode
+    // specifically: conversions run on rayon workers, which get a smaller
+    // stack than `main` -- measured at roughly a quarter of the survivable
+    // depth (design spec 2026-07-29 §1). A single-file version of this test
+    // would pass against a bound four times too loose, so the directory
+    // argument here is load-bearing, not incidental.
+    let tmp = tempfile::tempdir().unwrap();
+    let books = tmp.path().join("books");
+    std::fs::create_dir_all(&books).unwrap();
+    std::fs::copy(
+        "../../fuzz/seeds/epub/deep-blocks.epub",
+        books.join("deep-blocks.epub"),
+    )
+    .unwrap();
+    let out_dir = tmp.path().join("out");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_kasane"))
+        .arg(&books)
+        .arg("-o")
+        .arg(&out_dir)
+        .status()
+        .unwrap();
+
+    assert!(
+        status.success(),
+        "batch conversion of a 30,000-deep list must exit 0, not abort with 134: {status:?}"
+    );
+    // The library index proves batch mode ran, not single-file mode.
+    assert!(out_dir.join("index.md").exists(), "library index missing");
+    // And the content survived the flattening rather than being truncated:
+    // the innermost list item's text is the seed's only body text. Pinned to
+    // the actual chapter file rather than the whole-tree concatenation --
+    // `read_all_md`'s output also contains every library index's navigation
+    // links (e.g. the literal string "index.md"), which already contain an
+    // 'x' and would make this assertion pass even if the chapter body were
+    // emitted completely empty.
+    let (_, files) = read_all_md_with_files(&out_dir);
+    let chapter = files
+        .iter()
+        .find(|(p, _)| p.file_name().is_some_and(|f| f == "01-deep.md"))
+        .map(|(_, s)| s.as_str())
+        .expect("converted chapter missing");
+
+    assert!(
+        chapter.contains("\n- x\n"),
+        "innermost list item text missing -- the bound must flatten, not truncate: {chapter:.400}"
+    );
+
+    let deepest = chapter
+        .lines()
+        .filter(|l| !l.is_empty() && l.chars().all(|c| c == '-' || c == ' '))
+        .map(|l| l.matches("- ").count())
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        deepest, 32,
+        "expected exactly 32 nested list markers (Task 2's flattening bound) on the CLI batch path, got {deepest}"
+    );
+}
+
+#[test]
 fn converts_rich_epub_with_full_fidelity() {
     let out = tempfile::tempdir().unwrap();
     let out_dir = out.path().join("rich");

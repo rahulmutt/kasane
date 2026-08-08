@@ -147,7 +147,7 @@ fn parse_mobi6(
     let mut next_id = 0u32;
     let mut next_note = 1u32;
     let mut fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
-    strip_empty_anchor_links(&mut fp.blocks);
+    strip_empty_anchor_links(&mut fp.blocks, 0);
 
     let mut anchor_map = std::collections::HashMap::new();
     for (aid, bid) in &fp.anchors {
@@ -250,7 +250,7 @@ fn parse_kf8(
         // AssetRef. See unwrap_solo_images's doc comment for the full story.
         let xhtml = unwrap_solo_images(&xhtml);
         let mut fp = crate::epub::xhtml::xhtml_to_blocks(&xhtml, "", &mut next_id, &mut next_note);
-        strip_empty_anchor_links(&mut fp.blocks);
+        strip_empty_anchor_links(&mut fp.blocks, 0);
         for (aid, bid) in &fp.anchors {
             anchor_map.insert((part.name.clone(), aid.clone()), *bid);
         }
@@ -344,7 +344,15 @@ fn unwrap_solo_images(xhtml: &str) -> String {
 /// special-casing the top-level-or-after-heading positions the splice
 /// actually uses, since that's cheap and future-proofs against the
 /// marker position changing.
-fn strip_empty_anchor_links(blocks: &mut Vec<Block>) {
+fn strip_empty_anchor_links(blocks: &mut Vec<Block>, depth: usize) {
+    // Unreachable via this adapter: MOBI/AZW3 text is normalized through the
+    // EPUB XHTML parser, which already flattens at `xhtml::MAX_BLOCK_DEPTH` (32).
+    // The guard stays anyway, as in `epub::fix_block_links`, so the invariant
+    // does not depend on which adapter feeds this walk -- it is the guard that
+    // makes the safety independent, not the parser's own flattening.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     for block in blocks.iter_mut() {
         match block {
             Block::Heading { inlines, .. } | Block::Para(inlines) => {
@@ -352,7 +360,7 @@ fn strip_empty_anchor_links(blocks: &mut Vec<Block>) {
             }
             Block::List { items, .. } => {
                 for item in items.iter_mut() {
-                    strip_empty_anchor_links(item);
+                    strip_empty_anchor_links(item, depth + 1);
                 }
             }
             Block::Table(t) => {
@@ -366,7 +374,7 @@ fn strip_empty_anchor_links(blocks: &mut Vec<Block>) {
                 }
             }
             Block::Figure { caption, .. } => strip_empty_anchor_links_in_inlines(caption),
-            Block::Footnote { blocks, .. } => strip_empty_anchor_links(blocks),
+            Block::Footnote { blocks, .. } => strip_empty_anchor_links(blocks, depth + 1),
             Block::CodeBlock { .. } | Block::MathBlock(_) | Block::Raw { .. } => {}
         }
     }
@@ -437,7 +445,7 @@ fn collect_assets(db: &PalmDb, h: &MobiHeader, nodes: &mut [Node]) -> AssetBag {
     use std::collections::HashSet;
     let mut keys = vec![];
     for n in nodes.iter() {
-        crate::epub::collect_figure_keys(&n.block, &mut |k: &str| keys.push(k.to_string()));
+        crate::epub::collect_figure_keys(&n.block, &mut |k: &str| keys.push(k.to_string()), 0);
     }
     let mut assets = AssetBag::default();
     let mut seen = HashSet::new();
@@ -469,7 +477,7 @@ fn collect_assets(db: &PalmDb, h: &MobiHeader, nodes: &mut [Node]) -> AssetBag {
     }
     if !failed.is_empty() {
         for n in nodes.iter_mut() {
-            crate::epub::degrade_failed_figures(&mut n.block, &failed);
+            crate::epub::degrade_failed_figures(&mut n.block, &failed, 0);
         }
     }
     assets

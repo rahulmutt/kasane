@@ -123,10 +123,25 @@ pub fn est_tokens(blocks: &[Block]) -> usize {
 }
 
 pub(crate) fn est_tokens_blocks(blocks: &[Block]) -> usize {
-    blocks.iter().map(est_tokens_block).sum()
+    est_tokens_blocks_at(blocks, 0)
 }
 
-fn est_tokens_block(b: &Block) -> usize {
+fn est_tokens_blocks_at(blocks: &[Block], depth: usize) -> usize {
+    blocks.iter().map(|b| est_tokens_block(b, depth)).sum()
+}
+
+fn est_tokens_block(b: &Block, depth: usize) -> usize {
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        // Not zero: a truncated subtree still renders as a Raw note, so the
+        // size guard must not believe it is free.
+        //
+        // Defence in depth, not a second truncation: section::clone_block
+        // already cut anything from adapter or caller IR down to a shallow
+        // Block::Raw before this walk ever sees it. This guard only fires
+        // for a hand-built `Vec<Block>` that reaches `est_tokens`/`balance`
+        // without going through that bounded clone.
+        return 1;
+    }
     fn inl_at(is: &[Inline], depth: usize) -> usize {
         if depth >= kasane_ir::MAX_INLINE_DEPTH {
             return 0;
@@ -145,12 +160,16 @@ fn est_tokens_block(b: &Block) -> usize {
     }
     let chars = match b {
         Block::Heading { inlines, .. } | Block::Para(inlines) => inl(inlines),
-        Block::List { items, .. } => items.iter().flatten().map(est_tokens_block).sum(),
+        Block::List { items, .. } => items
+            .iter()
+            .flatten()
+            .map(|b| est_tokens_block(b, depth + 1))
+            .sum(),
         Block::Table(t) => t.rows.iter().flatten().map(|c| inl(c)).sum::<usize>() + 20,
         Block::Figure { caption, .. } => inl(caption) + 16,
         Block::CodeBlock { text, .. } => text.len(),
         Block::MathBlock(s) | Block::Raw { note: s } => s.len(),
-        Block::Footnote { blocks, .. } => est_tokens_blocks(blocks),
+        Block::Footnote { blocks, .. } => est_tokens_blocks_at(blocks, depth + 1),
     };
     chars / 4 + 1
 }

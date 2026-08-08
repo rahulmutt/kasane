@@ -15,6 +15,60 @@ use quick_xml::Reader;
 /// far past any real book's `<em><strong><a>` layering.
 pub(crate) const MAX_INLINE_DEPTH: usize = 64;
 
+/// Maximum block nesting this parser preserves as nested `Block` values.
+///
+/// The frame stack that builds blocks is iterative, so parsing an
+/// arbitrarily nested `<ul>` never overflows *here* — but it hands the core
+/// and the writer a `Block` tree they walk recursively. Bounding the
+/// produced depth is what keeps a hostile book from reaching
+/// `kasane_ir::MAX_BLOCK_DEPTH`, exactly as `MAX_INLINE_DEPTH` above does
+/// for inline nesting. The ordering invariant this depends on is
+/// `epub::xhtml::MAX_BLOCK_DEPTH` (32) < `kasane_ir::MAX_BLOCK_DEPTH` (128).
+///
+/// This is a *fidelity* bound, not a safety one: past it a list's items
+/// become siblings at this level instead of a nested list, and a footnote
+/// `<aside>` becomes transparent, so no content is lost — only the nesting
+/// relationship. 32 is far past any real book's list nesting, which rarely
+/// exceeds a handful of levels.
+///
+/// Measured, not guessed: in a debug build, a rayon worker thread in batch
+/// mode (Task 1, commit 289ce85) aborts on block nesting at depth 875 (the
+/// largest surviving depth was 750), and a libtest thread aborts at 1024. 32
+/// is a quarter of the 128 safety bound (`kasane_ir::MAX_BLOCK_DEPTH`), which
+/// is itself the largest power of two under a quarter of 875.
+///
+/// One site covers three formats: MOBI/AZW3 re-serializes through this
+/// parser (`mobi::normalize_html`), so it inherits this bound. PPTX nests
+/// via `slide.rs`'s `build_list`, which carries its own fidelity bound,
+/// `pptx::slide::MAX_LIST_LEVEL`, with its own compile-time assertion
+/// against `kasane_ir::MAX_BLOCK_DEPTH`. PDF and DjVu never nest blocks.
+///
+/// The bound is enforced against `frames.len()`, the depth of the whole
+/// open-container stack (`List`, `Table`, `Figure`, `Footnote` alike), not
+/// against List/Footnote nesting counted on its own. So a `<ul>` sitting
+/// inside 30 nested `<table>`s can flatten well before 32 levels of list
+/// nesting are seen. This is always conservative -- produced List/Footnote
+/// depth is bounded above by `frames.len()`, so it never exceeds this
+/// constant -- but a reader should not expect exactly 32 nested `<ul>` tags
+/// to be the only way to trigger flattening.
+///
+/// A footnote `<aside>` past this bound is transparent (its content is kept,
+/// unnested), but it also stops being tracked as a footnote: no `NoteId` is
+/// allocated and its `id` is not recorded, so a `noteref` pointing at it
+/// resolves to nothing. This is consistent with the flattening contract --
+/// no text is lost -- but the cross-reference link is.
+pub(crate) const MAX_BLOCK_DEPTH: usize = 32;
+
+// The two-bound design is only sound while this holds: adapter IR must not
+// be able to reach the safety bound that the core and writer walks stop at.
+// A `const` assertion rather than a `#[test]` on purpose -- this is the one
+// invariant that spans both crates, and a bad edit should fail the BUILD
+// rather than wait for someone to run the suite.
+const _: () = assert!(
+    MAX_BLOCK_DEPTH * 4 <= kasane_ir::MAX_BLOCK_DEPTH,
+    "epub::xhtml::MAX_BLOCK_DEPTH must stay at most a quarter of kasane_ir::MAX_BLOCK_DEPTH"
+);
+
 // Open block containers. Finished blocks land in the top frame instead of the
 // output; closing the container folds the frame into its parent. This is what
 // makes nesting (list items holding paragraphs, lists holding lists)
@@ -60,7 +114,7 @@ fn emit_block(
         if !top.is_empty() {
             crate::xmltext::push_inline(top, Inline::Text(" ".into()));
         }
-        flatten_block_inlines(&b, top);
+        flatten_block_inlines(&b, top, 0);
         return;
     }
     match frames.last_mut() {
@@ -88,7 +142,7 @@ fn emit_block(
             if !extra.is_empty() {
                 crate::xmltext::push_inline(extra, Inline::Text(" ".into()));
             }
-            flatten_block_inlines(&b, extra);
+            flatten_block_inlines(&b, extra, 0);
         }
         Some(BlockFrame::Footnote { blocks, .. }) => blocks.push(b),
     }
@@ -125,7 +179,13 @@ fn emit_malformed_note(
 // Extracts a block's text content as inlines -- used when block markup
 // appears where only inlines fit (inside a table cell). Structure is lost,
 // text is not.
-fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
+fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>, depth: usize) {
+    // Unreachable via this parser, which flattens at `xhtml::MAX_BLOCK_DEPTH` (32),
+    // far below 128. The guard stays anyway -- it is the guard that makes the invariant
+    // independent, not the parser's own flattening.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     let sep = |dst: &mut Vec<Inline>| {
         if !dst.is_empty() {
             crate::xmltext::push_inline(dst, Inline::Text(" ".into()));
@@ -139,7 +199,7 @@ fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
             for item in items {
                 for ib in item {
                     sep(dst);
-                    flatten_block_inlines(ib, dst);
+                    flatten_block_inlines(ib, dst, depth + 1);
                 }
             }
         }
@@ -157,7 +217,7 @@ fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
                 sep(dst);
-                flatten_block_inlines(ib, dst);
+                flatten_block_inlines(ib, dst, depth + 1);
             }
         }
         Block::Raw { .. } => {}
@@ -421,6 +481,13 @@ pub fn xhtml_to_blocks(
     let mut footnotes: Vec<(String, NoteId)> = vec![];
     let mut noteref_hrefs: Vec<String> = vec![];
     let mut aside_pushed: Vec<bool> = vec![];
+    // Mirrors the nesting of <ul>/<ol> tags so the End handler knows whether
+    // a given close corresponds to a List frame it opened. Without this, a
+    // </ul> whose open was suppressed at MAX_BLOCK_DEPTH would satisfy the
+    // End arm's `matches!(frames.last(), Some(BlockFrame::List { .. }))`
+    // guard -- because the *enclosing* frame is also a List -- and pop the
+    // parent, unbalancing `frames` for every block that follows.
+    let mut list_pushed: Vec<bool> = vec![];
 
     macro_rules! push_text {
         ($t:expr) => {
@@ -601,10 +668,19 @@ pub fn xhtml_to_blocks(
                         }
                     }
                     b"ul" | b"ol" => {
-                        frames.push(BlockFrame::List {
-                            ordered: e.local_name().as_ref() == b"ol",
-                            items: vec![],
-                        });
+                        if frames.len() >= MAX_BLOCK_DEPTH {
+                            // Over the fidelity bound: push no frame, so this
+                            // list's <li> items land in the enclosing List
+                            // frame as siblings. Content is kept; only the
+                            // nesting relationship is dropped.
+                            list_pushed.push(false);
+                        } else {
+                            frames.push(BlockFrame::List {
+                                ordered: e.local_name().as_ref() == b"ol",
+                                items: vec![],
+                            });
+                            list_pushed.push(true);
+                        }
                     }
                     b"li" => {
                         if let Some(BlockFrame::List { items, .. }) = frames.last_mut() {
@@ -658,7 +734,7 @@ pub fn xhtml_to_blocks(
                         extra: vec![],
                     }),
                     b"aside" => {
-                        if epub_type_has(&e, "footnote") {
+                        if epub_type_has(&e, "footnote") && frames.len() < MAX_BLOCK_DEPTH {
                             let note = NoteId(*next_note);
                             *next_note += 1;
                             if let Some(idv) = e
@@ -675,7 +751,12 @@ pub fn xhtml_to_blocks(
                             });
                             aside_pushed.push(true);
                         } else {
-                            aside_pushed.push(false); // transparent aside
+                            // Not a footnote aside, or past the fidelity
+                            // bound: transparent either way, so its blocks
+                            // emit into the enclosing frame. The existing
+                            // End arm already handles `Some(false)` by
+                            // popping nothing.
+                            aside_pushed.push(false);
                         }
                     }
                     b"figcaption" => inline_stack.push(vec![]),
@@ -954,7 +1035,22 @@ pub fn xhtml_to_blocks(
                         }
                     }
                     b"ul" | b"ol" => {
-                        if matches!(frames.last(), Some(BlockFrame::List { .. })) {
+                        // The frame guard is checked before popping the
+                        // tracker, not after: a mismatched close (top frame
+                        // is not a List, e.g. `<ul><li><table></ul>`) must
+                        // leave `list_pushed` untouched, or it would consume
+                        // the tracker entry belonging to a real, still-open
+                        // list and leave that list's frame stuck open until
+                        // EOF. With the guard first, a stray `</ul>` with no
+                        // matching open still finds no List frame and is
+                        // ignored; a mismatched close is ignored the same
+                        // way and does not disturb the tracker; only a close
+                        // that actually faces a List frame consults
+                        // `list_pushed` to decide whether that frame is one
+                        // this tag opened.
+                        if matches!(frames.last(), Some(BlockFrame::List { .. }))
+                            && list_pushed.pop() == Some(true)
+                        {
                             let f = frames.pop().expect("checked");
                             finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
@@ -1016,9 +1112,23 @@ pub fn xhtml_to_blocks(
                             finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
                     }
+                    // The frame guard is checked before popping the tracker,
+                    // not after, for the same reason as the `</ul>`/`</ol>`
+                    // arm above: a mismatched close (top frame is not a
+                    // Footnote, e.g. `<aside epub:type="footnote"><table>
+                    // </aside></table>`) must leave `aside_pushed` untouched,
+                    // or it would consume the tracker entry belonging to a
+                    // real, still-open footnote and leave that footnote's
+                    // frame stuck open until EOF. With the guard first, a
+                    // stray `</aside>` with no matching open still finds no
+                    // Footnote frame and is ignored; a mismatched close is
+                    // ignored the same way and does not disturb the tracker;
+                    // only a close that actually faces a Footnote frame
+                    // consults `aside_pushed` to decide whether that frame is
+                    // one this tag opened.
                     b"aside"
-                        if aside_pushed.pop() == Some(true)
-                            && matches!(frames.last(), Some(BlockFrame::Footnote { .. })) =>
+                        if matches!(frames.last(), Some(BlockFrame::Footnote { .. }))
+                            && aside_pushed.pop() == Some(true) =>
                     {
                         let f = frames.pop().expect("checked");
                         finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
@@ -2369,7 +2479,7 @@ mod tests {
             .iter()
             .flat_map(|b| {
                 let mut inls = Vec::new();
-                super::flatten_block_inlines(b, &mut inls);
+                super::flatten_block_inlines(b, &mut inls, 0);
                 inls
             })
             .map(|i| match i {
@@ -2507,5 +2617,261 @@ mod tests {
             "flattening must keep the text, got {}",
             inlines_text(inls)
         );
+    }
+
+    /// Max nesting depth of List/Footnote blocks, via an explicit stack so the
+    /// checker itself cannot overflow on the very input it is checking — the
+    /// same reasoning `fuzz_entry::max_inline_depth` records for its traversal.
+    fn block_depth_of(blocks: &[Block]) -> usize {
+        let mut max_depth = 0;
+        let mut stack: Vec<(&[Block], usize)> = vec![(blocks, 0)];
+        while let Some((slice, depth)) = stack.pop() {
+            for b in slice {
+                match b {
+                    Block::List { items, .. } => {
+                        max_depth = max_depth.max(depth + 1);
+                        for item in items {
+                            stack.push((item, depth + 1));
+                        }
+                    }
+                    Block::Footnote { blocks, .. } => {
+                        max_depth = max_depth.max(depth + 1);
+                        stack.push((blocks, depth + 1));
+                    }
+                    // Leaves enumerated, not wildcarded: a new nesting variant
+                    // must break this build rather than make the check blind.
+                    Block::Heading { .. }
+                    | Block::Para(_)
+                    | Block::Table(_)
+                    | Block::Figure { .. }
+                    | Block::CodeBlock { .. }
+                    | Block::MathBlock(_)
+                    | Block::Raw { .. } => {}
+                }
+            }
+        }
+        max_depth
+    }
+
+    /// Collect every text run reachable anywhere in `blocks`, so a test can
+    /// assert flattening kept content rather than dropping it. Iterative on the
+    /// block side for the same reason `block_depth_of` is; the inline side
+    /// delegates to this module's existing `inlines_text`, whose recursion is
+    /// safe because the inline bound already holds.
+    fn all_text(blocks: &[Block]) -> String {
+        let mut out = String::new();
+        let mut stack: Vec<&Block> = blocks.iter().rev().collect();
+        while let Some(b) = stack.pop() {
+            match b {
+                Block::Heading { inlines, .. } | Block::Para(inlines) => {
+                    out.push_str(&inlines_text(inlines))
+                }
+                Block::List { items, .. } => {
+                    for item in items {
+                        stack.extend(item.iter());
+                    }
+                }
+                Block::Footnote { blocks, .. } => stack.extend(blocks.iter()),
+                Block::Figure { caption, .. } => out.push_str(&inlines_text(caption)),
+                Block::Table(t) => {
+                    for c in t.header.iter().chain(t.rows.iter().flatten()) {
+                        out.push_str(&inlines_text(c));
+                    }
+                }
+                Block::CodeBlock { text, .. } => out.push_str(text),
+                Block::MathBlock(s) | Block::Raw { note: s } => out.push_str(s),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn deeply_nested_lists_flatten_at_the_block_bound() {
+        const DEPTH: usize = 3000;
+        let mut html = String::from("<body><h1>T</h1>");
+        for _ in 0..DEPTH {
+            html.push_str("<ul><li>");
+        }
+        html.push_str("SENTINEL");
+        for _ in 0..DEPTH {
+            html.push_str("</li></ul>");
+        }
+        html.push_str("</body>");
+
+        let blocks = parse_blocks(&html);
+
+        // Pinned to equality, not just `<=`: a bound-suppressing bug that
+        // stops early (e.g. an off-by-one between `>` and `>=` at the
+        // suppression site, or a check that fires at depth 0) would still
+        // satisfy `<= MAX_BLOCK_DEPTH`. Equality asserts the bound is
+        // actually reached, not merely respected.
+        assert_eq!(
+            block_depth_of(&blocks),
+            MAX_BLOCK_DEPTH,
+            "produced block depth does not equal MAX_BLOCK_DEPTH {}",
+            MAX_BLOCK_DEPTH
+        );
+        // The half that separates flattening from truncation: content survives.
+        assert!(
+            all_text(&blocks).contains("SENTINEL"),
+            "the innermost text was dropped -- this bound must flatten, not truncate"
+        );
+    }
+
+    #[test]
+    fn blocks_after_a_deep_list_are_not_corrupted() {
+        const DEPTH: usize = 3000;
+        let mut html = String::from("<body><h1>T</h1>");
+        for _ in 0..DEPTH {
+            html.push_str("<ul><li>");
+        }
+        html.push_str("inner");
+        for _ in 0..DEPTH {
+            html.push_str("</li></ul>");
+        }
+        html.push_str("<p>AFTER</p></body>");
+
+        let blocks = parse_blocks(&html);
+
+        // A suppressed </ul> that wrongly popped a real frame would unbalance
+        // `frames` and swallow this trailing paragraph into the deep list.
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Para(inls) if inls.iter().any(|i| matches!(i, Inline::Text(t) if t == "AFTER")))),
+            "trailing paragraph must be a top-level block, not captured by the deep list"
+        );
+    }
+
+    #[test]
+    fn an_over_deep_sublist_does_not_close_its_enclosing_list() {
+        // Pairs with `blocks_after_a_deep_list_are_not_corrupted` above,
+        // which catches an *under*-pop: a suppressed `</ul>` that wrongly
+        // fails to no-op, draining `frames` early and swallowing trailing
+        // content. That test cannot catch the opposite defect -- an
+        // *over*-pop, where a suppressed `</ul>` wrongly satisfies the End
+        // arm's `matches!(frames.last(), Some(BlockFrame::List { .. }))`
+        // guard (true because the *enclosing* frame is also a List) and
+        // pops a real frame that must survive. Over-popping a pure,
+        // fully-closed deep nest is invisible to that test: an over-popping
+        // End arm and a correct one drain the same real frames in the same
+        // order and reach the same result (frames empty, list already
+        // emitted) by the time trailing content arrives. The defect only
+        // becomes observable when a real List frame must outlive a deep
+        // sub-nest closed underneath it and receive a further sibling
+        // afterward -- which is what this test builds: everything but the
+        // outermost `<ul><li>` closes, then one more `<li>` arrives for that
+        // still-open outer list.
+        const DEPTH: usize = 3000;
+        let mut html = String::from("<body><h1>T</h1>");
+        for _ in 0..DEPTH {
+            html.push_str("<ul><li>");
+        }
+        html.push_str("inner");
+        for _ in 0..(DEPTH - 1) {
+            html.push_str("</li></ul>");
+        }
+        html.push_str("<li>SIBLING</li></ul>");
+        html.push_str("<p>AFTER</p></body>");
+
+        let blocks = parse_blocks(&html);
+
+        // Under an over-popping End arm, the outer list's frame is consumed
+        // (and emitted) while closing the deep sub-nest beneath it, so
+        // `<li>SIBLING</li>` finds no open List frame and SIBLING escapes to
+        // a top-level Para instead of becoming a sibling item.
+        assert!(
+            !blocks.iter().any(|b| matches!(b, Block::Para(inls)
+                if inls.iter().any(|i| matches!(i, Inline::Text(t) if t == "SIBLING")))),
+            "SIBLING must not be a top-level Para -- that means the enclosing list closed early"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::List { .. })
+                && all_text(std::slice::from_ref(b)).contains("SIBLING")),
+            "SIBLING must be nested inside the top-level list, got {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Para(inls)
+                if inls.iter().any(|i| matches!(i, Inline::Text(t) if t == "AFTER")))),
+            "trailing paragraph must still be a top-level block"
+        );
+    }
+
+    #[test]
+    fn mismatched_close_inside_a_list_item_does_not_consume_the_list_tracker() {
+        // A `</ul>` that does not face a List frame (here, a `<table>`
+        // opened inside the `<li>` sees the stray close before its own
+        // `</table>`) must not consume `list_pushed`. If it did, it would
+        // steal the tracker entry belonging to the real, still-open outer
+        // `<ul>`; that `<ul>`'s own (correctly matched) `</ul>` would then
+        // find the tracker empty, fail to pop, and stay open until EOF --
+        // mis-parenting everything parsed afterward. Checking the frame
+        // guard before popping the tracker (rather than after) is what
+        // makes a mismatched close leave the tracker alone.
+        let blocks = parse_blocks(
+            "<body><ul><li><table><tr><td>CELL</td></tr></ul></table></ul><p>AFTER</p></body>",
+        );
+
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Para(inls)
+                if inls.iter().any(|i| matches!(i, Inline::Text(t) if t == "AFTER")))),
+            "trailing paragraph must be top-level, not captured by a list left open by a stolen tracker entry, got {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::List { .. })),
+            "the real list must still close and emit its (mismatched-but-recovered) content, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_close_inside_a_footnote_aside_does_not_consume_the_aside_tracker() {
+        // A `</aside>` that does not face a Footnote frame (here, a
+        // `<table>` opened inside the footnote aside sees the stray close
+        // before its own `</table>`) must not consume `aside_pushed`. If it
+        // did, it would steal the tracker entry belonging to the real,
+        // still-open `<aside epub:type="footnote">`; that footnote's own
+        // (correctly matched) closing `</aside>` would then find the
+        // tracker empty, fail to pop, and stay open until EOF -- swallowing
+        // everything parsed afterward, including the trailing paragraph.
+        // Checking the frame guard before popping the tracker (rather than
+        // after) is what makes a mismatched close leave the tracker alone.
+        let blocks = parse_blocks(
+            "<body><aside epub:type=\"footnote\"><table><tr><td>CELL</td></tr></aside></table></aside><p>AFTER</p></body>",
+        );
+
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Para(inls)
+                if inls.iter().any(|i| matches!(i, Inline::Text(t) if t == "AFTER")))),
+            "trailing paragraph must be top-level, not captured by a footnote left open by a stolen tracker entry, got {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Footnote { .. })),
+            "the real footnote must still close and emit its (mismatched-but-recovered) content, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_footnotes_flatten_at_the_block_bound() {
+        const DEPTH: usize = 3000;
+        let mut html = String::from("<body><h1>T</h1>");
+        for _ in 0..DEPTH {
+            html.push_str(r#"<aside epub:type="footnote"><p>x</p>"#);
+        }
+        html.push_str("<p>NOTESENTINEL</p>");
+        for _ in 0..DEPTH {
+            html.push_str("</aside>");
+        }
+        html.push_str("</body>");
+
+        let blocks = parse_blocks(&html);
+
+        // See the equality rationale in deeply_nested_lists_flatten_at_the_block_bound.
+        assert_eq!(
+            block_depth_of(&blocks),
+            MAX_BLOCK_DEPTH,
+            "produced block depth does not equal MAX_BLOCK_DEPTH {}",
+            MAX_BLOCK_DEPTH
+        );
+        assert!(all_text(&blocks).contains("NOTESENTINEL"));
     }
 }

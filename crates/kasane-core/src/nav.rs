@@ -18,18 +18,14 @@ pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     // abort the process on the way out of this published entry point even
     // though every INLINE walk over it is now bounded.
     //
-    // Inline, and only inline. BLOCK nesting (`Block::List`/`Block::Footnote`)
-    // is **not bounded anywhere in this codebase** — the same fact
-    // `kasane-adapters`'s `fuzz_entry::max_inline_depth` states at length: not
-    // in the EPUB parser's `frames` stack, not in `kasane-core`, not in the
-    // writer. `section::clone_block`, `balance::est_tokens_block`,
-    // `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still
-    // recurse on it, so a document nesting lists or footnotes deeply enough
-    // still aborts the process on a stack overflow (README's Known
-    // limitations records it; bounding it is open work). What the call below
-    // buys is narrower, and worth stating precisely: on the *drop* side block
-    // nesting IS bounded, because `teardown_document` pops blocks from an
-    // explicit worklist too. The walk and clone sides are not.
+    // Both kinds of nesting are now bounded on every side. Block nesting has
+    // its own pair of constants (`epub::xhtml::MAX_BLOCK_DEPTH` for fidelity,
+    // `kasane_ir::MAX_BLOCK_DEPTH` for safety) and every recursive block walk
+    // in this crate and the writer carries the safety bound. The drop side
+    // was already safe and stays so: `teardown_document` pops blocks from an
+    // explicit worklist, which is why this call is still here rather than
+    // letting `doc` fall out of scope — a bounded walk protects the walk, not
+    // the compiler-derived `Drop` that runs afterwards.
     //
     // `kasane_ir::teardown_document` (shared with `kasane-adapters`'s fuzz
     // seam, which has the identical hazard for the identical reason) lives
@@ -245,5 +241,164 @@ mod tests {
             _ => panic!("expected a TOC list"),
         };
         assert_eq!(toc, vec!["Part 1", "Part 2"]);
+    }
+
+    /// The block-nesting analogue of
+    /// `kasane_ir`'s `teardown_document_survives_deep_block_and_inline_nesting`:
+    /// the drop side was already safe, the walk side was not. Depth 100_000
+    /// is far past anything a real document holds -- the point is that the
+    /// bound makes depth irrelevant, so an absurd value is the honest test.
+    #[test]
+    fn structure_survives_deep_block_nesting() {
+        const DEPTH: usize = 100_000;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("bottom".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+        blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks,
+        }];
+        let mut nodes = vec![Node {
+            block: Block::Heading {
+                level: 1,
+                id: BlockId(0),
+                inlines: vec![Inline::Text("T".into())],
+            },
+            prov: Provenance::default(),
+        }];
+        nodes.extend(blocks.into_iter().map(|block| Node {
+            block,
+            prov: Provenance::default(),
+        }));
+        let doc = Document {
+            meta: DocMeta {
+                title: "T".into(),
+                authors: vec![],
+                language: None,
+                source_format: "test".into(),
+                source_path: "t".into(),
+            },
+            nodes,
+        };
+        // Must return normally, not abort.
+        let site = structure(
+            doc,
+            &Options {
+                max_tokens: 4000,
+                min_tokens: 100,
+            },
+        );
+        assert!(!site.files.is_empty());
+    }
+
+    /// The core-side companion to `kasane-writer`'s
+    /// `rendering_preserves_content_well_under_the_block_bound`:
+    /// `structure_survives_deep_block_nesting` above only pins that
+    /// `structure()` returns normally at an absurd depth, and `structure()`
+    /// returns a non-empty `site.files` for any non-empty `Document` -- even
+    /// if `clone_block`'s guard fired at depth 1 and silently truncated
+    /// almost everything. That would pass `!site.files.is_empty()` without
+    /// pinning where the bound actually sits. DEPTH = 10 is well under
+    /// `kasane_ir::MAX_BLOCK_DEPTH` (128): the innermost payload text must
+    /// reach `site.files` intact, and no truncation note may appear anywhere
+    /// in the output.
+    #[test]
+    fn structure_preserves_content_well_under_the_block_bound() {
+        const DEPTH: usize = 10;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("innermost payload".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+        blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks,
+        }];
+        let mut nodes = vec![Node {
+            block: Block::Heading {
+                level: 1,
+                id: BlockId(0),
+                inlines: vec![Inline::Text("T".into())],
+            },
+            prov: Provenance::default(),
+        }];
+        nodes.extend(blocks.into_iter().map(|block| Node {
+            block,
+            prov: Provenance::default(),
+        }));
+        let doc = Document {
+            meta: DocMeta {
+                title: "T".into(),
+                authors: vec![],
+                language: None,
+                source_format: "test".into(),
+                source_path: "t".into(),
+            },
+            nodes,
+        };
+        let site = structure(
+            doc,
+            &Options {
+                max_tokens: 4000,
+                min_tokens: 100,
+            },
+        );
+
+        assert!(
+            site.files
+                .iter()
+                .any(|f| blocks_contain_text(&f.blocks, "innermost payload")),
+            "payload text must survive this far under the bound: {:?}",
+            site.files.iter().map(|f| &f.blocks).collect::<Vec<_>>()
+        );
+        assert!(
+            !site
+                .files
+                .iter()
+                .any(|f| blocks_contain_text(&f.blocks, "nesting truncated")),
+            "the guard must not fire this shallow: {:?}",
+            site.files.iter().map(|f| &f.blocks).collect::<Vec<_>>()
+        );
+    }
+
+    fn blocks_contain_text(blocks: &[Block], needle: &str) -> bool {
+        blocks.iter().any(|b| block_contains_text(b, needle))
+    }
+
+    fn block_contains_text(b: &Block, needle: &str) -> bool {
+        match b {
+            Block::Heading { inlines, .. } | Block::Para(inlines) => {
+                inlines.iter().any(|i| inline_contains_text(i, needle))
+            }
+            Block::List { items, .. } => items.iter().any(|item| blocks_contain_text(item, needle)),
+            Block::Footnote { blocks, .. } => blocks_contain_text(blocks, needle),
+            Block::Table(t) => t
+                .header
+                .iter()
+                .chain(t.rows.iter().flatten())
+                .any(|cell| cell.iter().any(|i| inline_contains_text(i, needle))),
+            Block::Figure { caption, .. } => {
+                caption.iter().any(|i| inline_contains_text(i, needle))
+            }
+            Block::CodeBlock { text, .. } | Block::MathBlock(text) => text.contains(needle),
+            Block::Raw { note } => note.contains(needle),
+        }
+    }
+
+    fn inline_contains_text(i: &Inline, needle: &str) -> bool {
+        match i {
+            Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => t.contains(needle),
+            Inline::Emph(x) | Inline::Strong(x) => {
+                x.iter().any(|i| inline_contains_text(i, needle))
+            }
+            Inline::Link { inlines, .. } => inlines.iter().any(|i| inline_contains_text(i, needle)),
+            Inline::FootnoteRef(_) => false,
+        }
     }
 }

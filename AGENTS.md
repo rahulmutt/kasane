@@ -86,11 +86,23 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
   recursive walks, which adapter-produced IR can never reach. Unbounded, deep
   nesting aborts the process on a stack overflow.
-  BLOCK nesting (`Block::List`/`Block::Footnote`) is bounded **nowhere**. Only
-  the drop side is safe, via `kasane_ir::teardown_document`'s explicit
-  worklist; `section::clone_block`, `balance::est_tokens_block`,
-  `refs::fix_block` and `kasane_writer::blocks_to_markdown` all still recurse
-  on it, so a deep enough list or footnote still aborts the process. Open work,
-  recorded under README's Known limitations — do not write a comment anywhere
-  that implies every walk is bounded.
+  BLOCK nesting (`Block::List`/`Block::Footnote`) is bounded the same way, and
+  by the same two-constant shape: `epub::xhtml::MAX_BLOCK_DEPTH` is the
+  fidelity bound that flattens without losing content (and covers MOBI/AZW3
+  too, which re-serializes through that parser), while
+  `kasane_ir::MAX_BLOCK_DEPTH` is the safety bound in the recursive walks. A
+  compile-time assertion in `epub/xhtml.rs` enforces
+  `MAX_BLOCK_DEPTH * 4 <= kasane_ir::MAX_BLOCK_DEPTH`, so raising the fidelity
+  bound past a quarter of the safety bound fails the build rather than
+  silently weakening the design. Ten production walks recurse on block
+  nesting and all ten carry the bound. Six run in the EPUB/MOBI adapters during
+  `parse`, before `kasane-core` is reached: `epub::fix_block_links`,
+  `mobi::strip_empty_anchor_links`, `epub::collect_figure_keys`,
+  `epub::degrade_failed_figures`, `epub::collect_note_refs`,
+  `epub::xhtml::flatten_block_inlines`. Four are in the core and writer:
+  `section::clone_block`, `balance::est_tokens_block`, `refs::fix_block`,
+  `kasane_writer::blocks_to_markdown`.
+  `clone_block` is the load-bearing one: it is the first core walk to touch
+  the IR, so the later three see already-shallow blocks. The drop side is
+  separately safe via `kasane_ir::teardown_document`'s explicit worklist.
 - Every change ships green under `mise run lint && mise run test`.
