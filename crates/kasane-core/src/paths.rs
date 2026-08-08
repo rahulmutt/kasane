@@ -20,17 +20,18 @@ pub struct PlaceResult {
 /// actually renders or the root's duplicate suffixes are off by one.
 pub fn assign_paths(tree: SectionTree, doc_title: &str) -> PlaceResult {
     let mut anchors = HashMap::new();
-    let root = place(tree.root, "index.md", "", doc_title, &mut anchors);
+    let root = place(tree.root, "index.md", "", doc_title, true, &mut anchors);
     PlaceResult { root, anchors }
 }
 
 // self_path: this node's markdown file path. dir: directory children live in.
-// doc_title: only meaningful for the root; see `assign_paths`.
+// doc_title: only meaningful when is_root; see `assign_paths`.
 fn place(
     mut node: SectionNode,
     self_path: &str,
     dir: &str,
     doc_title: &str,
+    is_root: bool,
     anchors: &mut HashMap<BlockId, String>,
 ) -> Placed {
     // One counter per file, fed in the order `file_to_markdown` renders: the
@@ -40,9 +41,18 @@ fn place(
     // Every file renders a title heading, so every file consumes this slot --
     // including `index.md`, whose heading is the document title rather than
     // the (empty) root node title. `nav::walk` pins the substitution on
-    // `id.is_none() && trail.is_empty()`; `dir.is_empty()` is the same
-    // condition here.
-    let title_anchor = if node.id.is_none() && dir.is_empty() {
+    // `id.is_none() && trail.is_empty()`, which is true for the ROOT call only
+    // -- every recursive `walk` call has already pushed a title onto the
+    // breadcrumb. `is_root` is the same thing made explicit rather than
+    // inferred: `node.id.is_none() && dir.is_empty()` looked equivalent but
+    // isn't -- `dir` is empty for every top-level LEAF child of the root too
+    // (a leaf inherits its parent's `dir` unchanged), and `id` is `None` for
+    // every synthetic `Part N` node `balance.rs` splits off an oversized body
+    // (root's included). A root-level `Part N` leaf would have matched both
+    // clauses and had its counter seeded from the document title instead of
+    // its own -- the same `id.is_none()`-alone conflation `nav.rs` already
+    // hit once for the TOC (see its comment on the synthetic-parts fix).
+    let title_anchor = if is_root {
         counter.next(&[Inline::Text(doc_title.to_string())])
     } else {
         counter.next(&node.title)
@@ -67,11 +77,11 @@ fn place(
         let child_slug = path_slug(&child.title);
         if child.children.is_empty() {
             let p = join(dir, &format!("{:02}-{}.md", n, child_slug));
-            placed.push(place(child, &p, dir, doc_title, anchors));
+            placed.push(place(child, &p, dir, doc_title, false, anchors));
         } else {
             let cdir = join(dir, &format!("{:02}-{}", n, child_slug));
             let p = format!("{}/index.md", cdir);
-            placed.push(place(child, &p, &cdir, doc_title, anchors));
+            placed.push(place(child, &p, &cdir, doc_title, false, anchors));
         }
     }
     Placed {
@@ -289,6 +299,41 @@ mod tests {
     }
 
     #[test]
+    fn a_root_level_leaf_with_no_id_seeds_its_counter_from_its_own_title() {
+        // Shaped like a synthetic `Part N` node `balance.rs` splits off an
+        // oversized ROOT body: `id: None`, no children, so it's a top-level
+        // LEAF child of the root -- which means it inherits the root's own
+        // (empty) `dir`, exactly as the root's own call has an empty `dir`.
+        // `node.id.is_none() && dir.is_empty()` therefore fires for both, and
+        // before making root-ness explicit (`is_root`), this seeded the
+        // counter from the DOCUMENT title instead of "Part 1", silently
+        // mis-suffixing the body heading below against the wrong page.
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body: vec![],
+                children: vec![SectionNode {
+                    id: None,
+                    level: 1,
+                    title: vec![Inline::Text("Part 1".into())],
+                    body: vec![Block::Heading {
+                        level: 2,
+                        id: BlockId(7),
+                        inlines: vec![Inline::Text("Part 1".into())],
+                    }],
+                    children: vec![],
+                    pages: None,
+                }],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert_eq!(placed.anchors[&BlockId(7)], "01-part-1.md#part-1-1");
+    }
+
+    #[test]
     fn a_nested_heading_consumes_a_slot_without_getting_an_anchor() {
         // A heading inside a list item was never folded into a section, so it
         // gets no anchor -- but GitHub still gives it an id when it renders,
@@ -333,20 +378,72 @@ mod tests {
         assert_eq!(placed.anchors[&BlockId(3)], "index.md#notes-2");
     }
 
-    /// Pins the bound's position, matching how the other core walks are
-    /// tested: nesting past `MAX_BLOCK_DEPTH` must return rather than recurse,
-    /// and a heading below the bound must simply be unreachable.
+    /// Pins both sides of the bound, matching how the other core walks are
+    /// tested: nesting past `MAX_BLOCK_DEPTH` must return rather than
+    /// recurse, and a heading just under the bound must still be reached.
+    ///
+    /// The negative half alone (a heading past the bound has no anchor)
+    /// can't tell "stopped at the bound" from "never descended into
+    /// `Block::List` at all" -- a nested heading gets no anchor of its own
+    /// even when it IS reached, so absence of an anchor is not evidence of
+    /// anything. The only observable proof that a nested heading was reached
+    /// is that it consumed a counter slot: nest to `MAX_BLOCK_DEPTH - 2`
+    /// (comfortably under the bound) and check that a *following* top-level
+    /// heading with the same base gets suffixed `-1`, which only happens if
+    /// the nested one was counted first.
     #[test]
     fn the_counting_walk_is_bounded() {
+        // POSITIVE: reached, so it consumes a slot and pushes the next
+        // same-titled heading to `-1`.
         let mut inner = vec![Block::Heading {
+            level: 3,
+            id: BlockId(1),
+            inlines: vec![Inline::Text("Notes".into())],
+        }];
+        for _ in 0..(kasane_ir::MAX_BLOCK_DEPTH - 2) {
+            inner = vec![Block::List {
+                ordered: false,
+                items: vec![inner],
+            }];
+        }
+        let mut body = inner;
+        body.push(Block::Heading {
+            level: 2,
+            id: BlockId(2),
+            inlines: vec![Inline::Text("Notes".into())],
+        });
+        let tree = SectionTree {
+            root: SectionNode {
+                id: None,
+                level: 0,
+                title: vec![],
+                body,
+                children: vec![],
+                pages: None,
+            },
+        };
+        let placed = assign_paths(tree, "Book");
+        assert!(
+            !placed.anchors.contains_key(&BlockId(1)),
+            "a nested heading must not gain an anchor"
+        );
+        assert_eq!(
+            placed.anchors[&BlockId(2)],
+            "index.md#notes-1",
+            "a heading at MAX_BLOCK_DEPTH - 2 must still be reached and consume a slot"
+        );
+
+        // NEGATIVE: past the bound, unreachable -- no anchor, no suffix
+        // pushed onto anything after it.
+        let mut deep = vec![Block::Heading {
             level: 3,
             id: BlockId(99),
             inlines: vec![Inline::Text("Deep".into())],
         }];
         for _ in 0..(kasane_ir::MAX_BLOCK_DEPTH + 2) {
-            inner = vec![Block::List {
+            deep = vec![Block::List {
                 ordered: false,
-                items: vec![inner],
+                items: vec![deep],
             }];
         }
         let tree = SectionTree {
@@ -354,7 +451,7 @@ mod tests {
                 id: None,
                 level: 0,
                 title: vec![],
-                body: inner,
+                body: deep,
                 children: vec![],
                 pages: None,
             },
