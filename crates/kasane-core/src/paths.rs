@@ -1,5 +1,6 @@
 use crate::section::{SectionNode, SectionTree};
-use kasane_ir::{Block, BlockId, Inline};
+use crate::slug::{anchor_slug, path_slug};
+use kasane_ir::{Block, BlockId};
 use std::collections::HashMap;
 
 pub struct Placed {
@@ -27,7 +28,7 @@ fn place(
     anchors: &mut HashMap<BlockId, String>,
 ) -> Placed {
     if let Some(id) = node.id {
-        anchors.insert(id, format!("{}#{}", self_path, slug(&node.title)));
+        anchors.insert(id, format!("{}#{}", self_path, anchor_slug(&node.title)));
     }
     // A merged subsection's heading lives in its parent's body (balance.rs
     // demotes it there), and nothing else would give it an anchor. Only
@@ -36,14 +37,14 @@ fn place(
     // structure the engine does not model.
     for b in &node.body {
         if let Block::Heading { id, inlines, .. } = b {
-            anchors.insert(*id, format!("{}#{}", self_path, slug(inlines)));
+            anchors.insert(*id, format!("{}#{}", self_path, anchor_slug(inlines)));
         }
     }
     let children = std::mem::take(&mut node.children);
     let mut placed = Vec::new();
     for (i, child) in children.into_iter().enumerate() {
         let n = i + 1;
-        let child_slug = slug(&child.title);
+        let child_slug = path_slug(&child.title);
         if child.children.is_empty() {
             let p = join(dir, &format!("{:02}-{}.md", n, child_slug));
             placed.push(place(child, &p, dir, anchors));
@@ -65,59 +66,6 @@ fn join(dir: &str, name: &str) -> String {
         name.to_string()
     } else {
         format!("{}/{}", dir, name)
-    }
-}
-
-/// Slug for a heading's inlines, as `assign_paths` computes it.
-///
-/// `#[doc(hidden)]` test seam, same rationale as `est_tokens`: the link
-/// invariant has to compare a rendered heading against the anchor the engine
-/// emitted, using the engine's own slug rule rather than a copy of it.
-#[doc(hidden)]
-pub fn slug_of(inlines: &[Inline]) -> String {
-    slug(inlines)
-}
-
-pub(crate) fn slug(inlines: &[Inline]) -> String {
-    let text = inline_text(inlines);
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        "section".to_string()
-    } else {
-        out
-    }
-}
-
-pub(crate) fn inline_text(inlines: &[Inline]) -> String {
-    let mut s = String::new();
-    inline_text_at(inlines, 0, &mut s);
-    s
-}
-
-fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
-    if depth >= kasane_ir::MAX_INLINE_DEPTH {
-        return;
-    }
-    for i in inlines {
-        match i {
-            Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => s.push_str(t),
-            Inline::Emph(x) | Inline::Strong(x) => inline_text_at(x, depth + 1, s),
-            Inline::Link { inlines, .. } => inline_text_at(inlines, depth + 1, s),
-            Inline::FootnoteRef(_) => {}
-        }
     }
 }
 
