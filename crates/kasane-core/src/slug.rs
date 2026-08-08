@@ -127,16 +127,37 @@ fn truncate_to(s: &mut String, max: usize) {
     s.truncate(end);
 }
 
-/// Drop trailing `-` and trailing combining marks, so neither the collapse
-/// rule nor the cap can leave a dangling hyphen or a mark with nothing to
+/// Drop a trailing `-`, and drop a trailing Mark only when it has no base to
 /// attach to.
+///
+/// A Mark with a real base is a legitimate word ending -- Devanagari and Thai
+/// words routinely end in a vowel sign -- so popping every trailing Mark
+/// unconditionally (the earlier version of this function) silently deleted a
+/// letter of the word. `truncate_to` cannot orphan a Mark on its own: it cuts
+/// a suffix on a char boundary, so a surviving Mark always keeps whatever
+/// preceded it. The only genuinely dangling cases are a Mark with nothing
+/// before it at all (mark-only input) and a Mark directly after a separator
+/// (the separator is not a base).
 fn trim_tail(s: &mut String) {
-    while s
-        .chars()
-        .next_back()
-        .is_some_and(|c| c == '-' || c.general_category_group() == GeneralCategoryGroup::Mark)
-    {
-        s.pop();
+    loop {
+        match s.chars().next_back() {
+            Some('-') => {
+                s.pop();
+            }
+            Some(c) if c.general_category_group() == GeneralCategoryGroup::Mark => {
+                let base = s
+                    .chars()
+                    .rev()
+                    .find(|c| c.general_category_group() != GeneralCategoryGroup::Mark);
+                match base {
+                    None | Some('-') => {
+                        s.pop();
+                    }
+                    _ => break,
+                }
+            }
+            _ => break,
+        }
     }
 }
 
@@ -242,6 +263,11 @@ mod tests {
         assert_eq!(path_slug(&t("Background & Notes")), "background-notes");
         assert_eq!(path_slug(&t("foo_bar")), "foo_bar");
         assert_eq!(path_slug(&t("第二章")), "第二章");
+        // The anchor table has a Devanagari row; the path-slug table didn't,
+        // and that asymmetry is exactly what let `trim_tail` silently eat the
+        // final vowel sign. `हिन्दी` ends in a Mark with a real base, which is
+        // a legitimate word ending, not a dangling tail.
+        assert_eq!(path_slug(&t("हिन्दी")), "हिन्दी");
         assert_eq!(path_slug(&t("Hello 🎉 World")), "hello-world");
         assert_eq!(path_slug(&t("***")), "section");
         // A leading separator is never emitted, so nothing needs trimming off
@@ -272,16 +298,31 @@ mod tests {
         assert!(out.len() <= MAX_PATH_SLUG_BYTES);
         // Anchors are not filenames and are deliberately uncapped.
         assert_eq!(anchor_slug(&t(&long)).len(), 120);
+        // The cap can land exactly on a separator: 63 `a`s + the collapsed
+        // space is 64 bytes ending in `-`, and the `tail` after it is cut
+        // off entirely. `trim_tail` must run AFTER `truncate_to` to remove
+        // that dangling hyphen; a refactor that swapped the order would
+        // leave `a`*63 + `-` and fail this.
+        assert_eq!(
+            path_slug(&t(&format!("{} tail", "a".repeat(63)))),
+            "a".repeat(63)
+        );
     }
 
-    /// Truncation must not leave a hyphen or a combining mark with nothing to
-    /// attach to. 61 `a`s plus a 3-byte virama is exactly 64 bytes, so nothing
-    /// is cut -- the trailing mark is dropped by the tail trim, not the cap.
+    /// A trailing Mark survives when it has a base (61 `a`s plus a 3-byte
+    /// virama is exactly 64 bytes, so nothing is cut by the cap either), and
+    /// is dropped only when it is genuinely dangling: no base at all, or a
+    /// base that is itself a separator.
     #[test]
     fn path_slug_trims_a_dangling_tail() {
         let s = format!("{}{}", "a".repeat(61), "\u{094D}");
         assert_eq!(s.len(), 64);
-        assert_eq!(path_slug(&t(&s)), "a".repeat(61));
+        assert_eq!(path_slug(&t(&s)), s);
         assert_eq!(path_slug(&t("Intro -")), "intro");
+        // A mark with no base at all is the true dangling case.
+        assert_eq!(path_slug(&t("\u{0301}")), "section");
+        // A mark directly after a separator has no base either -- the
+        // separator collapses away, leaving nothing for the mark to attach to.
+        assert_eq!(path_slug(&t("a \u{0301}")), "a");
     }
 }
