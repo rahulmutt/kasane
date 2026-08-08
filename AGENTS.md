@@ -95,7 +95,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `MAX_BLOCK_DEPTH * 4 <= kasane_ir::MAX_BLOCK_DEPTH`, so raising the fidelity
   bound past a quarter of the safety bound fails the build rather than
   silently weakening the design. Ten production walks recurse on block
-  nesting and all ten carry the bound: four in the EPUB/MOBI adapters run
+  nesting and all ten carry the bound: six in the EPUB/MOBI adapters run
   during `parse` before `kasane-core` is reached — `epub::fix_block_links`,
   `mobi::strip_empty_anchor_links`, `epub::collect_figure_keys`,
   `epub::degrade_failed_figures`, `epub::collect_note_refs`, and
