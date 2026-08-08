@@ -1,6 +1,6 @@
-pub mod fuzz_entry;
-
 mod balance;
+#[doc(hidden)]
+pub mod fuzz_entry;
 mod nav;
 mod options;
 mod paths;
