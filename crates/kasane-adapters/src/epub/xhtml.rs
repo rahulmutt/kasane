@@ -1126,20 +1126,6 @@ pub fn xhtml_to_blocks(
                     // only a close that actually faces a Footnote frame
                     // consults `aside_pushed` to decide whether that frame is
                     // one this tag opened.
-                    // The frame guard is checked before popping the tracker,
-                    // not after, for the same reason as the `</ul>`/`</ol>`
-                    // arm above: a mismatched close (top frame is not a
-                    // Footnote, e.g. `<aside epub:type="footnote"><table>
-                    // </aside></table>`) must leave `aside_pushed` untouched,
-                    // or it would consume the tracker entry belonging to a
-                    // real, still-open footnote and leave that footnote's
-                    // frame stuck open until EOF. With the guard first, a
-                    // stray `</aside>` with no matching open still finds no
-                    // Footnote frame and is ignored; a mismatched close is
-                    // ignored the same way and does not disturb the tracker;
-                    // only a close that actually faces a Footnote frame
-                    // consults `aside_pushed` to decide whether that frame is
-                    // one this tag opened.
                     b"aside"
                         if matches!(frames.last(), Some(BlockFrame::Footnote { .. }))
                             && aside_pushed.pop() == Some(true) =>
