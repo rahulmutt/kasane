@@ -53,6 +53,14 @@ paths exist, not just what is in them. `write_tree` replaces the output
 directory wholesale, so nothing stale is left behind — but anything outside the
 tree that referenced the old paths needs updating.
 
+Paths also changed with the slug rule. Punctuation is now removed rather than
+turned into a separator, so `01-don-t-panic.md` became `01-dont-panic.md`, and
+a heading in any script now keeps its text, so a Japanese book that used to
+emit `01-section.md` and `02-section.md` now emits `01-第二章.md` and its
+siblings. As with the `Part N` change, `write_tree` replaces the output
+directory wholesale so nothing stale is left behind — but anything outside the
+tree that referenced the old paths needs updating.
+
 ## Install
     cargo install kasane-cli   # installs the `kasane` binary
 
@@ -70,10 +78,12 @@ internal link resolves to a real file and a real anchor, the size guard holds,
 deterministic. They run in `mise run test` with no extra setup.
 
 Read the link invariant precisely: it holds *against kasane's own slug rule*,
-and the generator draws adapter-realistic ASCII titles and shallow block
-nesting. It therefore says nothing about whether GitHub resolves the same
-anchor, nor about non-Latin headings or deep list/footnote nesting — both are
-under Known limitations below.
+which is now a deliberate mirror of GitHub's — the generator draws non-Latin
+and punctuation-bearing titles, so the invariant exercises that rule rather
+than an ASCII subset of it. What it still cannot say is whether github.com
+computes the same anchor: nothing in CI can ask it. The mirror is written down
+as a case table in `crates/kasane-core/src/slug.rs`. Deep list/footnote
+nesting remains under Known limitations.
 
 When a property fails it writes `crates/kasane-writer/tests/properties.proptest-regressions`.
 **Commit that file** — like a fuzz reproducer, it is what replays the failing
@@ -82,10 +92,11 @@ case on every subsequent run.
 ### Fuzzing
 
 Every adapter parses untrusted input, so the boundary is fuzzed with
-`cargo-fuzz`. Twelve targets cover the five format adapters, format detection,
+`cargo-fuzz`. Thirteen targets cover the five format adapters, format detection,
 the two ZIP container formats past their CRC check, and the sub-parsers a
 whole-file fuzzer would rarely reach — the math island capture, PalmDOC
-decompression, the path guards, and XML entity resolution.
+decompression, the path guards, XML entity resolution, and the slug rule that
+turns untrusted title text into a filename.
 
     mise run fuzz math_island                    # one target, until you stop it
     mise run fuzz epub -- -max_total_time=60     # one target, 60 seconds
@@ -128,16 +139,20 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Heading anchors use kasane's own slug rule, not GitHub's. It keeps ASCII
-  letters and digits only (`slug()` in `crates/kasane-core/src/paths.rs`) and
-  turns every other run of characters into a single `-`. Two consequences:
-  punctuation diverges from GFM — `## Don't Panic` is anchored `#don-t-panic`
-  where GitHub computes `#dont-panic` — and a heading with no ASCII
-  alphanumerics at all, i.e. any purely non-Latin script, collapses to the
-  literal `section`. A two-chapter Japanese book emits `01-section.md` and
-  `02-section.md` whose in-book links point at `#section` while the rendered
-  headings anchor as `#第二章` in GitHub, so those links do not resolve there.
-  Filenames lose the title the same way. Widening the slug is open work.
+- Heading anchors match GitHub's rule, with one exception. Anchors are
+  computed the way GitHub computes them — Unicode-aware, punctuation removed
+  rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
+  `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
+  `#第二章`, both of which resolve on GitHub. Note that exact parity means
+  some anchors look wrong and are not: `## Background & Notes` anchors as
+  `#background--notes`, because GFM removes the `&` and turns each surviving
+  space into a hyphen. The exception is a heading with no letter, digit or
+  mark at all (`## ***`): GitHub gives it an empty id, and kasane emits
+  `#section` instead, because an empty anchor is a dead link.
+  Filenames carry the title in any script, capped at 64 bytes per component.
+  What they do not carry is total path length: depth comes from heading
+  nesting plus whatever `-o` you pass, so a deep book in a deep output
+  directory can still exceed Windows' 260-character default path limit.
 - Block nesting is bounded, and deep nesting flattens rather than failing.
   Lists and footnotes nested past the EPUB parser's fidelity bound stop
   producing further nesting: an over-deep list's items become siblings at the

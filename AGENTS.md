@@ -11,7 +11,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   Each function either returns or panics — a
   panic is the finding. `tests/fuzz_corpus.rs` replays `fuzz/seeds/**` and
   `fuzz/artifacts/**` through those same functions on stable, so fuzz coverage
-  reaches PR CI without a nightly toolchain.
+  reaches PR CI without a nightly toolchain. `kasane-core` has its own
+  `fuzz_entry.rs` for the same reason, reaching `slug::path_slug`; the stable
+  replay for both lives in `kasane-adapters/tests/fuzz_corpus.rs`, which takes
+  `kasane-core` as a dev-dependency so one harness covers every target.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
   `balance`'s SPLIT fires on any node whose own body is over `max_tokens`, not
   only on leaves: a container's body is the run of blocks between its heading
@@ -22,10 +25,25 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   they also take the leading path numbers (`01-part-1.md`, `02-part-2.md`, then
   `03-real-chapter.md`). This is a user-visible **path** change, not just a
   content one; README's "Output shape" is the user-facing statement of it.
-  `est_tokens` and `slug_of` are `#[doc(hidden)] pub` test seams, not API — the
-  same convention `kasane-adapters` uses for `fuzz_entry`, and for the same
-  reason: the property tier needs the engine's own token estimate and slug rule,
-  and a copy in the test would drift.
+  `est_tokens` is a `#[doc(hidden)] pub` test seam, not API — the same
+  convention `kasane-adapters` uses for `fuzz_entry`, and for the same reason:
+  the property tier needs the engine's own token estimate, and a copy in the
+  test would drift.
+  `slug.rs` owns two rules, not one. `anchor_slug` is a deliberate mirror of
+  GitHub's heading-id algorithm (NFC, Unicode-lowercase, remove everything
+  outside Ruby's `\p{Word}`, map spaces to hyphens, no collapsing and no
+  interior trimming) so in-book cross-references resolve when the tree is
+  rendered on GitHub; `path_slug` shares that character class but collapses
+  separator runs, trims, and caps at 64 bytes, because a filename wants
+  different things than a fragment. Being a mirror, the anchor rule carries
+  drift risk against github.com, and the case table in `slug.rs`'s tests is
+  where that mirror is written down. Duplicate anchors are suffixed per file
+  in render order, which is why `place` counts headings nested inside list
+  items even though it deliberately gives them no anchor: GitHub assigns them
+  ids, so they consume a suffix slot. `assign_paths` takes the document title
+  because `index.md` renders *that* as its heading, not the (empty) root node
+  title. `path_slug_of` and `anchors_for_headings` are `#[doc(hidden)] pub`
+  test seams, same convention as `est_tokens`.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing. Also emits the batch library index (`library.rs`).
   `file_to_markdown` opens every file with its frontmatter title as a heading.
   That is load-bearing, not cosmetic: `fold_sections` consumes a section's
@@ -64,6 +82,14 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 ## Workflows
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
+- In this sandbox, `mise run fuzz <target>` false-positives as a crash for
+  every target, not just `slug`: LeakSanitizer's atexit leak scan needs
+  `ptrace`, which this environment does not grant, so the run ends with an
+  empty-content artifact that looks like a finding (verified to predate this
+  branch — reproduced on the shipped `detect` target). Workaround:
+  `ASAN_OPTIONS=detect_leaks=0`, which disables only the leak scan; ASan's
+  use-after-free/overflow instrumentation and the fuzz seams' own assertions
+  stay on.
 - Dependabot watches `Cargo.toml`/`Cargo.lock` and GitHub Actions, but **cannot read `mise.toml`**.
   The stable Rust toolchain pin, the nightly-2026-07-01 toolchain pin, the cargo-deny pin, and the
   cargo-fuzz pin there are all manual bumps and get no automated security PRs.
@@ -94,15 +120,15 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   compile-time assertion in `epub/xhtml.rs` enforces
   `MAX_BLOCK_DEPTH * 4 <= kasane_ir::MAX_BLOCK_DEPTH`, so raising the fidelity
   bound past a quarter of the safety bound fails the build rather than
-  silently weakening the design. Ten production walks recurse on block
-  nesting and all ten carry the bound. Six run in the EPUB/MOBI adapters during
+  silently weakening the design. Eleven production walks recurse on block
+  nesting and all eleven carry the bound. Six run in the EPUB/MOBI adapters during
   `parse`, before `kasane-core` is reached: `epub::fix_block_links`,
   `mobi::strip_empty_anchor_links`, `epub::collect_figure_keys`,
   `epub::degrade_failed_figures`, `epub::collect_note_refs`,
-  `epub::xhtml::flatten_block_inlines`. Four are in the core and writer:
-  `section::clone_block`, `balance::est_tokens_block`, `refs::fix_block`,
-  `kasane_writer::blocks_to_markdown`.
+  `epub::xhtml::flatten_block_inlines`. Five are in the core and writer:
+  `section::clone_block`, `balance::est_tokens_block`, `paths::count_headings`,
+  `refs::fix_block`, `kasane_writer::blocks_to_markdown`.
   `clone_block` is the load-bearing one: it is the first core walk to touch
-  the IR, so the later three see already-shallow blocks. The drop side is
+  the IR, so the later four see already-shallow blocks. The drop side is
   separately safe via `kasane_ir::teardown_document`'s explicit worklist.
 - Every change ships green under `mise run lint && mise run test`.
