@@ -1112,9 +1112,37 @@ pub fn xhtml_to_blocks(
                             finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
                         }
                     }
+                    // The frame guard is checked before popping the tracker,
+                    // not after, for the same reason as the `</ul>`/`</ol>`
+                    // arm above: a mismatched close (top frame is not a
+                    // Footnote, e.g. `<aside epub:type="footnote"><table>
+                    // </aside></table>`) must leave `aside_pushed` untouched,
+                    // or it would consume the tracker entry belonging to a
+                    // real, still-open footnote and leave that footnote's
+                    // frame stuck open until EOF. With the guard first, a
+                    // stray `</aside>` with no matching open still finds no
+                    // Footnote frame and is ignored; a mismatched close is
+                    // ignored the same way and does not disturb the tracker;
+                    // only a close that actually faces a Footnote frame
+                    // consults `aside_pushed` to decide whether that frame is
+                    // one this tag opened.
+                    // The frame guard is checked before popping the tracker,
+                    // not after, for the same reason as the `</ul>`/`</ol>`
+                    // arm above: a mismatched close (top frame is not a
+                    // Footnote, e.g. `<aside epub:type="footnote"><table>
+                    // </aside></table>`) must leave `aside_pushed` untouched,
+                    // or it would consume the tracker entry belonging to a
+                    // real, still-open footnote and leave that footnote's
+                    // frame stuck open until EOF. With the guard first, a
+                    // stray `</aside>` with no matching open still finds no
+                    // Footnote frame and is ignored; a mismatched close is
+                    // ignored the same way and does not disturb the tracker;
+                    // only a close that actually faces a Footnote frame
+                    // consults `aside_pushed` to decide whether that frame is
+                    // one this tag opened.
                     b"aside"
-                        if aside_pushed.pop() == Some(true)
-                            && matches!(frames.last(), Some(BlockFrame::Footnote { .. })) =>
+                        if matches!(frames.last(), Some(BlockFrame::Footnote { .. }))
+                            && aside_pushed.pop() == Some(true) =>
                     {
                         let f = frames.pop().expect("checked");
                         finish_frame(f, &mut frames, &mut inline_stack, &mut blocks);
@@ -2806,6 +2834,33 @@ mod tests {
         assert!(
             blocks.iter().any(|b| matches!(b, Block::List { .. })),
             "the real list must still close and emit its (mismatched-but-recovered) content, got {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_close_inside_a_footnote_aside_does_not_consume_the_aside_tracker() {
+        // A `</aside>` that does not face a Footnote frame (here, a
+        // `<table>` opened inside the footnote aside sees the stray close
+        // before its own `</table>`) must not consume `aside_pushed`. If it
+        // did, it would steal the tracker entry belonging to the real,
+        // still-open `<aside epub:type="footnote">`; that footnote's own
+        // (correctly matched) closing `</aside>` would then find the
+        // tracker empty, fail to pop, and stay open until EOF -- swallowing
+        // everything parsed afterward, including the trailing paragraph.
+        // Checking the frame guard before popping the tracker (rather than
+        // after) is what makes a mismatched close leave the tracker alone.
+        let blocks = parse_blocks(
+            "<body><aside epub:type=\"footnote\"><table><tr><td>CELL</td></tr></aside></table></aside><p>AFTER</p></body>",
+        );
+
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Para(inls)
+                if inls.iter().any(|i| matches!(i, Inline::Text(t) if t == "AFTER")))),
+            "trailing paragraph must be top-level, not captured by a footnote left open by a stolen tracker entry, got {blocks:?}"
+        );
+        assert!(
+            blocks.iter().any(|b| matches!(b, Block::Footnote { .. })),
+            "the real footnote must still close and emit its (mismatched-but-recovered) content, got {blocks:?}"
         );
     }
 

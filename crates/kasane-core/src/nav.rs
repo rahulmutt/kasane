@@ -294,4 +294,111 @@ mod tests {
         );
         assert!(!site.files.is_empty());
     }
+
+    /// The core-side companion to `kasane-writer`'s
+    /// `rendering_preserves_content_well_under_the_block_bound`:
+    /// `structure_survives_deep_block_nesting` above only pins that
+    /// `structure()` returns normally at an absurd depth, and `structure()`
+    /// returns a non-empty `site.files` for any non-empty `Document` -- even
+    /// if `clone_block`'s guard fired at depth 1 and silently truncated
+    /// almost everything. That would pass `!site.files.is_empty()` without
+    /// pinning where the bound actually sits. DEPTH = 10 is well under
+    /// `kasane_ir::MAX_BLOCK_DEPTH` (128): the innermost payload text must
+    /// reach `site.files` intact, and no truncation note may appear anywhere
+    /// in the output.
+    #[test]
+    fn structure_preserves_content_well_under_the_block_bound() {
+        const DEPTH: usize = 10;
+        let mut blocks = vec![Block::Para(vec![Inline::Text("innermost payload".into())])];
+        for _ in 0..DEPTH {
+            blocks = vec![Block::List {
+                ordered: false,
+                items: vec![blocks],
+            }];
+        }
+        blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks,
+        }];
+        let mut nodes = vec![Node {
+            block: Block::Heading {
+                level: 1,
+                id: BlockId(0),
+                inlines: vec![Inline::Text("T".into())],
+            },
+            prov: Provenance::default(),
+        }];
+        nodes.extend(blocks.into_iter().map(|block| Node {
+            block,
+            prov: Provenance::default(),
+        }));
+        let doc = Document {
+            meta: DocMeta {
+                title: "T".into(),
+                authors: vec![],
+                language: None,
+                source_format: "test".into(),
+                source_path: "t".into(),
+            },
+            nodes,
+        };
+        let site = structure(
+            doc,
+            &Options {
+                max_tokens: 4000,
+                min_tokens: 100,
+            },
+        );
+
+        assert!(
+            site.files
+                .iter()
+                .any(|f| blocks_contain_text(&f.blocks, "innermost payload")),
+            "payload text must survive this far under the bound: {:?}",
+            site.files.iter().map(|f| &f.blocks).collect::<Vec<_>>()
+        );
+        assert!(
+            !site
+                .files
+                .iter()
+                .any(|f| blocks_contain_text(&f.blocks, "nesting truncated")),
+            "the guard must not fire this shallow: {:?}",
+            site.files.iter().map(|f| &f.blocks).collect::<Vec<_>>()
+        );
+    }
+
+    fn blocks_contain_text(blocks: &[Block], needle: &str) -> bool {
+        blocks.iter().any(|b| block_contains_text(b, needle))
+    }
+
+    fn block_contains_text(b: &Block, needle: &str) -> bool {
+        match b {
+            Block::Heading { inlines, .. } | Block::Para(inlines) => {
+                inlines.iter().any(|i| inline_contains_text(i, needle))
+            }
+            Block::List { items, .. } => items.iter().any(|item| blocks_contain_text(item, needle)),
+            Block::Footnote { blocks, .. } => blocks_contain_text(blocks, needle),
+            Block::Table(t) => t
+                .header
+                .iter()
+                .chain(t.rows.iter().flatten())
+                .any(|cell| cell.iter().any(|i| inline_contains_text(i, needle))),
+            Block::Figure { caption, .. } => {
+                caption.iter().any(|i| inline_contains_text(i, needle))
+            }
+            Block::CodeBlock { text, .. } | Block::MathBlock(text) => text.contains(needle),
+            Block::Raw { note } => note.contains(needle),
+        }
+    }
+
+    fn inline_contains_text(i: &Inline, needle: &str) -> bool {
+        match i {
+            Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => t.contains(needle),
+            Inline::Emph(x) | Inline::Strong(x) => {
+                x.iter().any(|i| inline_contains_text(i, needle))
+            }
+            Inline::Link { inlines, .. } => inlines.iter().any(|i| inline_contains_text(i, needle)),
+            Inline::FootnoteRef(_) => false,
+        }
+    }
 }
