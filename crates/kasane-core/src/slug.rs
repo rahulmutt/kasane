@@ -161,20 +161,27 @@ fn trim_tail(s: &mut String) {
     }
 }
 
-/// Test seam for `path_slug`, same rationale as `est_tokens` and `slug_of`:
-/// the fuzz seam and the property tier need the engine's own rule rather than
-/// a copy of it that can drift.
+/// Test seam for `path_slug`, same rationale as `est_tokens` and
+/// `anchors_for_headings`: the fuzz seam and the property tier need the
+/// engine's own rule rather than a copy of it that can drift.
 #[doc(hidden)]
 pub fn path_slug_of(inlines: &[Inline]) -> String {
     path_slug(inlines)
 }
 
-/// Anchor-rule test seam. Kept under its historical name so
-/// `kasane-writer`'s property tier keeps compiling; Task 3 replaces it with
-/// the ordered form that duplicate suffixing requires.
+/// Anchors for one file's headings, in the order the file renders them.
+///
+/// Test seam for the property tier, and the reason `slug_of` could not stay:
+/// with duplicate suffixing an anchor depends on what preceded it on the page,
+/// so a per-heading function cannot express the rule. The tier asserts against
+/// the engine's own counter rather than a copy of it that can drift.
 #[doc(hidden)]
-pub fn slug_of(inlines: &[Inline]) -> String {
-    anchor_slug(inlines)
+pub fn anchors_for_headings(headings: &[String]) -> Vec<String> {
+    let mut counter = AnchorCounter::new();
+    headings
+        .iter()
+        .map(|t| counter.next(&[Inline::Text(t.clone())]))
+        .collect()
 }
 
 /// The visible text of an inline run, bounded by `MAX_INLINE_DEPTH`.

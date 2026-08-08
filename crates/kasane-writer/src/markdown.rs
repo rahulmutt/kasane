@@ -251,6 +251,39 @@ mod tests {
         assert!(!md.is_empty());
     }
 
+    /// Design spec §4: link destinations are emitted raw, with no
+    /// percent-encoding, and that is safe because the character set of a path
+    /// component is closed. Every character that would break a bare Markdown
+    /// destination -- space, `(`, `)`, `#`, `?`, `%` -- is outside `\p{Word}`
+    /// and is therefore already removed by the slug rule.
+    ///
+    /// This asserts the set rather than the argument, so widening the rule by
+    /// hand fails here instead of silently emitting a broken link.
+    #[test]
+    fn path_slugs_contain_nothing_that_breaks_a_bare_destination() {
+        for title in [
+            "Don't Panic",
+            "Background & Notes (revised)",
+            "50% off #1?",
+            "第二章",
+            "a/b\\c",
+        ] {
+            let slug = kasane_core::path_slug_of(&[Inline::Text(title.into())]);
+            for c in slug.chars() {
+                assert!(
+                    c == '-' || (c.is_alphanumeric() || c == '_'),
+                    "path slug for {title:?} contains {c:?}, which is outside the closed set"
+                );
+            }
+            for bad in [' ', '(', ')', '#', '?', '%', '/', '\\', '.'] {
+                assert!(
+                    !slug.contains(bad),
+                    "path slug for {title:?} contains {bad:?}"
+                );
+            }
+        }
+    }
+
     /// `rendering_survives_deep_block_nesting` only proves the guard fires
     /// -- `assert!(!md.is_empty())` would still pass at an effective bound of
     /// 1, since a lone truncation comment is non-empty too. Pin the other

@@ -14,7 +14,7 @@
 mod generator;
 
 use generator::{Case, Expect};
-use kasane_core::{est_tokens, slug_of, structure, FileNode};
+use kasane_core::{anchors_for_headings, est_tokens, structure, FileNode};
 use kasane_ir::Block;
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -53,7 +53,7 @@ fn resolve_relative(from_file: &str, rel: &str) -> Option<String> {
 /// Every `[text](target)` in a rendered file.
 ///
 /// A `](` inside a fenced code block would be collected as a link too — and
-/// unlike `heading_slugs`' analogous imprecision, this one runs the *unsafe*
+/// unlike `heading_anchors`' analogous imprecision, this one runs the *unsafe*
 /// direction: an extra "link" is one more target P2 demands resolve, so a
 /// false positive here is a false test failure, not merely a permissive check.
 /// It is safe today only because the generator's `Shape::Code` body is a bare
@@ -81,28 +81,38 @@ fn links_in(text: &str) -> Vec<String> {
     out
 }
 
-/// Every heading line's slug, as the engine would compute it.
+/// Every heading line's anchor, as the engine would compute it for this file.
 ///
 /// A `#`-prefixed line inside a fenced code block would be counted too. That
 /// only makes P2 more permissive, never less, so it is not worth a Markdown
 /// parser here.
 ///
+/// Order matters now, and did not before: duplicate anchors are suffixed per
+/// file in render order, so this feeds the whole ordered list to the engine's
+/// own counter rather than slugging each line independently.
+///
 /// The emphasis markers *are* stripped first, and that one is not optional.
-/// The engine anchors a heading at `slug(inlines)`, which reduces through
-/// `inline_text` and therefore never sees a marker character; the rendered line
-/// comes from `inlines_to_md`, which writes `*`/`**` around `Emph`/`Strong` and
-/// backticks around `Code`. A demoted heading rendered as `## Chapter*One*`
-/// would otherwise slug to `chapter-one` here against the engine's `chapterone`
-/// — a false failure of P2, not a real one. `_` is stripped for the same reason
-/// even though `inlines_to_md` never emits it, so a writer that switches
-/// emphasis markers does not silently reintroduce the mismatch.
-fn heading_slugs(text: &str) -> HashSet<String> {
-    text.lines()
+/// The engine anchors a heading at `anchor_slug(inlines)`, which reduces
+/// through `inline_text` and therefore never sees a marker; the rendered line
+/// comes from `inlines_to_md`, which writes `*`/`**` around `Emph`/`Strong`
+/// and backticks around `Code`. A demoted heading rendered as
+/// `## Chapter*One*` would otherwise anchor to `chapter-one` here against the
+/// engine's `chapterone` -- a false failure of P2, not a real one.
+///
+/// `_` is deliberately NOT stripped, and used to be. It was in the set
+/// defensively, against a writer that might switch emphasis markers -- but `_`
+/// is Connector_Punctuation, inside `\p{Word}`, so the engine now keeps a
+/// literal underscore. Stripping it here would compute `foobar` against the
+/// engine's `foo_bar`.
+fn heading_anchors(text: &str) -> HashSet<String> {
+    let titles: Vec<String> = text
+        .lines()
+        .map(|l| l.trim_start())
         .filter_map(|l| l.strip_prefix('#'))
         .map(|l| l.trim_start_matches('#').trim())
-        .map(|t| t.replace(['*', '_', '`'], ""))
-        .map(|t| slug_of(&[kasane_ir::Inline::Text(t)]))
-        .collect()
+        .map(|t| t.replace(['*', '`'], ""))
+        .collect();
+    anchors_for_headings(&titles).into_iter().collect()
 }
 
 proptest! {
@@ -161,7 +171,7 @@ proptest! {
                 );
                 if let Some((_, anchor)) = target.split_once('#') {
                     prop_assert!(
-                        heading_slugs(body.unwrap()).contains(anchor),
+                        heading_anchors(body.unwrap()).contains(anchor),
                         "anchor #{} from {} is not a heading in {}", anchor, path, resolved
                     );
                 }
@@ -363,7 +373,7 @@ fn merged_subsection_anchor_renders_as_a_heading() {
         "the demoted heading must be rendered in {path}, got:\n{parent}"
     );
     assert!(
-        heading_slugs(parent).contains(anchor),
+        heading_anchors(parent).contains(anchor),
         "anchor #{anchor} must be a rendered heading in {path}, got:\n{parent}"
     );
     // It is the *demoted* heading, not the file's own title heading, that
