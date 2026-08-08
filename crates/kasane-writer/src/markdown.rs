@@ -254,11 +254,25 @@ mod tests {
     /// Design spec §4: link destinations are emitted raw, with no
     /// percent-encoding, and that is safe because the character set of a path
     /// component is closed. Every character that would break a bare Markdown
-    /// destination -- space, `(`, `)`, `#`, `?`, `%` -- is outside `\p{Word}`
-    /// and is therefore already removed by the slug rule.
+    /// destination -- space, `(`, `)`, `#`, `?`, `%`, `.` -- is outside
+    /// `\p{Word}` and is therefore already removed by the slug rule.
     ///
     /// This asserts the set rather than the argument, so widening the rule by
-    /// hand fails here instead of silently emitting a broken link.
+    /// hand fails here instead of silently emitting a broken link. Each bad
+    /// character below must actually occur in at least one title, or its
+    /// assertion is vacuously true and the widening it is meant to catch
+    /// would pass silently: space/`don't` in "Don't Panic"; `(`/`)` in
+    /// "Background & Notes (revised)"; `#`/`?`/`%` in "50% off #1?"; `/`/`\`
+    /// in "a/b\c"; `.` in "v1.2 Final.".
+    ///
+    /// The first loop's `c.is_alphanumeric()` is deliberately narrower than
+    /// the slug rule's own `\p{Word}` (it rejects combining marks, which
+    /// `\p{Word}` keeps), which is exactly what makes it a useful check on
+    /// these Latin/CJK titles rather than a tautology. A title containing a
+    /// combining mark -- `हिन्दी`, for instance -- does NOT belong in this
+    /// array: it would fail this test spuriously even though the engine's
+    /// rule is correct for it (see `path_slug_is_a_filename_not_an_anchor`
+    /// in `kasane-core`'s `slug.rs` for that coverage instead).
     #[test]
     fn path_slugs_contain_nothing_that_breaks_a_bare_destination() {
         for title in [
@@ -267,6 +281,7 @@ mod tests {
             "50% off #1?",
             "第二章",
             "a/b\\c",
+            "v1.2 Final.",
         ] {
             let slug = kasane_core::path_slug_of(&[Inline::Text(title.into())]);
             for c in slug.chars() {
