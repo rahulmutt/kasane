@@ -113,7 +113,7 @@ fn emit_block(
         if !top.is_empty() {
             crate::xmltext::push_inline(top, Inline::Text(" ".into()));
         }
-        flatten_block_inlines(&b, top);
+        flatten_block_inlines(&b, top, 0);
         return;
     }
     match frames.last_mut() {
@@ -141,7 +141,7 @@ fn emit_block(
             if !extra.is_empty() {
                 crate::xmltext::push_inline(extra, Inline::Text(" ".into()));
             }
-            flatten_block_inlines(&b, extra);
+            flatten_block_inlines(&b, extra, 0);
         }
         Some(BlockFrame::Footnote { blocks, .. }) => blocks.push(b),
     }
@@ -178,7 +178,13 @@ fn emit_malformed_note(
 // Extracts a block's text content as inlines -- used when block markup
 // appears where only inlines fit (inside a table cell). Structure is lost,
 // text is not.
-fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
+fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>, depth: usize) {
+    // Unreachable via this parser, which flattens at `xhtml::MAX_BLOCK_DEPTH` (32),
+    // far below 128. The guard stays anyway so the invariant does not depend on which
+    // caller structure feeds it, rather than being contingent on it.
+    if depth >= kasane_ir::MAX_BLOCK_DEPTH {
+        return;
+    }
     let sep = |dst: &mut Vec<Inline>| {
         if !dst.is_empty() {
             crate::xmltext::push_inline(dst, Inline::Text(" ".into()));
@@ -192,7 +198,7 @@ fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
             for item in items {
                 for ib in item {
                     sep(dst);
-                    flatten_block_inlines(ib, dst);
+                    flatten_block_inlines(ib, dst, depth + 1);
                 }
             }
         }
@@ -210,7 +216,7 @@ fn flatten_block_inlines(b: &Block, dst: &mut Vec<Inline>) {
         Block::Footnote { blocks, .. } => {
             for ib in blocks {
                 sep(dst);
-                flatten_block_inlines(ib, dst);
+                flatten_block_inlines(ib, dst, depth + 1);
             }
         }
         Block::Raw { .. } => {}
@@ -2458,7 +2464,7 @@ mod tests {
             .iter()
             .flat_map(|b| {
                 let mut inls = Vec::new();
-                super::flatten_block_inlines(b, &mut inls);
+                super::flatten_block_inlines(b, &mut inls, 0);
                 inls
             })
             .map(|i| match i {

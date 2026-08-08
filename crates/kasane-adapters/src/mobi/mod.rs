@@ -445,7 +445,7 @@ fn collect_assets(db: &PalmDb, h: &MobiHeader, nodes: &mut [Node]) -> AssetBag {
     use std::collections::HashSet;
     let mut keys = vec![];
     for n in nodes.iter() {
-        crate::epub::collect_figure_keys(&n.block, &mut |k: &str| keys.push(k.to_string()));
+        crate::epub::collect_figure_keys(&n.block, &mut |k: &str| keys.push(k.to_string()), 0);
     }
     let mut assets = AssetBag::default();
     let mut seen = HashSet::new();
@@ -477,7 +477,7 @@ fn collect_assets(db: &PalmDb, h: &MobiHeader, nodes: &mut [Node]) -> AssetBag {
     }
     if !failed.is_empty() {
         for n in nodes.iter_mut() {
-            crate::epub::degrade_failed_figures(&mut n.block, &failed);
+            crate::epub::degrade_failed_figures(&mut n.block, &failed, 0);
         }
     }
     assets
