@@ -18,8 +18,19 @@
 //!    `anchor_slug` keeps them. `path_slug` drops them: a filename does not
 //!    want invisible characters, and the `slug` fuzz target's confinement
 //!    argument rests on the path alphabet staying closed.
+//! 3. **NFC.** `path_slug` normalizes; `anchor_slug` deliberately does not.
 //!
-//! They still share the NFC normalization step.
+//! That third one is the one a future reader will want to "fix". Do not.
+//! kasane writes a file's heading line from the *unnormalized* title text
+//! (`nav::walk`'s `inline_text` → `Frontmatter::title` →
+//! `file_to_markdown`), and no renderer — GitHub included — normalizes before
+//! computing a heading id. Folding NFC in here therefore produced a fragment
+//! that matched no heading kasane itself had emitted: a link broken against
+//! kasane's own output whenever the source text was NFD, which macOS-sourced
+//! EPUBs and PDF text extraction routinely produce. `path_slug` keeps NFC
+//! because it is choosing a *filename*, where the NFD and NFC spellings of one
+//! title should land in one place, and where the `NN-` ordinal prefix already
+//! makes any resulting collision harmless.
 //!
 //! Being a mirror, `anchor_slug` carries drift risk against github.com, the
 //! same class the PDF adapter took on mirroring `lopdf`. The case table in
@@ -105,14 +116,30 @@ fn is_join_control(c: char) -> bool {
     matches!(c, '\u{200C}' | '\u{200D}')
 }
 
-/// The shared prefix of both rules: the inline text, outer whitespace trimmed,
-/// NFC-normalized, Unicode-lowercased.
+/// The anchor's fold: the inline text, outer whitespace trimmed,
+/// Unicode-lowercased, and **not normalized**.
 ///
 /// The trim mirrors the renderer rather than the filter: a Markdown parser
 /// strips a heading's surrounding whitespace before GitHub ever computes an
 /// id, so `##   Intro  ` and `## Intro` anchor identically. Interior runs are
 /// left alone, which is what produces the double hyphens.
-fn normalized(inlines: &[Inline]) -> String {
+///
+/// The absence of NFC is the load-bearing part; the module doc says why.
+fn anchor_fold(inlines: &[Inline]) -> String {
+    inline_text(inlines)
+        .trim()
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The path slug's fold: the same trim and lowercase, plus NFC.
+///
+/// Normalizing is a genuine benefit for a *filename* — one title spelled NFD
+/// and NFC lands in one place, which is what macOS's NFD filesystem names make
+/// realistic — and costs nothing, because the `NN-` ordinal prefix already
+/// makes sibling collisions impossible.
+fn path_fold(inlines: &[Inline]) -> String {
     inline_text(inlines)
         .trim()
         .nfc()
@@ -120,15 +147,19 @@ fn normalized(inlines: &[Inline]) -> String {
         .collect()
 }
 
-/// GitHub's algorithm, in its order: normalize, downcase, remove everything
-/// outside `\p{Word}`/`-`/space, then map each remaining space to `-`.
+/// GitHub's algorithm, in its order: downcase, remove everything outside
+/// `\p{Word}`/`-`/space, then map each remaining space to `-`.
+///
+/// There is no normalization step, deliberately, and that is not an omission —
+/// GitHub performs none either, and adding one broke links against kasane's
+/// own rendered headings. The module doc has the argument.
 ///
 /// No run-collapsing and no interior trimming, because GitHub does neither.
 /// Exact parity therefore means deliberately emitting anchors that look wrong:
 /// `Background & Notes` anchors as `background--notes`, since the `&` is
 /// removed and each of the two surviving spaces becomes a hyphen.
 pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
-    let out: String = normalized(inlines)
+    let out: String = anchor_fold(inlines)
         .chars()
         .filter(|c| is_word(*c) || is_join_control(*c) || *c == '-' || *c == ' ')
         .map(|c| if c == ' ' { '-' } else { c })
@@ -140,9 +171,9 @@ pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
     }
 }
 
-/// The shared character class and normalization, then it diverges where a
-/// filename should: separator runs collapse to a single `-`, the tail is
-/// trimmed, and the result is capped at `MAX_PATH_SLUG_BYTES`.
+/// The shared character class, plus NFC, then it diverges where a filename
+/// should: separator runs collapse to a single `-`, the tail is trimmed, and
+/// the result is capped at `MAX_PATH_SLUG_BYTES`.
 ///
 /// Everything outside the class is REMOVED, exactly as the anchor rule removes
 /// it -- only space and `-` act as separators. That is what makes `Don't
@@ -158,7 +189,7 @@ pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
 pub(crate) fn path_slug(inlines: &[Inline]) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
-    for c in normalized(inlines).chars() {
+    for c in path_fold(inlines).chars() {
         if is_word(c) {
             out.push(c);
             prev_dash = false;
@@ -312,8 +343,8 @@ mod tests {
 
     /// Each row names the rule it pins. These are derived from GitHub's TOC
     /// filter: downcase, remove everything outside `\p{Word}`/`-`/space, then
-    /// map spaces to hyphens. No collapsing and no trimming of interior runs,
-    /// which is why some rows look wrong and are not.
+    /// map spaces to hyphens. No normalization, no collapsing and no trimming
+    /// of interior runs, which is why some rows look wrong and are not.
     ///
     /// `\p{Word}` here is Ruby's, i.e. `Alphabetic + Mark + Decimal_Number +
     /// Connector_Punctuation + Join_Control` — see `is_word` for the two
@@ -368,16 +399,32 @@ mod tests {
         assert_eq!(anchor_slug(&t("\u{200C}")), "\u{200C}");
     }
 
-    /// NFC runs before anything else, so a decomposed title and its composed
-    /// twin cannot slug differently. macOS-sourced text is the realistic
-    /// source of NFD input.
+    /// The anchor is deliberately NOT normalized; the path slug is.
+    ///
+    /// This test used to assert the opposite, and asserting it was what hid a
+    /// real bug. kasane renders a file's heading line from the *unnormalized*
+    /// title (`nav::walk` -> `Frontmatter::title` -> `file_to_markdown`), and
+    /// no renderer normalizes before computing an id. NFC in the anchor path
+    /// therefore emitted a fragment matching no heading kasane itself had
+    /// written, for any NFD input -- which macOS-sourced EPUBs and PDF text
+    /// extraction produce routinely. Do not "fix" these back into agreement.
+    ///
+    /// `path_slug` still normalizes, because it is choosing a filename rather
+    /// than a fragment: NFD and NFC of one title should land in one place, and
+    /// the `NN-` ordinal prefix already makes collisions harmless.
     #[test]
-    fn nfd_and_nfc_agree() {
+    fn nfd_and_nfc_diverge_for_anchors_and_agree_for_paths() {
         let nfc = "Café"; // é = U+00E9
         let nfd = "Cafe\u{0301}"; // e + COMBINING ACUTE
-        assert_eq!(anchor_slug(&t(nfc)), anchor_slug(&t(nfd)));
         assert_eq!(anchor_slug(&t(nfc)), "café");
-        assert_eq!(path_slug(&t(nfc)), path_slug(&t(nfd)));
+        assert_eq!(anchor_slug(&t(nfd)), "cafe\u{0301}");
+        assert_ne!(
+            anchor_slug(&t(nfc)),
+            anchor_slug(&t(nfd)),
+            "each anchor must match the heading line kasane renders for it"
+        );
+        assert_eq!(path_slug(&t(nfc)), "café");
+        assert_eq!(path_slug(&t(nfd)), "café");
     }
 
     /// Same character class as the anchor, then it diverges where a filename
