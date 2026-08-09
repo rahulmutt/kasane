@@ -430,5 +430,46 @@ Beyond that:
 - `mise run fuzz guards` on the pinned nightly, for §5.3's assertions.
 - A converted real EPUB with non-Latin headings, rendered and inspected by
   hand. The case table is derived from GitHub's documented algorithm, so one
-  human spot-check against an actual GitHub render is the only thing that tests
-  the derivation itself rather than this spec's reading of it.
+  spot-check against an actual GitHub render is the only thing that tests the
+  derivation itself rather than this spec's reading of it.
+
+### 8.1 Parity check against github.com — performed 2026-08-09
+
+The spot-check above was run, and it matters that it was: three separate
+corrections to §2.1 came out of *re-reading* the algorithm, and none of them
+could have been caught by the case table, which encodes the same reading it is
+meant to check.
+
+**Method.** A file of one `##` heading per case was committed to a throwaway
+branch of this repo and its rendered blob page fetched; the heading ids were
+read out of the rendered anchors. The `/markdown` REST endpoint is *not* a
+usable oracle here — it does not run the anchor filter and emits no ids. The
+same titles were then run through `kasane_core::anchors_for_headings`, which is
+the engine's own ordered counter, and the two lists diffed mechanically rather
+than by eye.
+
+**Result: 13 of 13 ids identical, including codepoints.** Every case the
+corrections turned on came back agreeing with the implementation:
+
+| Heading | github.com id | Pins |
+|---|---|---|
+| `## Fig 1½ and ①` | `fig-1-and-` | `Other_Number` is dropped — §2.1's `Decimal_Number`, not the `Number` group |
+| `## می‌رود` | `می‌رود` | `Join_Control` (ZWNJ) is kept in anchors |
+| `## Café` (NFD input) | `café` **in NFD** | GitHub does not normalize; the anchor rule must not either |
+| `## Ⓐ Notes` | `ⓐ-notes` | `Other_Alphabetic` is kept — why `char::is_alphabetic()` is the exact spelling |
+| `## ⒜ Notes` | `-notes` | …and `So` alone is not, so a hand-kept `So` list would have been wrong |
+| `## Ⅷ Part` | `ⅷ-part` | `Letter_Number` arrives via `Alphabetic` |
+| `## Background & Notes` | `background--notes` | no run-collapsing, no interior trimming |
+| `## Notes` ×2 | `notes`, `notes-1` | per-page duplicate suffixing |
+
+`## ***` was the one divergence, and it is the documented one (§3.3): GitHub
+emitted no id at all, kasane emits `section`.
+
+The NFD row is the load-bearing one. It confirms the defect §2.1 was corrected
+for was real rather than theoretical — an NFC-folded anchor against an
+unnormalized heading is a link that resolves in no renderer, not merely a
+parity gap.
+
+This does not make the mirror self-maintaining: it is a measurement taken on
+one date against a service that can change. Re-run it when the table is next
+edited.

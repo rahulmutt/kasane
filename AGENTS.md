@@ -57,7 +57,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   so an NFC fragment against an NFD heading is a link kasane breaks against
   its own output. Being a mirror, the anchor rule carries drift risk against
   github.com, and the case table in `slug.rs`'s tests is where that mirror is
-  written down, divergences included. Duplicate anchors are suffixed per file
+  written down, divergences included — but that table pins kasane's *reading*
+  of the algorithm, not the algorithm, so it cannot catch a misreading. The
+  external check that can is recorded in design spec §8.1 (run 2026-08-09,
+  13/13 ids matching a real render); re-run it when the table changes. Duplicate anchors are suffixed per file
   in render order, which is why `place` counts headings nested inside list
   items even though it deliberately gives them no anchor: GitHub assigns them
   ids, so they consume a suffix slot. `assign_paths` takes the document title

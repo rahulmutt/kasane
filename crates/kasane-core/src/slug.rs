@@ -36,6 +36,14 @@
 //! same class the PDF adapter took on mirroring `lopdf`. The case table in
 //! this file's tests is where that mirror is written down.
 //!
+//! The table pins this crate's *reading* of GitHub's algorithm, which is not
+//! the same as pinning the algorithm: three corrections to that reading came
+//! out of review, and the table agreed with the code every time, because it
+//! encoded the same reading. Only an external oracle tests the derivation. One
+//! was run on 2026-08-09 against a real github.com render — 13 of 13 ids
+//! matched, codepoints included — and design spec §8.1 records the method and
+//! the cases. Re-run it when this table is next edited.
+//!
 //! # Known divergences that survive on purpose
 //!
 //! The anchor is computed from the IR's inline text, not from what a Markdown

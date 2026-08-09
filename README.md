@@ -147,7 +147,9 @@ See AGENTS.md for the codebase map.
   computed the way GitHub computes them — Unicode-aware, punctuation removed
   rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
-  `#第二章`, both of which resolve on GitHub. Note that exact parity means
+  `#第二章`, both of which resolve on GitHub. The rule was checked against a
+  real GitHub render on 2026-08-09 and every case matched; it is still a
+  mirror, so it can drift if GitHub's changes. Note that exact parity means
   some anchors look wrong and are not. `## Background & Notes` anchors as
   `#background--notes`, because GFM removes the `&` and turns each surviving
   space into a hyphen. And the character set is Ruby's `\p{Word}`, the set
