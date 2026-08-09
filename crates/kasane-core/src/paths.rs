@@ -121,6 +121,15 @@ fn count_headings(
                     count_headings(item, depth + 1, false, self_path, counter, anchors);
                 }
             }
+            // Counted in SOURCE position, which is a known narrow divergence
+            // from GFM rather than the render order this walk otherwise
+            // follows: GFM relocates every footnote definition into a trailing
+            // `<section data-footnotes>`, so a heading inside one is assigned
+            // its id after every body heading, not where the definition
+            // appears. Reaching it needs a heading inside a footnote AND a
+            // colliding base elsewhere in the same file, so the walk is left
+            // as it is; restructuring it into two passes would complicate the
+            // common case for that.
             Block::Footnote { blocks, .. } => {
                 count_headings(blocks, depth + 1, false, self_path, counter, anchors);
             }

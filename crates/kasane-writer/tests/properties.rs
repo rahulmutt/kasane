@@ -81,11 +81,48 @@ fn links_in(text: &str) -> Vec<String> {
     out
 }
 
+/// Strips the list markers `render_block` prepends, so a heading that is the
+/// first block of a list item is visible to `heading_anchors`.
+///
+/// `render_block` renders a list item's first block on the marker's own line
+/// (`markdown.rs`: it pushes `- ` or `N. `, then `inner.trim_end()`), so a
+/// heading leading a list item comes out as `- ## Notes`. GFM parses that as a
+/// heading and gives it an id, which is why `count_headings` counts it — and
+/// `trim_start().strip_prefix('#')` would never have seen it, so the helper's
+/// order and the engine's order diverged for exactly that shape.
+/// `heading_anchors_sees_a_heading_that_leads_a_list_item` pins the marker
+/// spellings against `render_block`'s real output rather than against this
+/// comment.
+///
+/// Loops, because nested list items nest their markers on one line too
+/// (`- - ## Notes`).
+fn strip_list_markers(line: &str) -> &str {
+    let mut l = line.trim_start();
+    loop {
+        let rest = if let Some(r) = l.strip_prefix("- ") {
+            r
+        } else {
+            let digits = l.find(|c: char| !c.is_ascii_digit()).unwrap_or(l.len());
+            match l.split_at(digits) {
+                (d, r) if !d.is_empty() && r.starts_with(". ") => &r[2..],
+                _ => return l,
+            }
+        };
+        l = rest.trim_start();
+    }
+}
+
 /// Every heading line's anchor, as the engine would compute it for this file.
 ///
-/// A `#`-prefixed line inside a fenced code block would be counted too. That
-/// only makes P2 more permissive, never less, so it is not worth a Markdown
-/// parser here.
+/// A `#`-prefixed line inside a fenced code block would be counted too, and
+/// that is NOT merely a permissive check — it used to be, and stopped being
+/// one when order started mattering. A spurious heading line consumes a
+/// counter slot, so a real heading whose base matches it computes `base-1`
+/// here against the engine's `base`: a false P2 failure, not a lenient one.
+/// It is unreachable today only because `Shape::Code`'s body is a bare
+/// `zq####` sentinel with no `#` in it. A generator that ever puts arbitrary
+/// text in a code block needs a real fence-skipping pass here first — the same
+/// warning `links_in` carries.
 ///
 /// Order matters now, and did not before: duplicate anchors are suffixed per
 /// file in render order, so this feeds the whole ordered list to the engine's
@@ -107,7 +144,7 @@ fn links_in(text: &str) -> Vec<String> {
 fn heading_anchors(text: &str) -> HashSet<String> {
     let titles: Vec<String> = text
         .lines()
-        .map(|l| l.trim_start())
+        .map(strip_list_markers)
         .filter_map(|l| l.strip_prefix('#'))
         .map(|l| l.trim_start_matches('#').trim())
         .map(|t| t.replace(['*', '`'], ""))
@@ -380,6 +417,89 @@ fn merged_subsection_anchor_renders_as_a_heading() {
     // carries this anchor — the two must not be the same slug, or the test
     // would pass without the merge path working at all.
     assert_ne!(anchor, "parent-chapter");
+}
+
+/// `heading_anchors` must see a heading the engine counts.
+///
+/// `paths::count_headings` walks into list items and feeds every heading it
+/// finds to the anchor counter, because GFM assigns those headings ids and
+/// they therefore consume duplicate-suffix slots. The helper above has to
+/// agree, or its order diverges from the engine's and P2 fails on a tree that
+/// is correct.
+///
+/// This renders through `blocks_to_markdown` rather than asserting the marker
+/// spelling from memory: `render_block` puts a list item's first block on the
+/// marker's own line, and it is that real output — not this test's idea of it
+/// — that `strip_list_markers` has to survive. Both marker shapes are covered,
+/// since `Shape::List` generates `ordered` either way.
+#[test]
+fn heading_anchors_sees_a_heading_that_leads_a_list_item() {
+    use kasane_ir::{AssetBag, BlockId, Inline};
+
+    for ordered in [false, true] {
+        let blocks = vec![
+            Block::Heading {
+                level: 2,
+                id: BlockId(0),
+                inlines: vec![Inline::Text("Notes".into())],
+            },
+            Block::List {
+                ordered,
+                items: vec![vec![Block::Heading {
+                    level: 3,
+                    id: BlockId(1),
+                    inlines: vec![Inline::Text("Nested".into())],
+                }]],
+            },
+        ];
+        let text = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+
+        // The shape the helper has to cope with, straight from the writer.
+        let marker = if ordered { "1. " } else { "- " };
+        assert!(
+            text.contains(&format!("{marker}### Nested")),
+            "render_block's list-item shape changed; strip_list_markers must \
+             follow it. Got:\n{text}"
+        );
+
+        let anchors = heading_anchors(&text);
+        assert!(
+            anchors.contains("nested"),
+            "a heading leading a list item must be visible here, got {anchors:?}"
+        );
+        assert!(anchors.contains("notes"), "got {anchors:?}");
+    }
+
+    // The ordering half, pinned directly: a nested heading between two
+    // same-titled top-level ones takes the middle slot, so the last one is
+    // `notes-2`. Missing the nested line would compute `notes-1` here against
+    // the engine's `notes-2` -- a false P2 failure.
+    let blocks = vec![
+        Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: vec![Inline::Text("Notes".into())],
+        },
+        Block::List {
+            ordered: false,
+            items: vec![vec![Block::Heading {
+                level: 3,
+                id: BlockId(1),
+                inlines: vec![Inline::Text("Notes".into())],
+            }]],
+        },
+        Block::Heading {
+            level: 2,
+            id: BlockId(2),
+            inlines: vec![Inline::Text("Notes".into())],
+        },
+    ];
+    let text = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+    let anchors = heading_anchors(&text);
+    assert!(
+        anchors.contains("notes-2"),
+        "the nested heading must consume the middle slot, got {anchors:?}"
+    );
 }
 
 /// Whether any inline anywhere in this block is still a symbolic internal ref.
