@@ -20,6 +20,11 @@ use kasane_ir::Inline;
 /// fullwidth solidus and the RTL override are all outside `\p{Word}` and are
 /// removed -- so this target exists to make that argument fail loudly if the
 /// character class is ever widened by hand.
+///
+/// `anchor_slug`'s class is deliberately wider than `path_slug`'s (it keeps
+/// Join_Control, which GitHub keeps), and that is exactly why the widening has
+/// to be asserted here rather than reasoned about: the path alphabet must stay
+/// closed even as the anchor alphabet grows.
 pub fn slug(data: &[u8]) {
     let Ok(text) = std::str::from_utf8(data) else {
         return;

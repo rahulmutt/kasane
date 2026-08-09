@@ -4,14 +4,36 @@
 //! an in-book cross-reference resolves when the tree is rendered on GitHub.
 //! `path_slug` turns the same text into a portable file or directory name.
 //!
-//! They share a character class and a normalization step and diverge only in
-//! the tail. That is deliberate, not an oversight: an anchor lands in the
-//! fragment of a link and a path slug lands in the path portion, so nothing
-//! forces them to agree and nothing breaks when they don't.
+//! They share `is_word` as their base character class and then diverge on
+//! three axes, all deliberate. An anchor lands in the fragment of a link and a
+//! path slug lands in the path portion, so nothing forces them to agree and
+//! nothing breaks when they don't.
+//!
+//! 1. **The tail.** `path_slug` collapses separator runs, trims, and caps at
+//!    [`MAX_PATH_SLUG_BYTES`]; the anchor does none of that, because GitHub
+//!    does none of it.
+//! 2. **Join_Control.** ZWNJ (U+200C) and ZWJ (U+200D) are inside Ruby's
+//!    `\p{Word}`, so GitHub keeps them — and they sit *inside* ordinary
+//!    Persian, Urdu and Devanagari words (`می‌رود`), not just in exotic text.
+//!    `anchor_slug` keeps them. `path_slug` drops them: a filename does not
+//!    want invisible characters, and the `slug` fuzz target's confinement
+//!    argument rests on the path alphabet staying closed.
+//!
+//! They still share the NFC normalization step.
 //!
 //! Being a mirror, `anchor_slug` carries drift risk against github.com, the
 //! same class the PDF adapter took on mirroring `lopdf`. The case table in
 //! this file's tests is where that mirror is written down.
+//!
+//! # Known divergences that survive on purpose
+//!
+//! The anchor is computed from the IR's inline text, not from what a Markdown
+//! parser gets back out of the line the writer emits. One case follows from
+//! that today:
+//!
+//! - **The empty id.** A title with no character in the class at all gets
+//!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty
+//!   fragment is a dead link.
 
 use kasane_ir::Inline;
 use unicode_normalization::UnicodeNormalization;
@@ -26,23 +48,61 @@ use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCa
 /// break GFM parity for no benefit.
 pub(crate) const MAX_PATH_SLUG_BYTES: usize = 64;
 
-/// Emitted when a title has no `\p{Word}` character at all (`## ***`, `## —`).
+/// Emitted when a title has no character in the slug's class at all (`## ***`,
+/// `## —`, `## ½`).
 ///
 /// GitHub gives such a heading an empty id. kasane cannot: an empty anchor is
-/// a dead link. This is the one documented divergence from GFM.
+/// a dead link. This is the one documented divergence from GFM in the shared
+/// part of the two rules.
 const EMPTY_FALLBACK: &str = "section";
 
-/// Ruby's `\p{Word}`, which is exactly what GitHub's TOC filter keeps: Letter,
-/// Mark, Number, and Connector_Punctuation (so `_` survives).
+/// Ruby's `\p{Word}` **minus Join_Control**: the class both rules share.
 ///
-/// Mark is why this needs a table rather than `char::is_alphanumeric()`.
-/// After NFC the Devanagari virama (U+094D) is still a separate Mark, and
-/// dropping it would slug `हिन्दी` as `हिनदी`.
+/// Ruby builds `\p{Word}` in `tool/enc-unicode.rb` as `Alphabetic + Mark +
+/// Decimal_Number + Connector_Punctuation + Join_Control`, matching UTS#18
+/// Annex C, and GitHub's TOC filter keeps exactly that set via
+/// `/[^\p{Word}\- ]/u`. Two things about how it is spelled here:
+///
+/// - **`Alphabetic` is approximated** as the Letter group plus
+///   `Letter_Number`. `unicode-properties` exposes General_Category only, and
+///   `Alphabetic` is `L* + Nl + Other_Alphabetic` whose members are almost
+///   entirely `Mn`/`Mc` — already covered by the Mark group. What the
+///   approximation misses is the handful of `So` characters that carry
+///   `Other_Alphabetic`, such as the circled Latin letters (`Ⓐ`); those are
+///   dropped where GitHub keeps them.
+/// - **The whole `Number` group would be too wide.** Ruby has
+///   `Decimal_Number`, not `Nd + Nl + No`. `Letter_Number` (`Ⅷ`) is in the set
+///   via `Alphabetic`, but `Other_Number` (`½`, `①`) is *outside* it — which
+///   matters, because circled numerals are common in Japanese and Chinese
+///   headings.
+///
+/// Mark is why this needs a table rather than `char::is_alphanumeric()`: the
+/// Devanagari virama (U+094D) is a separate Mark that NFC does not compose
+/// away, and dropping it would slug `हिन्दी` as `हिनदी`.
+///
+/// Join_Control is deliberately *not* here, because only `anchor_slug` wants
+/// it; see the module doc and [`is_join_control`].
 fn is_word(c: char) -> bool {
     matches!(
         c.general_category_group(),
-        GeneralCategoryGroup::Letter | GeneralCategoryGroup::Mark | GeneralCategoryGroup::Number
-    ) || c.general_category() == GeneralCategory::ConnectorPunctuation
+        GeneralCategoryGroup::Letter | GeneralCategoryGroup::Mark
+    ) || matches!(
+        c.general_category(),
+        GeneralCategory::DecimalNumber
+            | GeneralCategory::LetterNumber
+            | GeneralCategory::ConnectorPunctuation
+    )
+}
+
+/// Unicode's `Join_Control`, which is exactly these two characters.
+///
+/// Ruby's `\p{Word}` includes them and GitHub therefore keeps them, so
+/// `anchor_slug` must too: ZWNJ appears inside ordinary Persian and Urdu words
+/// and ZWJ inside Devanagari conjuncts, so dropping them would give every such
+/// heading an anchor github.com does not compute. `path_slug` drops them —
+/// see the module doc for why the two rules part ways here.
+fn is_join_control(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}')
 }
 
 /// The shared prefix of both rules: the inline text, outer whitespace trimmed,
@@ -70,7 +130,7 @@ fn normalized(inlines: &[Inline]) -> String {
 pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
     let out: String = normalized(inlines)
         .chars()
-        .filter(|c| is_word(*c) || *c == '-' || *c == ' ')
+        .filter(|c| is_word(*c) || is_join_control(*c) || *c == '-' || *c == ' ')
         .map(|c| if c == ' ' { '-' } else { c })
         .collect();
     if out.is_empty() {
@@ -80,13 +140,16 @@ pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
     }
 }
 
-/// The same character class and normalization, then it diverges where a
+/// The shared character class and normalization, then it diverges where a
 /// filename should: separator runs collapse to a single `-`, the tail is
 /// trimmed, and the result is capped at `MAX_PATH_SLUG_BYTES`.
 ///
-/// Everything outside `\p{Word}` is REMOVED, exactly as the anchor rule
-/// removes it -- only space and `-` act as separators. That is what makes
-/// `Don't Panic` a `dont-panic` file rather than the old `don-t-panic`.
+/// Everything outside the class is REMOVED, exactly as the anchor rule removes
+/// it -- only space and `-` act as separators. That is what makes `Don't
+/// Panic` a `dont-panic` file rather than the old `don-t-panic`. Join_Control
+/// is removed here and kept by the anchor rule, which is the one place the two
+/// character classes differ; the module doc says why, and `fuzz_entry::slug`
+/// is what fails if the path alphabet is widened by hand.
 ///
 /// Truncation can make two sibling slugs identical. That is harmless: every
 /// non-root component carries an `NN-` ordinal prefix, which is already what
@@ -251,6 +314,10 @@ mod tests {
     /// filter: downcase, remove everything outside `\p{Word}`/`-`/space, then
     /// map spaces to hyphens. No collapsing and no trimming of interior runs,
     /// which is why some rows look wrong and are not.
+    ///
+    /// `\p{Word}` here is Ruby's, i.e. `Alphabetic + Mark + Decimal_Number +
+    /// Connector_Punctuation + Join_Control` — see `is_word` for the two
+    /// places that is narrower than "Letter, Mark, Number".
     #[test]
     fn anchor_matches_github() {
         // punctuation is REMOVED, not replaced -- the old rule made this
@@ -274,9 +341,31 @@ mod tests {
         // from the heading's text before computing the id. Interior runs are
         // not trimmed, per the row above.
         assert_eq!(anchor_slug(&t("  Intro  ")), "intro");
-        // No Word character at all: GitHub emits an empty id, which would be a
-        // dead link here. The documented divergence.
+        // No character in the class at all: GitHub emits an empty id, which
+        // would be a dead link here. The documented divergence.
         assert_eq!(anchor_slug(&t("***")), "section");
+        // `Other_Number` is OUTSIDE Ruby's `\p{Word}`, which has
+        // `Decimal_Number` rather than the whole `Number` group. The vulgar
+        // fraction is removed like any other symbol; the space before it
+        // survives as a trailing hyphen, since the anchor rule never trims.
+        assert_eq!(anchor_slug(&t("Fig ½")), "fig-");
+        // A circled numeral is `Other_Number` too, and it is common in
+        // Japanese and Chinese headings. GitHub drops it.
+        assert_eq!(anchor_slug(&t("①はじめに")), "はじめに");
+        // `Letter_Number` IS inside the set -- it arrives via `Alphabetic`,
+        // not via `Number` -- and downcases like any other letter.
+        assert_eq!(anchor_slug(&t("Part Ⅷ")), "part-ⅷ");
+        // Join_Control is inside Ruby's `\p{Word}` and GitHub keeps it. ZWNJ
+        // sits INSIDE this ordinary Persian word, so dropping it would
+        // mis-anchor the heading against every GitHub render.
+        assert_eq!(anchor_slug(&t("می\u{200C}رود")), "می\u{200C}رود");
+        // A title that is nothing but a Join_Control character anchors to that
+        // character, not to `section`: the result is non-empty, so the
+        // fallback does not fire, and it is exactly the id GitHub computes, so
+        // the link resolves in kasane's tree and on GitHub alike. An invisible
+        // anchor is odd to look at but is not a broken one, and guarding it
+        // would manufacture a divergence where there is currently none.
+        assert_eq!(anchor_slug(&t("\u{200C}")), "\u{200C}");
     }
 
     /// NFC runs before anything else, so a decomposed title and its composed
@@ -310,6 +399,19 @@ mod tests {
         // A leading separator is never emitted, so nothing needs trimming off
         // the front.
         assert_eq!(path_slug(&t("  Intro  ")), "intro");
+        // `Other_Number` is outside the shared class, so it goes here too --
+        // and the hyphen the anchor rule leaves dangling is trimmed.
+        assert_eq!(path_slug(&t("Fig ½")), "fig");
+        assert_eq!(path_slug(&t("①はじめに")), "はじめに");
+        // `Letter_Number` is inside it, here as there.
+        assert_eq!(path_slug(&t("Part Ⅷ")), "part-ⅷ");
+        // Join_Control is where the two classes part: the anchor keeps the
+        // ZWNJ, a filename must not carry an invisible character, and the
+        // `slug` fuzz target's closed-alphabet argument depends on it.
+        assert_eq!(path_slug(&t("می\u{200C}رود")), "میرود");
+        // So a ZWNJ-only title, which the anchor rule slugs to the ZWNJ
+        // itself, falls back here.
+        assert_eq!(path_slug(&t("\u{200C}")), "section");
     }
 
     /// Traversal and separator injection are impossible by construction: `/`,
