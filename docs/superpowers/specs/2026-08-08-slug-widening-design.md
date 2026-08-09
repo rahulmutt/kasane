@@ -80,14 +80,52 @@ same inline text (`inline_text` moves there unchanged, bound included).
 
 ### 2.1 `anchor_slug(&[Inline]) -> String`
 
+> **Corrected 2026-08-09, after the whole-branch review.** This section
+> originally specified an NFC step and defined Ruby's `\p{Word}` as "Letter,
+> Mark, Number, and Connector_Punctuation". Both were wrong, the plan
+> transcribed both faithfully, and the code shipped them. The two errors and
+> their consequences are recorded below rather than silently overwritten,
+> because this spec is what a future reader will check the mirror against.
+
 A deliberate mirror of GitHub's TOC filter, in its order:
 
-1. NFC-normalize.
-2. Unicode-lowercase.
-3. **Remove** — not replace — every character outside `\p{Word}`, `-`, and
-   space. Ruby's `\p{Word}` is Letter, Mark, Number, and
-   Connector_Punctuation, so `_` survives and combining marks survive.
-4. Map each remaining space to `-`.
+1. Unicode-lowercase.
+2. **Remove** — not replace — every character outside `\p{Word}`, `-`, and
+   space. Ruby defines `\p{Word}` in `tool/enc-unicode.rb`, matching UTS#18
+   Annex C, as `Alphabetic + Mark + Decimal_Number + Connector_Punctuation +
+   Join_Control`; GitHub's TOC filter keeps exactly that via
+   `/[^\p{Word}\- ]/u`. So `_` survives, combining marks survive, and ZWJ/ZWNJ
+   survive.
+3. Map each remaining space to `-`.
+
+**There is no normalization step.** GitHub performs none, and neither can
+kasane: `nav::walk` sets a file's title from unnormalized `inline_text` and
+`file_to_markdown` writes that verbatim as the heading line, so NFC-folding
+the fragment while rendering the heading unnormalized produces a link that
+resolves in *no* renderer — GitHub, mdBook, or a local preview — whenever the
+source text is NFD. NFD input is realistic, not theoretical: macOS-sourced
+EPUBs and PDF text extraction produce it routinely. §2.2's `path_slug` keeps
+NFC, where it is a genuine benefit and where the `NN-` ordinal prefix already
+neutralizes collisions.
+
+**`Number` is not the right group.** Ruby has `Decimal_Number` (`Nd`), not
+`Nd + Nl + No`. `Letter_Number` (`Nl`, `Ⅷ`) is still in the set because
+`Alphabetic` contains it, but `Other_Number` (`No`) is not: `½` U+00BD and `①`
+U+2460 are both `No`, so `## Fig ½` anchors `fig-` and `## ①はじめに` anchors
+`はじめに`. Circled numerals are common in Japanese and Chinese headings.
+
+**Join_Control is in the set, and it matters most to this item's audience.**
+ZWNJ U+200C is `Cf`, and it appears *inside* ordinary Persian and Urdu words
+(`می‌رود`) and in Devanagari. Dropping it mis-anchors every such heading.
+`path_slug` still drops it (§2.2): a filename must not carry an invisible
+character, and §5.3's confinement argument depends on the path alphabet
+staying closed. This is the one place the two rules' character classes differ.
+
+`unicode-properties` (§2.3) exposes General_Category only, so `Alphabetic` is
+approximated as the Letter group plus `Nl` — `Alphabetic` is `L* + Nl +
+Other_Alphabetic`, and `Other_Alphabetic` is almost entirely `Mn`/`Mc`, which
+the Mark group already covers. The residue this misses is the `So` characters
+carrying `Other_Alphabetic`, such as the circled Latin letters (`Ⓐ`).
 
 No run-collapsing and no trimming, because GitHub does neither. The visible
 consequence is that exact parity means deliberately emitting anchors that look
@@ -101,31 +139,46 @@ is removed and each of the two surviving spaces becomes a hyphen.
 | `foo_bar` | `foo_bar` |
 | `第二章` | `第二章` |
 | `हिन्दी` | `हिन्दी` |
+| `Fig ½` | `fig-` |
+| `①はじめに` | `はじめに` |
+| `Part Ⅷ` | `part-ⅷ` |
+| `می‌رود` (with ZWNJ) | `می‌رود` (ZWNJ kept) |
+| `Cafe` + U+0301 (NFD) | `cafe` + U+0301, *not* `café` |
+
+A title consisting only of Join_Control characters is left to the mirror: the
+anchor is the ZWNJ itself, non-empty, so §3.3's fallback does not fire. That
+is what GitHub computes, so the link resolves in both places; guarding it
+would manufacture a divergence where there is none. `path_slug`, which drops
+Join_Control, does fall back to `section` for the same title.
 
 ### 2.2 `path_slug(&[Inline]) -> String`
 
-The same character class and the same normalization, then it diverges where a
+§2.1's character class minus Join_Control, plus NFC, then it diverges where a
 filename should: collapse runs of separators to a single `-`, trim leading and
 trailing `-`, and cap at a byte budget (§3.2). `Background & Notes` becomes
 `background-notes`, not `background--notes`.
 
 The two rules are independent by construction — one lands in the path portion
 of a link, the other in the fragment — so nothing forces them to agree, and
-nothing breaks when they don't.
+nothing breaks when they don't. They diverge on three axes: the tail (here),
+Join_Control (§2.1), and NFC (§2.1). NFC belongs to this rule alone because
+this rule is choosing a *filename*: the NFD and NFC spellings of one title
+should land in one place, and the ordinal prefix already makes any resulting
+collision harmless.
 
 ### 2.3 Dependencies
 
 `kasane-core` currently depends on `kasane-ir` and nothing else. Matching
 `\p{Word}` needs the Mark general categories, which std does not expose:
-`char::is_alphanumeric()` is Alphabetic + Numeric, and after NFC the Devanagari
-virama (U+094D) and similar combining signs are still separate marks, so
-`हिन्दी` would slug to `हिनदी`. Latin accents compose away under NFC and are
-unaffected either way.
+`char::is_alphanumeric()` is Alphabetic + Numeric, and the Devanagari virama
+(U+094D) and similar combining signs are separate marks that NFC does not
+compose away, so `हिन्दी` would slug to `हिनदी`.
 
 This item therefore takes two direct dependencies:
 
-- `unicode-normalization` — NFC.
-- `unicode-properties` — `General_Category`, for the Mark classes.
+- `unicode-normalization` — NFC, for `path_slug` only (§2.1, §2.2).
+- `unicode-properties` — `General_Category`, for the Mark classes and for the
+  `Nd`/`Nl`/`No` distinction §2.1 turns on.
 
 Both are already in `Cargo.lock` transitively, so this adds direct edges rather
 than a new subtree. It does cost `kasane-core` its zero-third-party-dependency
@@ -185,11 +238,13 @@ This is the one case where README's limitation narrows rather than disappears.
 ## 4. Why destinations stay raw
 
 `markdown.rs:146` emits `[{}]({})` with the destination unencoded. Under the
-new rule the character set of a path component is closed: Word characters and
+new rule the character set of a path component is closed: §2.2's class and
 `-`, nothing else. Every character that would break a bare Markdown
-destination — space, `(`, `)`, `#`, `?`, `%` — is outside `\p{Word}` and is
-therefore already removed by step 3. Raw stays correct, and stays readable in a
-way percent-encoding would not.
+destination — space, `(`, `)`, `#`, `?`, `%` — is outside it and is therefore
+already removed. Raw stays correct, and stays readable in a way
+percent-encoding would not. Note that §2.1's widening of the *anchor* class to
+Join_Control does not touch this argument: it is `path_slug` that produces
+path components, and Join_Control is exactly the character it does not admit.
 
 `library.rs` percent-encodes for a different reason and keeps doing so: its
 relative directories come from the filesystem, so they are arbitrary — spaces,
@@ -207,8 +262,10 @@ Parity is verified by a curated table of title → expected-anchor cases derived
 from GitHub's documented algorithm, one row per rule, each commented with the
 rule it pins: punctuation removed not replaced, `&` leaving a double hyphen,
 underscore retained, CJK passthrough, Devanagari marks surviving, an NFD input
-producing the same slug as its NFC twin, emoji stripped, a run of spaces
-preserved as a run of hyphens, and the empty-title fallback.
+anchoring *differently* from its NFC twin while both reach the same filename,
+`Other_Number` dropped and `Letter_Number` kept, ZWNJ surviving inside a
+Persian word for the anchor and being dropped for the path, emoji stripped, a
+run of spaces preserved as a run of hyphens, and the empty-title fallback.
 
 The path table runs the same inputs against the different expectations, plus
 the cap: a long CJK title truncating on a char boundary, and a truncation

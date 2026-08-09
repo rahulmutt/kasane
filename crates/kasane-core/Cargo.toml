@@ -9,11 +9,13 @@ repository.workspace = true
 
 [dependencies]
 kasane-ir.workspace = true
-# NFC, and the General_Category tables behind Ruby's `\p{Word}`. std cannot
-# answer the Mark question: `char::is_alphanumeric()` is Alphabetic + Numeric,
-# and after NFC the Devanagari virama (U+094D) is still a separate Mark, so
-# `हिन्दी` would slug to `हिनदी` without these. `default-features = false`
-# drops the emoji tables, which nothing here needs.
+# NFC (for `path_slug` only -- `anchor_slug` must not normalize; see
+# `slug.rs`), and the General_Category tables behind Ruby's `\p{Word}`. std
+# cannot answer either question these ask: `char::is_alphanumeric()` is
+# Alphabetic + Numeric, so it neither keeps the Devanagari virama (U+094D), a
+# separate Mark that NFC does not compose away -- `हिन्दी` would slug to
+# `हिनदी` -- nor tells `Nd` from `No`, which Ruby's set turns on.
+# `default-features = false` drops the emoji tables, which nothing here needs.
 unicode-normalization = "0.1"
 unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 

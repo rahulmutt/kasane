@@ -57,7 +57,11 @@ Paths also changed with the slug rule. Punctuation is now removed rather than
 turned into a separator, so `01-don-t-panic.md` became `01-dont-panic.md`, and
 a heading in any script now keeps its text, so a Japanese book that used to
 emit `01-section.md` and `02-section.md` now emits `01-第二章.md` and its
-siblings. As with the `Part N` change, `write_tree` replaces the output
+siblings. Filenames are therefore no longer ASCII, which matters if you pipe
+the tree through tooling that assumes they are. Heading anchors changed with
+the same rule and for the same reason — `#don-t-panic` became `#dont-panic` —
+so a deep link into a previously generated tree needs updating too, not just a
+path. As with the `Part N` change, `write_tree` replaces the output
 directory wholesale so nothing stale is left behind — but anything outside the
 tree that referenced the old paths needs updating.
 
@@ -139,18 +143,33 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Heading anchors match GitHub's rule, with one exception. Anchors are
+- Heading anchors match GitHub's rule, with three exceptions. Anchors are
   computed the way GitHub computes them — Unicode-aware, punctuation removed
   rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
   `#第二章`, both of which resolve on GitHub. Note that exact parity means
-  some anchors look wrong and are not: `## Background & Notes` anchors as
+  some anchors look wrong and are not. `## Background & Notes` anchors as
   `#background--notes`, because GFM removes the `&` and turns each surviving
-  space into a hyphen. The exception is a heading with no letter, digit, mark
-  or `_` at all (`## ***`): GitHub gives it an empty id, and kasane emits
-  `#section` instead, because an empty anchor is a dead link.
+  space into a hyphen. And the character set is Ruby's `\p{Word}`, the set
+  GitHub's own filter keeps: letters (Roman numerals such as `Ⅷ` included),
+  combining marks, decimal digits, `_`, and the zero-width joiner and
+  non-joiner — which means non-decimal numerals go, so `## Fig ½` anchors as
+  `#fig-` and `## ①はじめに` as `#はじめに`. The three exceptions:
+  - A heading with none of those characters at all (`## ***`, `## —`, `## ½`)
+    gets an empty id from GitHub; kasane emits `#section`, because an empty
+    anchor is a dead link. A heading that is *only* a zero-width non-joiner is
+    not this case — it anchors to that invisible character, exactly as GitHub
+    does.
+  - A heading ending in a footnote reference, `## Notes[^1]`, anchors
+    `#notes` here and `#notes1` on GitHub: kasane slugs the heading's text
+    without the rendered `[^1]` marker.
+  - A heading whose title ends in a run of `#`, rendered `## Intro ###`,
+    anchors `#intro-` here and `#intro` on GitHub, which reads that run as an
+    ATX closing sequence.
+
   Filenames carry the title in any script, capped at 64 bytes of title per
-  component.
+  component; they drop the zero-width joiners an anchor keeps, since a
+  filename should not contain invisible characters.
   What they do not carry is total path length: depth comes from heading
   nesting plus whatever `-o` you pass, so a deep book in a deep output
   directory can still exceed Windows' 260-character default path limit.

@@ -39,8 +39,20 @@
 //! # Known divergences that survive on purpose
 //!
 //! The anchor is computed from the IR's inline text, not from what a Markdown
-//! parser gets back out of the line the writer emits. One case follows from
-//! that today:
+//! parser gets back out of the line the writer emits. Two cases follow from
+//! that and are documented rather than fixed: closing either means changing
+//! `inline_text`, whose other callers (`nav`, `refs`, `balance`) want exactly
+//! its current behaviour, and that ripple is not a pre-merge change.
+//!
+//! - **Footnote references.** `inline_text` skips `Inline::FootnoteRef`, but
+//!   the writer renders it as `[^1]`. `## Notes[^1]` therefore anchors `notes`
+//!   here and `notes1` on GitHub.
+//! - **A title ending in a run of `#`.** `## Intro ###` re-parses as an ATX
+//!   heading with a *closing* sequence, so GitHub sees the text `Intro` and
+//!   computes `intro`; kasane slugs the IR text `Intro ###` and computes
+//!   `intro-`.
+//!
+//! One more divergence is by choice rather than by construction:
 //!
 //! - **The empty id.** A title with no character in the class at all gets
 //!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty

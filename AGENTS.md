@@ -31,14 +31,28 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   the property tier needs the engine's own token estimate, and a copy in the
   test would drift.
   `slug.rs` owns two rules, not one. `anchor_slug` is a deliberate mirror of
-  GitHub's heading-id algorithm (NFC, Unicode-lowercase, remove everything
-  outside Ruby's `\p{Word}`, map spaces to hyphens, no collapsing and no
-  interior trimming) so in-book cross-references resolve when the tree is
-  rendered on GitHub; `path_slug` shares that character class but collapses
+  GitHub's heading-id algorithm (Unicode-lowercase, remove everything outside
+  Ruby's `\p{Word}`, map spaces to hyphens, no collapsing and no interior
+  trimming) so in-book cross-references resolve when the tree is rendered on
+  GitHub; `path_slug` starts from the same character class but collapses
   separator runs, trims, and caps at 64 bytes, because a filename wants
-  different things than a fragment. Being a mirror, the anchor rule carries
-  drift risk against github.com, and the case table in `slug.rs`'s tests is
-  where that mirror is written down. Duplicate anchors are suffixed per file
+  different things than a fragment. Ruby's `\p{Word}` is `Alphabetic + Mark +
+  Decimal_Number + Connector_Punctuation + Join_Control`, which is narrower
+  than "Letter, Mark, Number" in one direction (`Other_Number` — `½`, `①` —
+  is outside it, though `Letter_Number` is inside via `Alphabetic`) and wider
+  in another (Join_Control). The two rules therefore diverge on the character
+  class too, not only in the tail: `anchor_slug` keeps ZWJ/ZWNJ because GitHub
+  does and because they sit inside ordinary Persian, Urdu and Devanagari
+  words, while `path_slug` drops them, since a filename must not carry
+  invisible characters and `fuzz_entry::slug`'s confinement argument rests on
+  the path alphabet staying closed. They also diverge on normalization, and
+  that one is load-bearing: `path_slug` NFC-folds and **`anchor_slug` must
+  not**, because `nav::walk` sets a file's title from unnormalized
+  `inline_text` and `file_to_markdown` writes it verbatim as the heading line,
+  so an NFC fragment against an NFD heading is a link kasane breaks against
+  its own output. Being a mirror, the anchor rule carries drift risk against
+  github.com, and the case table in `slug.rs`'s tests is where that mirror is
+  written down, divergences included. Duplicate anchors are suffixed per file
   in render order, which is why `place` counts headings nested inside list
   items even though it deliberately gives them no anchor: GitHub assigns them
   ids, so they consume a suffix slot. `assign_paths` takes the document title
