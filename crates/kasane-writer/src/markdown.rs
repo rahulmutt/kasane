@@ -299,6 +299,54 @@ mod tests {
         }
     }
 
+    /// The other half of design spec §4, which used to be dismissed rather
+    /// than shown: `refs::relativize` emits `format!("{}#{}", rel, a)`, so the
+    /// ANCHOR lands in a bare `[text](...)` destination too, and its character
+    /// set is part of §4's argument.
+    ///
+    /// It is a different set from the path slug's -- wider by ZWJ/ZWNJ, and it
+    /// keeps GFM's double hyphens and untrimmed tails -- so the sibling test
+    /// above cannot cover it, and its `is_alphanumeric()` check would reject a
+    /// combining mark and a zero-width joiner that both belong here. What
+    /// actually has to hold is narrower and is what is asserted: no character
+    /// that ends a bare destination or splits a link.
+    ///
+    /// The zero-width non-joiner is the interesting row. It is `Cf`, which is
+    /// neither `char::is_whitespace()` nor `char::is_control()`, and
+    /// CommonMark ends an unbracketed destination on ASCII whitespace or an
+    /// unbalanced `)` -- so it rides through a raw destination intact, which
+    /// is exactly what GFM parity requires of it.
+    #[test]
+    fn anchors_contain_nothing_that_breaks_a_bare_destination() {
+        for title in [
+            "Don't Panic",
+            "Background & Notes (revised)",
+            "50% off #1?",
+            "第二章",
+            "a/b\\c",
+            "v1.2 Final.",
+            "हिन्दी",
+            "می\u{200C}رود",
+            "Ⓐ Notes",
+        ] {
+            let anchor = kasane_core::anchors_for_headings(&[title.to_string()])
+                .pop()
+                .expect("one title in, one anchor out");
+            for c in anchor.chars() {
+                assert!(
+                    !c.is_whitespace() && !c.is_control(),
+                    "anchor for {title:?} contains {c:?}, which a bare destination cannot carry"
+                );
+            }
+            for bad in [' ', '(', ')', '#', '?', '%', '/', '\\', '.'] {
+                assert!(
+                    !anchor.contains(bad),
+                    "anchor for {title:?} contains {bad:?}"
+                );
+            }
+        }
+    }
+
     /// `rendering_survives_deep_block_nesting` only proves the guard fires
     /// -- `assert!(!md.is_empty())` would still pass at an effective bound of
     /// 1, since a lone truncation comment is non-empty too. Pin the other

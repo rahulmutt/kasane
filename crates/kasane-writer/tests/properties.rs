@@ -114,15 +114,19 @@ fn strip_list_markers(line: &str) -> &str {
 
 /// Every heading line's anchor, as the engine would compute it for this file.
 ///
-/// A `#`-prefixed line inside a fenced code block would be counted too, and
-/// that is NOT merely a permissive check — it used to be, and stopped being
-/// one when order started mattering. A spurious heading line consumes a
-/// counter slot, so a real heading whose base matches it computes `base-1`
-/// here against the engine's `base`: a false P2 failure, not a lenient one.
-/// It is unreachable today only because `Shape::Code`'s body is a bare
-/// `zq####` sentinel with no `#` in it. A generator that ever puts arbitrary
-/// text in a code block needs a real fence-skipping pass here first — the same
-/// warning `links_in` carries.
+/// Two shapes would be counted here that the engine does not count: a
+/// `#`-prefixed line inside a fenced code block, and a list item whose
+/// paragraph merely *starts* with `#` (`- #x`), which `strip_list_markers`
+/// hands over as a heading line. Neither is merely a permissive check — that
+/// stopped being true when order started mattering. A spurious heading line
+/// consumes a counter slot, so a real heading whose base matches it computes
+/// `base-1` here against the engine's `base`: a false P2 failure, not a
+/// lenient one.
+///
+/// Both are unreachable today for the same reason: the generator's only text
+/// is `WORDS` and a `zq####` sentinel, and neither contains a `#`. A generator
+/// that ever draws arbitrary text — into a code block or into a list item —
+/// needs a real Markdown pass here first, the same warning `links_in` carries.
 ///
 /// Order matters now, and did not before: duplicate anchors are suffixed per
 /// file in render order, so this feeds the whole ordered list to the engine's
