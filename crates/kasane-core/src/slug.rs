@@ -84,37 +84,37 @@ const EMPTY_FALLBACK: &str = "section";
 /// Ruby builds `\p{Word}` in `tool/enc-unicode.rb` as `Alphabetic + Mark +
 /// Decimal_Number + Connector_Punctuation + Join_Control`, matching UTS#18
 /// Annex C, and GitHub's TOC filter keeps exactly that set via
-/// `/[^\p{Word}\- ]/u`. Two things about how it is spelled here:
+/// `/[^\p{Word}\- ]/u`. This is that set term for term, with nothing
+/// approximated:
 ///
-/// - **`Alphabetic` is approximated** as the Letter group plus
-///   `Letter_Number`. `unicode-properties` exposes General_Category only, and
-///   `Alphabetic` is `L* + Nl + Other_Alphabetic` whose members are almost
-///   entirely `Mn`/`Mc` — already covered by the Mark group. What the
-///   approximation misses is the handful of `So` characters that carry
-///   `Other_Alphabetic`, such as the circled Latin letters (`Ⓐ`); those are
-///   dropped where GitHub keeps them.
+/// - **`char::is_alphabetic()` is Unicode's `Alphabetic` derived property**,
+///   not the `L*` general-category group. That is the fact this predicate
+///   turns on, and it is easy to miss: `Alphabetic` is `L* + Nl +
+///   Other_Alphabetic`, so `char::is_alphabetic()` already answers for `Ⅷ`
+///   (`Nl`) and for the circled Latin letters `Ⓐ`/`ⓐ` (`So` carrying
+///   `Other_Alphabetic`) without a `Letter_Number` arm or a hand-kept table.
+///   It is correspondingly false for the *parenthesized* Latin letters
+///   (`⒜`, `So` but not `Other_Alphabetic`), which GitHub also drops.
 /// - **The whole `Number` group would be too wide.** Ruby has
-///   `Decimal_Number`, not `Nd + Nl + No`. `Letter_Number` (`Ⅷ`) is in the set
-///   via `Alphabetic`, but `Other_Number` (`½`, `①`) is *outside* it — which
+///   `Decimal_Number`, not `Nd + Nl + No`. `Nl` is in the set via
+///   `Alphabetic`, but `Other_Number` (`½`, `①`) is *outside* it — which
 ///   matters, because circled numerals are common in Japanese and Chinese
 ///   headings.
 ///
-/// Mark is why this needs a table rather than `char::is_alphanumeric()`: the
-/// Devanagari virama (U+094D) is a separate Mark that NFC does not compose
-/// away, and dropping it would slug `हिन्दी` as `हिनदी`.
+/// Mark is the term std alone cannot supply, and is why this needs
+/// `unicode-properties` at all: a Mark is not `Alphabetic`, the Devanagari
+/// virama (U+094D) is a separate Mark that NFC does not compose away, and
+/// dropping it would slug `हिन्दी` as `हिनदी`.
 ///
 /// Join_Control is deliberately *not* here, because only `anchor_slug` wants
 /// it; see the module doc and [`is_join_control`].
 fn is_word(c: char) -> bool {
-    matches!(
-        c.general_category_group(),
-        GeneralCategoryGroup::Letter | GeneralCategoryGroup::Mark
-    ) || matches!(
-        c.general_category(),
-        GeneralCategory::DecimalNumber
-            | GeneralCategory::LetterNumber
-            | GeneralCategory::ConnectorPunctuation
-    )
+    c.is_alphabetic()
+        || c.general_category_group() == GeneralCategoryGroup::Mark
+        || matches!(
+            c.general_category(),
+            GeneralCategory::DecimalNumber | GeneralCategory::ConnectorPunctuation
+        )
 }
 
 /// Unicode's `Join_Control`, which is exactly these two characters.
@@ -398,6 +398,16 @@ mod tests {
         // `Letter_Number` IS inside the set -- it arrives via `Alphabetic`,
         // not via `Number` -- and downcases like any other letter.
         assert_eq!(anchor_slug(&t("Part Ⅷ")), "part-ⅷ");
+        // `Other_Alphabetic` is in `Alphabetic` too, and reaches this rule
+        // only because `is_word` asks `char::is_alphabetic()` rather than
+        // testing the `L*` category group. `Ⓐ` U+24B6 is `So`; it is kept, and
+        // it downcases to `ⓐ` U+24D0.
+        assert_eq!(anchor_slug(&t("Ⓐ Notes")), "ⓐ-notes");
+        // The boundary is `Alphabetic`, not "looks like a letter": the
+        // PARENTHESIZED small letter is `So` WITHOUT `Other_Alphabetic`, so it
+        // is dropped, and the space after it still becomes a hyphen. GitHub
+        // drops it for the same reason.
+        assert_eq!(anchor_slug(&t("⒜ Notes")), "-notes");
         // Join_Control is inside Ruby's `\p{Word}` and GitHub keeps it. ZWNJ
         // sits INSIDE this ordinary Persian word, so dropping it would
         // mis-anchor the heading against every GitHub render.
@@ -464,6 +474,15 @@ mod tests {
         assert_eq!(path_slug(&t("①はじめに")), "はじめに");
         // `Letter_Number` is inside it, here as there.
         assert_eq!(path_slug(&t("Part Ⅷ")), "part-ⅷ");
+        // `Other_Alphabetic` now flows into FILENAMES as well, which is what
+        // we want: `Ⓐ` is an ordinary printing character with a case mapping,
+        // it breaks no path component, and dropping it here while the anchor
+        // keeps it would make the file's name and its heading disagree about
+        // the title for no benefit. Join_Control is the only member of the
+        // anchor class a filename must refuse. NFC leaves `Ⓐ` alone -- its
+        // decomposition is compatibility (`<circle>`), which is NFKC's job.
+        assert_eq!(path_slug(&t("Ⓐ Notes")), "ⓐ-notes");
+        assert_eq!(path_slug(&t("⒜ Notes")), "notes");
         // Join_Control is where the two classes part: the anchor keeps the
         // ZWNJ, a filename must not carry an invisible character, and the
         // `slug` fuzz target's closed-alphabet argument depends on it.

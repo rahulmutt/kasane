@@ -39,8 +39,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   different things than a fragment. Ruby's `\p{Word}` is `Alphabetic + Mark +
   Decimal_Number + Connector_Punctuation + Join_Control`, which is narrower
   than "Letter, Mark, Number" in one direction (`Other_Number` — `½`, `①` —
-  is outside it, though `Letter_Number` is inside via `Alphabetic`) and wider
-  in another (Join_Control). The two rules therefore diverge on the character
+  is outside it) and wider in two others (Join_Control, and everything
+  `Alphabetic` carries beyond `L*`: `Nl` such as `Ⅷ`, and `Other_Alphabetic`
+  such as the circled letter `Ⓐ`). `is_word` spells the alphabetic term as
+  `char::is_alphabetic()`, which **is** Unicode's `Alphabetic` derived
+  property rather than the `L*` category group — that is what makes the class
+  exact rather than approximate, and `unicode-properties` is needed only for
+  the Mark term and for telling `Nd` from `No`. The two rules therefore diverge on the character
   class too, not only in the tail: `anchor_slug` keeps ZWJ/ZWNJ because GitHub
   does and because they sit inside ordinary Persian, Urdu and Devanagari
   words, while `path_slug` drops them, since a filename must not carry

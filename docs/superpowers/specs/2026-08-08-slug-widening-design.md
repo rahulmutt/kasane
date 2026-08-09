@@ -121,11 +121,21 @@ ZWNJ U+200C is `Cf`, and it appears *inside* ordinary Persian and Urdu words
 character, and §5.3's confinement argument depends on the path alphabet
 staying closed. This is the one place the two rules' character classes differ.
 
-`unicode-properties` (§2.3) exposes General_Category only, so `Alphabetic` is
-approximated as the Letter group plus `Nl` — `Alphabetic` is `L* + Nl +
-Other_Alphabetic`, and `Other_Alphabetic` is almost entirely `Mn`/`Mc`, which
-the Mark group already covers. The residue this misses is the `So` characters
-carrying `Other_Alphabetic`, such as the circled Latin letters (`Ⓐ`).
+**`char::is_alphabetic()` is Unicode's `Alphabetic` derived property**, not the
+`L*` general-category group. That is the fact this section most needs to state,
+because not stating it is what produced the error above: a reader who assumes
+std can only answer "is this a letter" will reach for a category group and
+build the set out of `L* + Nl`, which is `Alphabetic` minus
+`Other_Alphabetic` — the circled Latin letters `Ⓐ`/`ⓐ` (`So` carrying
+`Other_Alphabetic`) would be dropped where GitHub keeps them. `Alphabetic` is
+`L* + Nl + Other_Alphabetic`, and std answers for all three, so the term needs
+no approximation and no table. Note the boundary is genuinely `Alphabetic` and
+not "looks like a letter": the *parenthesized* Latin letters (`⒜`, `So`
+without `Other_Alphabetic`) are outside it, and GitHub drops them too.
+
+`unicode-properties` (§2.3) is therefore needed for the Mark term and for the
+`Nd`/`No` distinction, not for the alphabetic one — a Mark is not
+`Alphabetic`, so std cannot supply it.
 
 No run-collapsing and no trimming, because GitHub does neither. The visible
 consequence is that exact parity means deliberately emitting anchors that look
@@ -142,6 +152,8 @@ is removed and each of the two surviving spaces becomes a hyphen.
 | `Fig ½` | `fig-` |
 | `①はじめに` | `はじめに` |
 | `Part Ⅷ` | `part-ⅷ` |
+| `Ⓐ Notes` | `ⓐ-notes` |
+| `⒜ Notes` | `-notes` |
 | `می‌رود` (with ZWNJ) | `می‌رود` (ZWNJ kept) |
 | `Cafe` + U+0301 (NFD) | `cafe` + U+0301, *not* `café` |
 
@@ -177,8 +189,9 @@ compose away, so `हिन्दी` would slug to `हिनदी`.
 This item therefore takes two direct dependencies:
 
 - `unicode-normalization` — NFC, for `path_slug` only (§2.1, §2.2).
-- `unicode-properties` — `General_Category`, for the Mark classes and for the
-  `Nd`/`Nl`/`No` distinction §2.1 turns on.
+- `unicode-properties` — `General_Category`, for the Mark classes and for
+  telling `Nd` from `No`. The `Alphabetic` term needs neither, since
+  `char::is_alphabetic()` is that derived property (§2.1).
 
 Both are already in `Cargo.lock` transitively, so this adds direct edges rather
 than a new subtree. It does cost `kasane-core` its zero-third-party-dependency
@@ -242,17 +255,25 @@ new rule the character set of a path component is closed: §2.2's class and
 `-`, nothing else. Every character that would break a bare Markdown
 destination — space, `(`, `)`, `#`, `?`, `%` — is outside it and is therefore
 already removed. Raw stays correct, and stays readable in a way
-percent-encoding would not. Note that §2.1's widening of the *anchor* class to
-Join_Control does not touch this argument: it is `path_slug` that produces
-path components, and Join_Control is exactly the character it does not admit.
+percent-encoding would not.
+
+**The anchor is part of this argument, not outside it.** `relativize` emits
+`format!("{}#{}", rel, a)`, so §2.1's alphabet lands in the same bare
+destination. It is closed too, and safe for the same reason: it is
+`is_word ∪ {ZWNJ, ZWJ, '-'}` — no space, `(`, `)`, `#`, `?` or `%` can
+survive step 2, and ZWJ/ZWNJ are `Cf`, which is neither ASCII whitespace nor a
+`)`, so CommonMark carries them through an unbracketed destination intact.
+That last part is not a happy accident but a requirement: GFM parity means the
+fragment must reach GitHub with the joiners in it.
 
 `library.rs` percent-encodes for a different reason and keeps doing so: its
 relative directories come from the filesystem, so they are arbitrary — spaces,
 parentheses, anything the user named a directory. Nothing there changes.
 
-The closed-character-set claim is the load-bearing half of this section, so it
-is pinned by a test that asserts the emitted set over the case table rather
-than left as an argument in prose.
+The closed-character-set claim is the load-bearing half of this section, so
+both halves are pinned by tests that assert the emitted set over the case
+table rather than left as arguments in prose — one over `path_slug`, one over
+`anchor_slug`, since the two alphabets differ.
 
 ## 5. Testing
 

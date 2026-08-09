@@ -151,10 +151,13 @@ See AGENTS.md for the codebase map.
   some anchors look wrong and are not. `## Background & Notes` anchors as
   `#background--notes`, because GFM removes the `&` and turns each surviving
   space into a hyphen. And the character set is Ruby's `\p{Word}`, the set
-  GitHub's own filter keeps: letters (Roman numerals such as `Ⅷ` included),
-  combining marks, decimal digits, `_`, and the zero-width joiner and
-  non-joiner — which means non-decimal numerals go, so `## Fig ½` anchors as
-  `#fig-` and `## ①はじめに` as `#はじめに`. The three exceptions:
+  GitHub's own filter keeps: alphabetic characters, combining marks, decimal
+  digits, `_`, and the zero-width joiner and non-joiner. "Alphabetic" is
+  Unicode's property of that name, so it is wider than "a letter" — Roman
+  numerals like `Ⅷ` and circled letters like `Ⓐ` are in — and narrower than
+  "looks like one": parenthesized letters like `⒜` are out, as are all
+  non-decimal numerals, so `## Fig ½` anchors as `#fig-` and `## ①はじめに`
+  as `#はじめに`. The three exceptions:
   - A heading with none of those characters at all (`## ***`, `## —`, `## ½`)
     gets an empty id from GitHub; kasane emits `#section`, because an empty
     anchor is a dead link. A heading that is *only* a zero-width non-joiner is
