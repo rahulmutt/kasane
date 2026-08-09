@@ -1,8 +1,9 @@
 use crate::balance::balance;
-use crate::paths::{assign_paths, inline_text, Placed};
+use crate::paths::{assign_paths, Placed};
 use crate::refs::resolve_refs;
 use crate::section::fold_sections;
 use crate::sitetree::{FileNode, Frontmatter, SiteTree};
+use crate::slug::inline_text;
 use crate::Options;
 use kasane_ir::{Block, Document, Inline, RefTarget};
 
@@ -34,7 +35,7 @@ pub fn structure(doc: Document, opts: &Options) -> SiteTree {
     // silently drift apart.
     kasane_ir::teardown_document(doc);
     balance(&mut tree, opts);
-    let mut result = assign_paths(tree);
+    let mut result = assign_paths(tree, &root_title);
     resolve_refs(&mut result.root, &result.anchors);
 
     // Flatten in reading order (pre-order), carrying breadcrumb trail.

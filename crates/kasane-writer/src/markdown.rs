@@ -251,6 +251,102 @@ mod tests {
         assert!(!md.is_empty());
     }
 
+    /// Design spec §4: link destinations are emitted raw, with no
+    /// percent-encoding, and that is safe because the character set of a path
+    /// component is closed. Every character that would break a bare Markdown
+    /// destination -- space, `(`, `)`, `#`, `?`, `%`, `.` -- is outside
+    /// `\p{Word}` and is therefore already removed by the slug rule.
+    ///
+    /// This asserts the set rather than the argument, so widening the rule by
+    /// hand fails here instead of silently emitting a broken link. Each bad
+    /// character below must actually occur in at least one title, or its
+    /// assertion is vacuously true and the widening it is meant to catch
+    /// would pass silently: space/`don't` in "Don't Panic"; `(`/`)` in
+    /// "Background & Notes (revised)"; `#`/`?`/`%` in "50% off #1?"; `/`/`\`
+    /// in "a/b\c"; `.` in "v1.2 Final.".
+    ///
+    /// The first loop's `c.is_alphanumeric()` is deliberately narrower than
+    /// the slug rule's own `\p{Word}` (it rejects combining marks, which
+    /// `\p{Word}` keeps), which is exactly what makes it a useful check on
+    /// these Latin/CJK titles rather than a tautology. A title containing a
+    /// combining mark -- `हिन्दी`, for instance -- does NOT belong in this
+    /// array: it would fail this test spuriously even though the engine's
+    /// rule is correct for it (see `path_slug_is_a_filename_not_an_anchor`
+    /// in `kasane-core`'s `slug.rs` for that coverage instead).
+    #[test]
+    fn path_slugs_contain_nothing_that_breaks_a_bare_destination() {
+        for title in [
+            "Don't Panic",
+            "Background & Notes (revised)",
+            "50% off #1?",
+            "第二章",
+            "a/b\\c",
+            "v1.2 Final.",
+        ] {
+            let slug = kasane_core::path_slug_of(&[Inline::Text(title.into())]);
+            for c in slug.chars() {
+                assert!(
+                    c == '-' || (c.is_alphanumeric() || c == '_'),
+                    "path slug for {title:?} contains {c:?}, which is outside the closed set"
+                );
+            }
+            for bad in [' ', '(', ')', '#', '?', '%', '/', '\\', '.'] {
+                assert!(
+                    !slug.contains(bad),
+                    "path slug for {title:?} contains {bad:?}"
+                );
+            }
+        }
+    }
+
+    /// The other half of design spec §4, which used to be dismissed rather
+    /// than shown: `refs::relativize` emits `format!("{}#{}", rel, a)`, so the
+    /// ANCHOR lands in a bare `[text](...)` destination too, and its character
+    /// set is part of §4's argument.
+    ///
+    /// It is a different set from the path slug's -- wider by ZWJ/ZWNJ, and it
+    /// keeps GFM's double hyphens and untrimmed tails -- so the sibling test
+    /// above cannot cover it, and its `is_alphanumeric()` check would reject a
+    /// combining mark and a zero-width joiner that both belong here. What
+    /// actually has to hold is narrower and is what is asserted: no character
+    /// that ends a bare destination or splits a link.
+    ///
+    /// The zero-width non-joiner is the interesting row. It is `Cf`, which is
+    /// neither `char::is_whitespace()` nor `char::is_control()`, and
+    /// CommonMark ends an unbracketed destination on ASCII whitespace or an
+    /// unbalanced `)` -- so it rides through a raw destination intact, which
+    /// is exactly what GFM parity requires of it.
+    #[test]
+    fn anchors_contain_nothing_that_breaks_a_bare_destination() {
+        for title in [
+            "Don't Panic",
+            "Background & Notes (revised)",
+            "50% off #1?",
+            "第二章",
+            "a/b\\c",
+            "v1.2 Final.",
+            "हिन्दी",
+            "می\u{200C}رود",
+            "Ⓐ Notes",
+        ] {
+            let anchor = kasane_core::anchors_for_headings(&[title.to_string()])
+                .pop()
+                .expect("one title in, one anchor out");
+            for c in anchor.chars() {
+                assert!(
+                    !c.is_whitespace() && !c.is_control(),
+                    "anchor for {title:?} contains {c:?}, which a bare destination cannot carry"
+                );
+            }
+            for bad in [' ', '(', ')', '#', '?', '%', '/', '\\', '.'] {
+                assert!(
+                    !anchor.contains(bad),
+                    "anchor for {title:?} contains {bad:?}"
+                );
+            }
+        }
+    }
+
     /// `rendering_survives_deep_block_nesting` only proves the guard fires
     /// -- `assert!(!md.is_empty())` would still pass at an effective bound of
     /// 1, since a lone truncation comment is non-empty too. Pin the other

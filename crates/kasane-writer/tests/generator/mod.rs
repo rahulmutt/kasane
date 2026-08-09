@@ -48,8 +48,31 @@ pub struct Case {
 
 /// Words the generator draws filler text from. Deliberately free of the `zq`
 /// sentinel prefix, so generated content can never collide with a token.
+///
+/// The last five exist to exercise the slug rules rather than to be realistic
+/// prose: `&` produces the double-hyphen anchor GFM parity requires, `don't`
+/// produces the removed-not-replaced apostrophe, `foo_bar` guards the
+/// underscore that `heading_anchors` used to strip, and the CJK and Devanagari
+/// words put non-Latin text into both filenames and anchors. Bracket and
+/// parenthesis characters are deliberately absent: `links_in` would collect a
+/// false link and P2 would fail spuriously.
 const WORDS: &[&str] = &[
-    "alpha", "beta", "gamma", "delta", "epsilon", "the", "and", "of", "a", "chapter", "section",
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "the",
+    "and",
+    "of",
+    "a",
+    "chapter",
+    "section",
+    "&",
+    "don't",
+    "foo_bar",
+    "第二章",
+    "हिन्दी",
 ];
 
 fn filler() -> impl Strategy<Value = String> {

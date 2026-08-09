@@ -15,6 +15,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 kasane-adapters = { path = "../crates/kasane-adapters" }
+kasane-core = { path = "../crates/kasane-core" }
 
 # Fuzz targets must be built with debug assertions and overflow checks on, in
 # release mode. Without this an integer overflow that would panic in a debug
@@ -104,6 +105,13 @@ bench = false
 [[bin]]
 name = "xmltext"
 path = "fuzz_targets/xmltext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "slug"
+path = "fuzz_targets/slug.rs"
 test = false
 doc = false
 bench = false
