@@ -255,6 +255,46 @@ fn sanitize_info(lang: &str) -> String {
         .replace('`', "")
 }
 
+/// Percent-encode a destination kasane *constructs* from the filesystem:
+/// `_assets/<filename>`, the library index's `rel_dir`, internal links (§3.5).
+///
+/// This is `library.rs`'s former `link_dest`, rule unchanged. `%` is encoded
+/// because a literal `%` in a filename would otherwise read back as an escape;
+/// `#` and `?` because they are fragment and query delimiters, so `C# Notes`
+/// would otherwise emit a destination parsing as path `C` with a fragment; the
+/// rest because they end or nest a bare destination. `/` stays literal — it is
+/// the path separator.
+pub(crate) fn dest_path(s: &str) -> String {
+    encode(s, &['%', '#', '?', ' ', '(', ')', '<', '>', '\\', '"'])
+}
+
+/// Percent-encode a destination that arrived as a URL from a source document's
+/// `href` (`RefTarget::External`) (§3.5).
+///
+/// The asymmetry with `dest_path` is the whole reason both exist: this input is
+/// *already* percent-encoded, so encoding `%` again would turn every
+/// legitimately-encoded link into a broken one. `#` and `?` stay literal too —
+/// in a URL they are meaningful delimiters, not text. What is left is exactly
+/// what ends or nests a bare Markdown destination.
+pub(crate) fn dest_url(s: &str) -> String {
+    encode(s, &[' ', '(', ')', '<', '>', '\\', '"'])
+}
+
+fn encode(s: &str, extra: &[char]) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if extra.contains(&c) || c.is_ascii_control() {
+            for b in c.to_string().as_bytes() {
+                out.push('%');
+                out.push_str(&format!("{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +455,29 @@ mod tests {
         assert_eq!(fenced_block("x", Some("rust ignore")), "```rust\nx\n```\n");
         assert_eq!(fenced_block("x", Some("ru`st")), "```rust\nx\n```\n");
         assert_eq!(fenced_block("x", Some("   ")), "```\nx\n```\n");
+    }
+
+    #[test]
+    fn dest_path_encodes_percent_because_it_is_a_filename() {
+        // A literal `%` in a filename would otherwise read back as an escape:
+        // `50%20off` would decode to `50 off`, a directory that does not exist.
+        assert_eq!(dest_path("50%20off"), "50%2520off");
+        assert_eq!(dest_path("a b"), "a%20b");
+        assert_eq!(dest_path("C# Notes"), "C%23%20Notes");
+        assert_eq!(dest_path("a(b)c"), "a%28b%29c");
+        assert_eq!(dest_path("a\nb"), "a%0Ab");
+        // `/` stays literal: it is the path separator, not something to hide.
+        assert_eq!(dest_path("a/b/index.md"), "a/b/index.md");
+    }
+
+    #[test]
+    fn dest_url_leaves_percent_alone_because_it_is_already_a_url() {
+        // Encoding `%` again would break every legitimately-encoded href.
+        assert_eq!(dest_url("https://e.com/a%20b"), "https://e.com/a%20b");
+        assert_eq!(dest_url("https://e.com/a b"), "https://e.com/a%20b");
+        assert_eq!(dest_url("https://e.com/x(1)"), "https://e.com/x%281%29");
+        assert_eq!(dest_url("https://e.com/a\nb"), "https://e.com/a%0Ab");
+        // A fragment and a query are meaningful in a URL and stay literal.
+        assert_eq!(dest_url("https://e.com/p?q=1#f"), "https://e.com/p?q=1#f");
     }
 }
