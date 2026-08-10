@@ -136,3 +136,27 @@ fn generator_covers_every_shape_and_some_nesting() {
         "generator stopped producing nested (Emph/Strong) inline markup"
     );
 }
+
+#[test]
+fn some_generated_case_carries_markdown_hostile_text() {
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let mut saw_hostile = false;
+    for _ in 0..200 {
+        let case = generator::case().new_tree(&mut runner).unwrap().current();
+        if case
+            .sentinels
+            .iter()
+            .any(|s| s.payload.contains(['*', '|', '[', '`', '#', '\\']))
+        {
+            saw_hostile = true;
+            break;
+        }
+    }
+    assert!(
+        saw_hostile,
+        "200 draws produced no Markdown-hostile payload; the widening is not reaching the sentinels"
+    );
+}

@@ -34,7 +34,13 @@ pub enum Expect {
 
 #[derive(Clone, Debug)]
 pub struct Sentinel {
+    /// The bare `zq####` token. Alphanumeric, so no escape can appear inside
+    /// it and P1's raw-text counting is unaffected by the escaping policy.
     pub token: String,
+    /// The full text stamped into the block: the token plus a hostile suffix.
+    /// P7 counts *this* in the re-parsed text, which is what makes a missed
+    /// escape a failure rather than a curiosity.
+    pub payload: String,
     pub expect: Expect,
 }
 
@@ -75,8 +81,46 @@ const WORDS: &[&str] = &[
     "हिन्दी",
 ];
 
+/// Markdown-hostile fragments, drawn into the same text `WORDS` feeds.
+///
+/// Every one of these renders as markup, or breaks a container, if the writer
+/// emits it unescaped: the inline openers, the line-start block openers, a
+/// pipe that splits a cell, a fence and a backtick that break out of code, an
+/// entity that would decode, an HTML comment closer, and an embedded newline.
+/// `zq` is deliberately absent, for the same reason `WORDS` avoids it — a
+/// fragment containing the sentinel prefix would corrupt P1's counting.
+const HOSTILE: &[&str] = &[
+    "*star*",
+    "_under_",
+    "[bracket]",
+    "]close",
+    "`tick`",
+    "```fence",
+    "<html>",
+    "&amp;",
+    "&raw",
+    "$math$",
+    "~~strike~~",
+    "back\\slash",
+    "-->",
+    "|pipe|",
+    "#hash",
+    "- bullet",
+    "1. ordered",
+    "> quote",
+    "= setext",
+    "line\nbreak",
+    "!bang[",
+];
+
+/// Filler text, with hostile fragments mixed in often enough that a case
+/// without one is rare.
 fn filler() -> impl Strategy<Value = String> {
-    proptest::collection::vec(proptest::sample::select(WORDS), 1..12).prop_map(|ws| ws.join(" "))
+    let word = prop_oneof![
+        3 => proptest::sample::select(WORDS),
+        1 => proptest::sample::select(HOSTILE),
+    ];
+    proptest::collection::vec(word, 1..12).prop_map(|ws| ws.join(" "))
 }
 
 /// One inline run, nested at most `depth` levels. Boxed at every level because
@@ -130,15 +174,21 @@ fn shape() -> impl Strategy<Value = Shape> {
     ]
 }
 
-/// Builds one block from a shape, stamping `token` into the single position
+/// Builds one block from a shape, stamping `payload` into the single position
 /// that renders, and reporting how many times it is expected to appear.
 ///
 /// `deco` is generated nested inline markup (depth <= 3) appended after the
 /// sentinel, so the engine's and the writer's inline walks are exercised on real
 /// nesting rather than only on flat text. It is appended, never wrapped around
-/// the token, so the token itself always renders as a bare run and the
+/// the payload, so the payload itself always renders as a bare run and the
 /// occurrence count stays exact.
-fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expect) {
+///
+/// Two shapes need no special handling despite carrying hostile text:
+/// `Shape::Code` puts the payload inside a code block, which is where
+/// ` ```fence` and `` `tick` `` do their work against `escape::fenced_block`.
+/// `Shape::Raw` puts it inside an HTML comment, which is where `-->` works
+/// against `escape::comment_note`.
+fn build(shape: &Shape, deco: &[Inline], payload: &str, idx: u32) -> (Block, Expect) {
     let text = |t: &str| {
         let mut v = vec![Inline::Text(t.to_string())];
         v.extend(deco.iter().cloned());
@@ -149,24 +199,24 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
             Block::Heading {
                 level: *level,
                 id: BlockId(idx),
-                inlines: text(token),
+                inlines: text(payload),
             },
             Expect::AtLeast(1),
         ),
-        Shape::Para => (Block::Para(text(token)), Expect::Exactly(1)),
+        Shape::Para => (Block::Para(text(payload)), Expect::Exactly(1)),
         Shape::List(ordered) => (
             Block::List {
                 ordered: *ordered,
-                items: vec![vec![Block::Para(text(token))]],
+                items: vec![vec![Block::Para(text(payload))]],
             },
             Expect::Exactly(1),
         ),
-        // The token sits at the bottom of the chain and renders exactly once,
-        // so the conservation invariant's arithmetic is unchanged from the
-        // flat-list case -- what changes is the depth the walks must survive
-        // to reach it.
+        // The payload sits at the bottom of the chain and renders exactly
+        // once, so the conservation invariant's arithmetic is unchanged from
+        // the flat-list case -- what changes is the depth the walks must
+        // survive to reach it.
         Shape::NestedList(ordered, depth) => {
-            let mut inner = vec![Block::Para(text(token))];
+            let mut inner = vec![Block::Para(text(payload))];
             for _ in 0..*depth {
                 inner = vec![Block::List {
                     ordered: *ordered,
@@ -181,13 +231,13 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
         // markdown.rs:79-106: both render paths call `inlines_to_md` exactly
         // once for the single generated row's single cell -- the merged
         // branch via `<td>{esc(c)}</td>` (line 92), the pipe-table branch via
-        // the `cells` closure (lines 99-101) -- so the token renders exactly
+        // the `cells` closure (lines 99-101) -- so the payload renders exactly
         // once whether or not `has_merged` is set. Generating the flag (not
         // pinning it) is what makes the HTML branch reachable at all.
         Shape::Table(merged) => (
             Block::Table(Table {
                 header: vec![text("col")],
-                rows: vec![vec![text(token)]],
+                rows: vec![vec![text(payload)]],
                 has_merged: *merged,
             }),
             Expect::Exactly(1),
@@ -201,7 +251,7 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
                     key: format!("img{}", idx),
                     bytes_ref: 0,
                 },
-                caption: text(token),
+                caption: text(payload),
                 number: numbered.then(|| "1".to_string()),
             },
             Expect::Exactly(if *numbered { 2 } else { 1 }),
@@ -209,21 +259,21 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
         Shape::Code => (
             Block::CodeBlock {
                 lang: Some("rust".into()),
-                text: token.to_string(),
+                text: payload.to_string(),
             },
             Expect::Exactly(1),
         ),
-        Shape::Math => (Block::MathBlock(token.to_string()), Expect::Exactly(1)),
+        Shape::Math => (Block::MathBlock(payload.to_string()), Expect::Exactly(1)),
         Shape::Raw => (
             Block::Raw {
-                note: token.to_string(),
+                note: payload.to_string(),
             },
             Expect::Exactly(1),
         ),
         Shape::Footnote => (
             Block::Footnote {
                 id: NoteId(idx),
-                blocks: vec![Block::Para(text(token))],
+                blocks: vec![Block::Para(text(payload))],
             },
             Expect::Exactly(1),
         ),
@@ -234,7 +284,10 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
 pub fn case() -> impl Strategy<Value = Case> {
     // Each entry pairs a block shape with generated nested inline markup, so
     // nesting depth up to 3 is present throughout rather than only in flat runs.
-    let shapes = proptest::collection::vec((shape(), inlines(3)), 1..40);
+    let shapes = proptest::collection::vec(
+        (shape(), inlines(3), proptest::sample::select(HOSTILE)),
+        1..40,
+    );
     let opts = (40usize..400, 5usize..40).prop_map(|(max_tokens, min_tokens)| Options {
         max_tokens,
         // min < max by construction, so the engine is never asked to satisfy
@@ -247,10 +300,11 @@ pub fn case() -> impl Strategy<Value = Case> {
         let mut sentinels = Vec::new();
         let mut assets = AssetBag::default();
 
-        for (i, (sh, deco)) in shapes.iter().enumerate() {
+        for (i, (sh, deco, hostile)) in shapes.iter().enumerate() {
             let idx = i as u32;
             let token = format!("zq{:04}", idx);
-            let (block, expect) = build(sh, deco, &token, idx);
+            let payload = format!("{token} {hostile}");
+            let (block, expect) = build(sh, deco, &payload, idx);
 
             // A figure needs a matching asset or the renderer emits "missing".
             if let Shape::Figure(_) = sh {
@@ -265,7 +319,11 @@ pub fn case() -> impl Strategy<Value = Case> {
                 block,
                 prov: Provenance::default(),
             });
-            sentinels.push(Sentinel { token, expect });
+            sentinels.push(Sentinel {
+                token,
+                payload,
+                expect,
+            });
         }
 
         Case {
