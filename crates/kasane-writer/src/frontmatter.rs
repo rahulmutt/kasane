@@ -34,7 +34,6 @@ pub(crate) fn frontmatter_yaml(fm: &Frontmatter) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kasane_core::Frontmatter;
 
     fn fm(title: &str) -> Frontmatter {
         Frontmatter {

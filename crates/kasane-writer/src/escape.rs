@@ -288,6 +288,11 @@ pub(crate) fn dest_url(s: &str) -> String {
 /// `{`, `&`, `*`, `!`, `|`, `>`, `%`, `@`, a quote character, a trailing space,
 /// and the bare words `true`, `null` and `~`, each of which YAML reads as
 /// something other than a string. The cost is two bytes per line.
+///
+/// A double-quoted scalar cannot carry a raw control character (§4.1), so each
+/// one folds to a space — the same treatment `one_line` already gives a
+/// newline, and for the same reason: folding, not dropping, is what keeps two
+/// words from silently fusing into one.
 pub(crate) fn yaml_scalar(s: &str) -> String {
     let flat = one_line(s);
     let mut out = String::with_capacity(flat.len() + 2);
@@ -296,7 +301,7 @@ pub(crate) fn yaml_scalar(s: &str) -> String {
         match c {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            c if c.is_control() => {}
+            c if c.is_control() => out.push(' '),
             c => out.push(c),
         }
     }
@@ -524,7 +529,10 @@ mod tests {
         assert_eq!(yaml_scalar("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(yaml_scalar("a\\b"), "\"a\\\\b\"");
         assert_eq!(yaml_scalar("a\nb"), "\"a b\"");
-        // A control character has no place in a title line.
-        assert_eq!(yaml_scalar("a\u{7}b"), "\"ab\"");
+        // A double-quoted scalar cannot carry a raw control character, so it
+        // folds to a space for the same reason a newline does -- folding
+        // rather than dropping is what keeps two words from fusing.
+        assert_eq!(yaml_scalar("a\u{7}b"), "\"a b\"");
+        assert_eq!(yaml_scalar("cat\tnap"), "\"cat nap\"");
     }
 }
