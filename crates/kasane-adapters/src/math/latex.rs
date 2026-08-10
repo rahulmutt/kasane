@@ -133,9 +133,12 @@ fn script(
 /// inline span, so they collapse to a space.
 ///
 /// Scoped deliberately: this is *not* general LaTeX escaping. `kasane-writer`
-/// escapes nothing anywhere (`Inline::Text` is pushed raw), so a repo-wide
-/// escaping policy is separate work; only the structural subset that corrupts
-/// generated delimiters is handled here.
+/// has a repo-wide escaping policy (`escape.rs`) for flow text, cells, code
+/// spans, HTML and YAML, but `Inline::Math` is deliberately exempt from it —
+/// the writer pushes math content verbatim between the `$…$`/`$$…$$`
+/// delimiters it opens, so nothing on that side neutralizes these characters.
+/// This function is the other half of that decision: only the structural
+/// subset that corrupts the delimiters the writer generates is handled here.
 fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

@@ -2855,9 +2855,13 @@ that fold a newline and the merged-table path's HTML. AGENTS.md records the
 mechanism: Ctx is required rather than defaulted, Inline::Text is the only arm
 that escapes, and the two destination encoders differ on '%' alone.
 
-Paths and anchors verified byte-identical against main over
-tests/fixtures/epub: both the file list and every '](...#...)' destination
-diff clean, which is the check design spec section 6.6 asks for."
+Checked against a read-only main worktree (design spec section 6.6, per the
+task's override of this step's original stash-and-checkout procedure, which
+mutated the working tree and predated the kasane-core anchor fix): paths are
+byte-identical over tests/fixtures/epub/rich.epub and minimal.epub, no
+exceptions. Anchors are also byte-identical for both fixtures -- neither
+carries a heading whose inline text contains a newline, the one shape section
+5's amended invariant allows to differ."
 ```
 
 ---

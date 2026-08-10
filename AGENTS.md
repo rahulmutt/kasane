@@ -55,7 +55,18 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   not**, because `nav::walk` sets a file's title from unnormalized
   `inline_text` and `file_to_markdown` writes it verbatim as the heading line,
   so an NFC fragment against an NFD heading is a link kasane breaks against
-  its own output. Being a mirror, the anchor rule carries drift risk against
+  its own output. They diverge one further way, added alongside
+  `kasane-writer`'s escaping policy: `anchor_slug` now folds every newline
+  spelling in the heading's inline text to a single space before slugging —
+  `\r\n` to one separator, a lone `\n` or `\r` each to one, tabs left alone,
+  no run collapsing — mirroring `kasane-writer::escape::one_line` exactly,
+  because GitHub computes an id from the *rendered* heading line, where the
+  writer has already applied that fold. `path_slug` does not fold newlines and
+  is unchanged. The two folds live in different crates with no shared
+  function between them (`kasane-core` cannot depend on `kasane-writer`), so
+  they must be kept in step by hand — a future change to one fold that is not
+  mirrored in the other reopens exactly the anchor mismatch this pairing
+  closed. Being a mirror, the anchor rule carries drift risk against
   github.com, and the case table in `slug.rs`'s tests is where that mirror is
   written down, divergences included — but that table pins kasane's *reading*
   of the algorithm, not the algorithm, so it cannot catch a misreading. The
@@ -85,6 +96,50 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   real file *and a real anchor*, which only rendered text can answer.
   `file_to_markdown` is what both the property suite and `write_tree_contents`
   render through, so what CI asserts is what a conversion writes.
+  `escape.rs` is the only path from document text to an output buffer, and
+  `Ctx` is a *required* argument on `inlines_to_md` rather than a defaulted
+  one — that is the mechanism, not a convention: a new `Inline` arm or a new
+  caller cannot inherit flow rules into a table cell by omission, because it
+  does not compile until it names a context. `Inline::Text` is the only arm
+  that calls `escape::text`; every other arm emits markup the writer chose,
+  which must not be escaped. The governing invariant is that escaping never
+  changes what the Markdown *renders* to, because `anchor_slug` computes
+  fragments from unescaped IR text while GitHub computes ids from rendered
+  text — which is also why `library.rs`'s former `link_text` (it replaced `[`
+  with `(`) could not become the shared rule. Two destination encoders exist
+  and differ on exactly one character: `dest_path` encodes `%` because a
+  literal `%` in a filename would read back as an escape, and `dest_url` must
+  not, because an `href` from a source document is already percent-encoded.
+  The merged-table path emits HTML tags rather than Markdown markup, since GFM
+  parses nothing inside an HTML block. `fuzz_entry.rs` is the `escape` fuzz
+  seam, asserting postconditions (P7 in `tests/properties.rs` owns the round
+  trip, because it can take `pulldown-cmark` as a dev-dependency and the
+  library cannot).
+  `Block::Raw` is the one documented exception to that invariant, not another
+  case where the rendered text happens not to matter: an HTML comment admits
+  no escape mechanism at all, unlike flow text, cells, code spans, HTML and
+  YAML, each of which has one, so `comment_note` can only transform a note —
+  breaking up a `--` run — rather than escape it. That is safe rather than a
+  bug for two reasons together: there is no way to represent `-->` literally
+  inside `<!-- -->` at all, and a comment's content is never rendered, so no
+  reader ever sees the difference the transformation makes. It is load-bearing
+  rather than precautionary because untrusted text really does reach it —
+  `epub/xhtml.rs` and `epub/mod.rs` both build a note via
+  `format!("image unavailable: {src}")` from an `<img src>` attribute the
+  source document supplied.
+  Math is the one inline the writer escapes nothing inside: `Inline::Math`
+  and `Block::MathBlock` are both pushed verbatim — the inline form between
+  `$…$`, the block form between `$$…$$` — on the strength of a contract that
+  lives in a different crate and is otherwise invisible from here.
+  `kasane-adapters`'s `math::latex::sanitize` (`math/latex.rs`) neutralizes
+  `$`, `{`, `}`, a backslash, and newlines in `<mn>`/`<mtext>` content,
+  specifically because those are the characters that
+  would corrupt the delimiters this writer generates — a stray `$` closes the
+  span early, an unbalanced `{`/`}` breaks a `\text{}` group it opened.
+  Changing the writer's math delimiter, or the adapter's neutralized set,
+  changes half of a cross-crate contract without seeing the other half; this
+  note and `latex.rs`'s own doc comment are the only two places it is written
+  down.
 - `crates/kasane-cli`     `kasane` binary; wires the pipeline; owns exit codes.
   `convert.rs` converts one document (`WorkItem` -> `Converted`) and returns a
   `Result` rather than exiting, which is what makes per-file failure isolation
