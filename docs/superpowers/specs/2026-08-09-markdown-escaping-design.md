@@ -124,15 +124,16 @@ pub(crate) fn dest_path(s: &str) -> String;
 pub(crate) fn dest_url(s: &str) -> String;
 pub(crate) fn label(s: &str) -> String;
 pub(crate) fn one_line(s: &str) -> String;
-pub(crate) fn math_span(s: &str) -> String;
+pub(crate) fn math_span(s: &str, ctx: Ctx) -> String;
 pub(crate) fn math_block(s: &str) -> String;
 pub(crate) fn yaml_scalar(s: &str) -> String;
 ```
 
-`code_span` takes a `Ctx` for one reason and only one: GFM's table grammar
-splits a row on `|` *before* any inline is parsed, so a pipe inside a code span
-still ends the cell, and GFM's own answer is a backslash it strips back out
-(`` `b \| az` `` renders `b | az`). Nothing else about a code span is
+`code_span` and `math_span` take a `Ctx` for one reason and only one: GFM's
+table grammar splits a row on `|` *before* any inline is parsed, so a pipe
+inside a code span or a math span still ends the cell, and GFM's own answer is
+a backslash it strips back out (`` `b \| az` `` renders `b | az`; `$\|x\|$`
+recovers `InlineMath("|x|")`). Nothing else about either is
 context-dependent.
 
 `math_span` and `math_block` are the writer's half of the math contract (§3.7)
@@ -337,6 +338,22 @@ fenced block instead. The LaTeX is still there for a reader, verbatim, and it
 cannot break out of a code fence by construction. Adapter-produced math never
 reaches that branch, which is exactly the shape of `render_block`'s depth guard.
 
+`math_block`'s blank-line test runs against the **wrapped** string rather than
+the content, because the wrapper supplies newlines of its own: content that
+merely starts or ends with a single newline completes a blank line together
+with them, and `"a\n"` produced `"$$\na\n\n$$\n"`, which a real parser reads as
+two paragraphs of literal `$` with the closing fence stranded.
+
+`math_span` takes a `Ctx`, and that half is **not** hand-built-IR defence:
+`pptx/slide.rs` pushes `Inline::Math` straight into a table cell, and `|`
+survives the adapter's `map_text` untouched (it is `ascii_graphic` and outside
+the symbol table). A PPTX cell holding `|x|` emitted `$|x|$`, which GFM splits
+into `$` and `x` and then drops the row's real last cell — content loss, or a
+destroyed table when the row is the header. Both branches escape it: the
+verbatim one because the span itself sits in the cell, the degrade one by
+passing `ctx` into `code_span`. The backslash is consumed by the table grammar
+before the math renderer sees it, so `$\|x\|$` recovers `InlineMath("|x|")`.
+
 ## 4. What escaping alone cannot fix
 
 ### 4.1 Newlines
@@ -432,12 +449,27 @@ unchanged (§5), the emphasis now applies, and the first character on the line
 is a space rather than a bullet marker. Inner content that is entirely
 whitespace gets no delimiters at all.
 
-A sibling case is **not** fixed and is recorded here rather than in a ledger:
+Two sibling cases are **not** fixed and are recorded here rather than in a
+ledger.
+
 `Block::Para([FootnoteRef(1), Text(": note")])` renders `[^1]: note` at column
 0, which parses as a footnote *definition*. It needs a different mechanism —
 the `:` belongs to the *next* inline, so escaping it requires cross-inline
 state plus a new rule for a character no context escapes today — and putting
 that decision in `markdown.rs` would break §2's "`escape.rs` owns every rule".
+
+**Leading whitespace at column 0 is a known, unhandled class.** Moving
+emphasis whitespace outside the delimiters can now put four or more spaces at
+column 0, so `Para([Emph([Text("    x")])])` becomes an indented code block
+where it previously became a bullet list — lateral, not a regression, and one
+instance of a gap that predates this policy: `escape::text` clears
+`line_start` on any leading space (`escape.rs`'s main loop), so
+`Text("  # h")` at column 0 already emits an unescaped ATX heading. Closing
+the class means `at_line_start` surviving leading whitespace, which changes
+the line-start rules for every context at once and is not a pre-merge change.
+
+Neither of these has property-tier coverage, and neither does the emphasis fix
+itself — see §6.4 for why the generator cannot reach it.
 
 ## 5. The invariant that ties this to the slug rules
 
@@ -539,10 +571,21 @@ The structural half is **P8**, a separate property, and it checks: one footnote
 definition per `Block::Footnote`; the full sequence of heading levels in render
 order, the file's own title heading first at its breadcrumb depth and each
 `Block::Heading` after it at the level `render_block` clamps to; and, per
-non-merged GFM table, both the row count and the **cell** count. The cell count
-is what a row count alone cannot see — an unescaped `|` splits one cell into
-two without changing the number of rows, which is exactly how the missing pipe
-escape inside `escape::code_span` presented.
+non-merged GFM table, the row count and a cell count.
+
+The **row** count is the one that catches an unescaped `|`, and it catches it
+through the *header*: an extra pipe there changes the header's column count,
+the delimiter row stops matching it, and GFM stops recognizing the table
+entirely — 0 rows parsed against the IR's N. Both pipe defects this branch
+found (`escape::code_span`, then `escape::math_span`) presented that way.
+
+The **cell** count cannot fail independently and is kept as documentation of
+the intended grid rather than as a check. `pulldown-cmark` pads a short row and
+drops a long one against the header's column count (`firstpass.rs`), so a
+recognized table always reports exactly `header.len() * (1 + rows.len())` —
+`want_cells` by construction — and an unrecognized one reports 0 for rows and
+cells alike, where the row assertion fires first. An earlier revision of this
+section claimed it saw what a row count could not; it does not.
 
 List nesting depth is deliberately **not** checked. Unlike a row or a heading it
 has no event asserting "this is the same list the IR built": `balance` may have
@@ -600,6 +643,24 @@ in a table cell, and P2 on `code_span` folding a newline run differently from
 Titles carry the most weight and are drawn from it most often, because one
 title reaches the heading line, the frontmatter scalar, the anchor, the path
 component, and the library entry — five contexts from one string.
+
+`Inline::Math` is drawn in `generator::inlines()` too, and is adapter-realistic
+rather than defensive: `pptx/slide.rs` pushes it into a table cell and into a
+paragraph. It is the only route by which the tier reaches `escape::math_span`,
+whose `Ctx::Cell` pipe rule a real PPTX equation needs — reverting that rule
+fails P8 immediately.
+
+**What the tier still cannot reach.** §4.5's emphasis fix has no property
+coverage and is pinned by its unit test alone. `build()` appends the generated
+decoration inlines *after* the sentinel text, deliberately, so that the
+payload always renders as a bare run and P1's occurrence count stays exact —
+which also means an `Emph`/`Strong` can never be the first thing on a line,
+and P7 checks only payload occurrences, never decoration content. Adding
+whitespace-flanked fragments to `HOSTILE` does not help: measured, with
+`emphasize` reverted to the pre-fix `format!("*{inner}*")` and `" lead"` /
+`"trail "` added, the tier stays green over 2048 cases. Reaching it would mean
+changing where decoration sits relative to the payload, which trades a real
+invariant for a hypothetical one.
 
 `Block::MathBlock` draws the raw hostile fragment like every other shape. An
 earlier revision pre-neutralized `$` for that one shape, modelling
