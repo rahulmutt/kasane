@@ -30,11 +30,11 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 out.push('#');
             }
             out.push(' ');
-            out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow)));
+            out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow, false)));
             out.push('\n');
         }
         Block::Para(inls) => {
-            out.push_str(&inlines_to_md(inls, Ctx::Flow));
+            out.push_str(&inlines_to_md(inls, Ctx::Flow, true));
             out.push('\n');
         }
         Block::List { ordered, items } => {
@@ -67,14 +67,14 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .unwrap_or("missing");
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
-                inlines_to_md(caption, Ctx::Flow),
+                inlines_to_md(caption, Ctx::Flow, false),
                 fname
             ));
             if let Some(n) = number {
                 out.push_str(&format!(
                     "*Figure {}: {}*\n",
                     n,
-                    inlines_to_md(caption, Ctx::Flow)
+                    inlines_to_md(caption, Ctx::Flow, false)
                 ));
             }
         }
@@ -98,7 +98,7 @@ fn render_table(t: &Table, out: &mut String) {
     if t.has_merged {
         out.push_str("<table>\n");
         // header + rows as HTML (merged cells not modeled per-cell here; emit flat)
-        let esc = |c: &Vec<Inline>| inlines_to_md(c, Ctx::Flow);
+        let esc = |c: &Vec<Inline>| inlines_to_md(c, Ctx::Flow, false);
         out.push_str("<tr>");
         for c in &t.header {
             out.push_str(&format!("<th>{}</th>", esc(c)));
@@ -115,7 +115,10 @@ fn render_table(t: &Table, out: &mut String) {
         return;
     }
     let cells = |row: &Vec<Vec<Inline>>| {
-        let joined: Vec<String> = row.iter().map(|c| inlines_to_md(c, Ctx::Flow)).collect();
+        let joined: Vec<String> = row
+            .iter()
+            .map(|c| inlines_to_md(c, Ctx::Flow, false))
+            .collect();
         format!("| {} |", joined.join(" | "))
     };
     out.push_str(&cells(&t.header));
@@ -128,24 +131,37 @@ fn render_table(t: &Table, out: &mut String) {
     }
 }
 
-pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx) -> String {
-    inlines_to_md_at(inls, 0, ctx)
+pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, at_line_start: bool) -> String {
+    inlines_to_md_at(inls, 0, ctx, at_line_start)
 }
 
-fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx) -> String {
+/// `at_line_start` is threaded, not inferred: `true` iff the next character
+/// emitted lands at the start of a line (design spec §2). It starts as
+/// whatever the caller passed and is then recomputed after every arm from
+/// whether the accumulated output ends with `\n` -- that single rule covers
+/// both a run that opens on a fresh line and one that re-arms after an
+/// interior newline (`[Text("a\n"), Text("- b")]`), with no per-arm special
+/// case, because none of the writer's own markup (`*`, `**`, backticks,
+/// `[`, `$`, `[^1]`) ever ends in a newline.
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
     }
     let mut s = String::new();
+    let mut line_start = at_line_start;
     for i in inls {
         match i {
             // The only call to `escape::text` in the crate. Every other arm
             // below emits markup the writer chose, which must not be escaped.
-            Inline::Text(t) => s.push_str(&escape::text(t, ctx, false)),
-            Inline::Emph(x) => s.push_str(&format!("*{}*", inlines_to_md_at(x, depth + 1, ctx))),
-            Inline::Strong(x) => {
-                s.push_str(&format!("**{}**", inlines_to_md_at(x, depth + 1, ctx)))
-            }
+            Inline::Text(t) => s.push_str(&escape::text(t, ctx, line_start)),
+            Inline::Emph(x) => s.push_str(&format!(
+                "*{}*",
+                inlines_to_md_at(x, depth + 1, ctx, line_start)
+            )),
+            Inline::Strong(x) => s.push_str(&format!(
+                "**{}**",
+                inlines_to_md_at(x, depth + 1, ctx, line_start)
+            )),
             Inline::Code(t) => s.push_str(&escape::code_span(t)),
             Inline::Math(t) => s.push_str(&format!("${}$", t)),
             Inline::Link {
@@ -153,12 +169,16 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx) -> String {
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx)),
+                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx, line_start)),
                 escape::dest_url(u)
             )),
-            Inline::Link { inlines, .. } => s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx)),
+            // unresolved -> text
+            Inline::Link { inlines, .. } => {
+                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, line_start))
+            }
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
+        line_start = s.ends_with('\n');
     }
     s
 }
@@ -440,5 +460,37 @@ mod tests {
         ])];
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("$x^2$ costs 5\\$"), "got: {md}");
+    }
+
+    #[test]
+    fn a_paragraph_beginning_with_a_line_start_character_is_escaped() {
+        // A paragraph renders at column 0, so a leading LINE_START character
+        // would otherwise open a different block (a bullet, a heading, a
+        // blockquote, ...) instead of staying prose text.
+        for c in ['#', '-', '+', '>', '=', '|'] {
+            let blocks = vec![Block::Para(vec![Inline::Text(format!("{c} text"))])];
+            let md = blocks_to_markdown(&blocks, &AssetBag::default());
+            assert!(md.contains(&format!("\\{c} text")), "char {c:?}, got: {md}");
+        }
+    }
+
+    #[test]
+    fn a_paragraph_beginning_with_an_ordered_marker_is_escaped() {
+        let blocks = vec![Block::Para(vec![Inline::Text("1. one".into())])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("1\\. one"), "got: {md}");
+    }
+
+    #[test]
+    fn a_text_run_re_arms_line_start_after_an_interior_newline() {
+        // The first `Inline::Text` ends in a newline, so the second run --
+        // even though it is not the first inline in the paragraph -- really
+        // does begin a line and must be escaped.
+        let blocks = vec![Block::Para(vec![
+            Inline::Text("a\n".into()),
+            Inline::Text("- b".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("a\n\\- b"), "got: {md}");
     }
 }

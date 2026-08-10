@@ -983,7 +983,7 @@ rule instead of five."
 
 **Interfaces:**
 - Consumes: `escape::{Ctx, text, code_span, dest_url, label, one_line}`.
-- Produces: `pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx) -> String` — **signature change**; every caller must name a context. Task 8 adds `inlines_to_html`.
+- Produces: `pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, at_line_start: bool) -> String` — **signature change**; every caller must name both a context and a line position. Task 8 adds `inlines_to_html`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1042,6 +1042,38 @@ Append to `markdown.rs`'s `mod tests`:
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("$x^2$ costs 5\\$"), "got: {md}");
     }
+
+    #[test]
+    fn a_paragraph_beginning_with_a_line_start_character_is_escaped() {
+        // A paragraph renders at column 0, so a leading LINE_START character
+        // would otherwise open a different block (a bullet, a heading, a
+        // blockquote, ...) instead of staying prose text.
+        for c in ['#', '-', '+', '>', '=', '|'] {
+            let blocks = vec![Block::Para(vec![Inline::Text(format!("{c} text"))])];
+            let md = blocks_to_markdown(&blocks, &AssetBag::default());
+            assert!(md.contains(&format!("\\{c} text")), "char {c:?}, got: {md}");
+        }
+    }
+
+    #[test]
+    fn a_paragraph_beginning_with_an_ordered_marker_is_escaped() {
+        let blocks = vec![Block::Para(vec![Inline::Text("1. one".into())])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("1\\. one"), "got: {md}");
+    }
+
+    #[test]
+    fn a_text_run_re_arms_line_start_after_an_interior_newline() {
+        // The first `Inline::Text` ends in a newline, so the second run --
+        // even though it is not the first inline in the paragraph -- really
+        // does begin a line and must be escaped.
+        let blocks = vec![Block::Para(vec![
+            Inline::Text("a\n".into()),
+            Inline::Text("- b".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("a\n\\- b"), "got: {md}");
+    }
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1050,33 +1082,44 @@ Append to `markdown.rs`'s `mod tests`:
 cargo test -p kasane-writer markdown 2>&1 | tail -30
 ```
 
-Expected: FAIL — all five assertions, since nothing is escaped yet.
+Expected: FAIL — the five original assertions, since nothing is escaped yet. The three line-start tests also fail: `inlines_to_md`'s `Text` arm hardcodes `at_line_start: false`, so a paragraph opening with `-`, `#`, or an ordered marker goes out unescaped and GFM re-parses it as a different block. That is the bug this task's `at_line_start` threading exists to close — see Step 3.
 
 - [ ] **Step 3: Write the implementation**
 
 In `markdown.rs`, replace `inlines_to_md` / `inlines_to_md_at` (lines 126-155) with:
 
 ```rust
-pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx) -> String {
-    inlines_to_md_at(inls, 0, ctx)
+pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, at_line_start: bool) -> String {
+    inlines_to_md_at(inls, 0, ctx, at_line_start)
 }
 
-fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx) -> String {
+/// `at_line_start` is threaded, not inferred: `true` iff the next character
+/// emitted lands at the start of a line (design spec §2). It starts as
+/// whatever the caller passed and is then recomputed after every arm from
+/// whether the accumulated output ends with `\n` -- that single rule covers
+/// both a run that opens on a fresh line and one that re-arms after an
+/// interior newline (`[Text("a\n"), Text("- b")]`), with no per-arm special
+/// case, because none of the writer's own markup (`*`, `**`, backticks,
+/// `[`, `$`, `[^1]`) ever ends in a newline.
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
     }
     let mut s = String::new();
+    let mut line_start = at_line_start;
     for i in inls {
         match i {
             // The only call to `escape::text` in the crate. Every other arm
             // below emits markup the writer chose, which must not be escaped.
-            Inline::Text(t) => s.push_str(&escape::text(t, ctx, false)),
-            Inline::Emph(x) => {
-                s.push_str(&format!("*{}*", inlines_to_md_at(x, depth + 1, ctx)))
-            }
-            Inline::Strong(x) => {
-                s.push_str(&format!("**{}**", inlines_to_md_at(x, depth + 1, ctx)))
-            }
+            Inline::Text(t) => s.push_str(&escape::text(t, ctx, line_start)),
+            Inline::Emph(x) => s.push_str(&format!(
+                "*{}*",
+                inlines_to_md_at(x, depth + 1, ctx, line_start)
+            )),
+            Inline::Strong(x) => s.push_str(&format!(
+                "**{}**",
+                inlines_to_md_at(x, depth + 1, ctx, line_start)
+            )),
             Inline::Code(t) => s.push_str(&escape::code_span(t)),
             Inline::Math(t) => s.push_str(&format!("${}$", t)),
             Inline::Link {
@@ -1084,18 +1127,22 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx) -> String {
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx)),
+                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx, line_start)),
                 escape::dest_url(u)
             )),
+            // unresolved -> text
             Inline::Link { inlines, .. } => {
-                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx))
+                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, line_start))
             }
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
+        line_start = s.ends_with('\n');
     }
     s
 }
 ```
+
+Recursion into `Emph`, `Strong` and the `Link` arms passes the current `line_start` down unchanged, because their content is emitted at whatever position the parent had reached. The writer's own opening delimiters (`*`, `**`, `` ` ``) cannot themselves open a block construct at line start — a CommonMark bullet marker requires a following space — so passing the flag through this way is safe rather than over-escaping: at worst it adds a harmless backslash the render did not strictly need.
 
 Add to the top of `markdown.rs`:
 
@@ -1103,14 +1150,14 @@ Add to the top of `markdown.rs`:
 use crate::escape::{self, Ctx};
 ```
 
-Update the block-level call sites in `render_block` to name their context — all of them `Ctx::Flow` for now (tables become `Ctx::Cell`/`Ctx::Html` in Task 8):
+Update the block-level call sites in `render_block` to name both their context and their line position — tables become `Ctx::Cell`/`Ctx::Html` in Task 8, and Task 8's cell sites also start passing `true` for a cell's first character (design spec §3.2); until then everything below is `Ctx::Flow`:
 
-- line 32, heading: `out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow)));`
-- line 36, para: `out.push_str(&inlines_to_md(inls, Ctx::Flow));`
-- lines 69 and 73, figure captions: `inlines_to_md(caption, Ctx::Flow)`
-- lines 96, 113, table cells: `inlines_to_md(c, Ctx::Flow)` (Task 8 replaces these)
+- line 32, heading: `out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow, false)));` — `false`, because after `## ` the line has already started and a `-` there cannot open a list.
+- line 36, para: `out.push_str(&inlines_to_md(inls, Ctx::Flow, true));` — `true`. This is the line-start fix: `blocks_to_markdown_at` renders a paragraph at column 0, and a list item or footnote body renders its inner blocks into a separate buffer at column 0 too (the marker is prefixed afterward), so a leading `-`, `#`, `>`, `+`, `=`, `|`, or ordered marker really would open a different block if left unescaped.
+- lines 69 and 73, figure captions: `inlines_to_md(caption, Ctx::Flow, false)` — `false`; both sit after markup (`![` / `*Figure N: `) the writer already emitted on that line.
+- lines 96, 113, table cells: `inlines_to_md(c, Ctx::Flow, false)` (Task 8 replaces these call sites entirely, and passes `true` there instead — see Task 8's Step 3)
 
-Two notes on the heading arm. `escape::one_line` is applied to the *rendered* string rather than to the inline text, which can leave a `\#` mid-title where the `#` followed an interior newline — harmless, since `\#` renders as `#`, and cheaper than a fold pass over `Vec<Inline>`. And the inlines are escaped with `at_line_start: false`, because after `## ` the line has already started and a `-` there cannot open a list.
+One note on the heading arm carries over unchanged: `escape::one_line` is applied to the *rendered* string rather than to the inline text, which can leave a `\#` mid-title where the `#` followed an interior newline — harmless, since `\#` renders as `#`, and cheaper than a fold pass over `Vec<Inline>`.
 
 Finally, remove `#![allow(dead_code)]` from `escape.rs` — the callers exist now. `dest_path`, `label` and `yaml_scalar` are still unused at this point; if clippy flags them, add `#[allow(dead_code)]` on those three items only, with a comment naming the task that consumes each (`dest_path`/`label` → Task 11, already used by `yaml_scalar` → Task 5 consumed it), and delete those attributes in Task 11.
 
@@ -1120,7 +1167,7 @@ Finally, remove `#![allow(dead_code)]` from `escape.rs` — the callers exist no
 cargo test -p kasane-writer markdown 2>&1 | tail -30
 ```
 
-Expected: PASS for the five new tests. The pre-existing `renders_headings_emphasis_and_links` still passes (its text has nothing to escape).
+Expected: PASS for the eight new tests (the five from Step 1 plus the three line-start tests). The pre-existing `renders_headings_emphasis_and_links` still passes (its text has nothing to escape).
 
 - [ ] **Step 5: Run the whole workspace**
 
@@ -1287,7 +1334,7 @@ In `markdown.rs`, replace the `Block::Figure`, `Block::CodeBlock` and `Block::Ra
                 .find(|a| a.key == image.key)
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
-            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow));
+            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow, false));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
                 alt,
@@ -1436,7 +1483,10 @@ fn render_table(t: &Table, out: &mut String) {
         return;
     }
     let cells = |row: &Vec<Vec<Inline>>| {
-        let joined: Vec<String> = row.iter().map(|c| inlines_to_md(c, Ctx::Cell)).collect();
+        let joined: Vec<String> = row
+            .iter()
+            .map(|c| inlines_to_md(c, Ctx::Cell, true))
+            .collect();
         format!("| {} |", joined.join(" | "))
     };
     out.push_str(&cells(&t.header));
@@ -2742,4 +2792,4 @@ diff clean, which is the check design spec section 6.6 asks for."
 
 **One assertion is flagged as needing verification rather than stated as fact:** `assert_no_unescaped` applied to `\` in Task 14. A lone backslash escapes to `\\`, an even-length run, which the odd-length rule reads differently from the other eight characters. The task says so, gives the narrower assertion to fall back to, and forbids weakening the other eight. Everything else in the plan is stated because it was checked: `pulldown-cmark` 0.13.4's event and tag names, `\*`/`\|` round-tripping, `<br>` arriving as `InlineHtml`, footnote continuation parsing, and fence widening were all run against the real crate before this plan was written.
 
-**Type consistency.** `Ctx` is `{ Flow, Cell, Html }` throughout. `escape::text(&str, Ctx, bool) -> String`, `code_span(&str) -> String` (delimiters included), `fenced_block(&str, Option<&str>) -> String` (trailing newline included), `dest_path`/`dest_url`/`label`/`one_line`/`yaml_scalar`/`comment_note`: `&str -> String`. `inlines_to_md(&[Inline], Ctx) -> String` after Task 6; `inlines_to_html(&[Inline], usize) -> String` from Task 8. `indent_continuation(&str, &str) -> String` is introduced in Task 9 and consumed in Task 10. `Sentinel` gains `payload` in Task 12 and is read by P7 in Task 13. `parse_events(&str) -> Parsed` is defined once in Task 13 and used by `links_in`, `heading_anchors`, P7 and P8.
+**Type consistency.** `Ctx` is `{ Flow, Cell, Html }` throughout. `escape::text(&str, Ctx, bool) -> String`, `code_span(&str) -> String` (delimiters included), `fenced_block(&str, Option<&str>) -> String` (trailing newline included), `dest_path`/`dest_url`/`label`/`one_line`/`yaml_scalar`/`comment_note`: `&str -> String`. `inlines_to_md(&[Inline], Ctx, bool) -> String` after Task 6, the third argument being `at_line_start`; `inlines_to_html(&[Inline], usize) -> String` from Task 8. `indent_continuation(&str, &str) -> String` is introduced in Task 9 and consumed in Task 10. `Sentinel` gains `payload` in Task 12 and is read by P7 in Task 13. `parse_events(&str) -> Parsed` is defined once in Task 13 and used by `links_in`, `heading_anchors`, P7 and P8.
