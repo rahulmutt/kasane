@@ -1,3 +1,4 @@
+use crate::escape::{self, Ctx};
 use kasane_ir::{AssetBag, Block, Inline, RefTarget, Table};
 
 pub fn blocks_to_markdown(blocks: &[Block], assets: &AssetBag) -> String {
@@ -29,11 +30,11 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 out.push('#');
             }
             out.push(' ');
-            out.push_str(&inlines_to_md(inlines));
+            out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow)));
             out.push('\n');
         }
         Block::Para(inls) => {
-            out.push_str(&inlines_to_md(inls));
+            out.push_str(&inlines_to_md(inls, Ctx::Flow));
             out.push('\n');
         }
         Block::List { ordered, items } => {
@@ -66,11 +67,15 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .unwrap_or("missing");
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
-                inlines_to_md(caption),
+                inlines_to_md(caption, Ctx::Flow),
                 fname
             ));
             if let Some(n) = number {
-                out.push_str(&format!("*Figure {}: {}*\n", n, inlines_to_md(caption)));
+                out.push_str(&format!(
+                    "*Figure {}: {}*\n",
+                    n,
+                    inlines_to_md(caption, Ctx::Flow)
+                ));
             }
         }
         Block::CodeBlock { lang, text } => {
@@ -93,7 +98,7 @@ fn render_table(t: &Table, out: &mut String) {
     if t.has_merged {
         out.push_str("<table>\n");
         // header + rows as HTML (merged cells not modeled per-cell here; emit flat)
-        let esc = |c: &Vec<Inline>| inlines_to_md(c);
+        let esc = |c: &Vec<Inline>| inlines_to_md(c, Ctx::Flow);
         out.push_str("<tr>");
         for c in &t.header {
             out.push_str(&format!("<th>{}</th>", esc(c)));
@@ -110,7 +115,7 @@ fn render_table(t: &Table, out: &mut String) {
         return;
     }
     let cells = |row: &Vec<Vec<Inline>>| {
-        let joined: Vec<String> = row.iter().map(|c| inlines_to_md(c)).collect();
+        let joined: Vec<String> = row.iter().map(|c| inlines_to_md(c, Ctx::Flow)).collect();
         format!("| {} |", joined.join(" | "))
     };
     out.push_str(&cells(&t.header));
@@ -123,31 +128,35 @@ fn render_table(t: &Table, out: &mut String) {
     }
 }
 
-pub(crate) fn inlines_to_md(inls: &[Inline]) -> String {
-    inlines_to_md_at(inls, 0)
+pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx) -> String {
+    inlines_to_md_at(inls, 0, ctx)
 }
 
-fn inlines_to_md_at(inls: &[Inline], depth: usize) -> String {
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
     }
     let mut s = String::new();
     for i in inls {
         match i {
-            Inline::Text(t) => s.push_str(t),
-            Inline::Emph(x) => s.push_str(&format!("*{}*", inlines_to_md_at(x, depth + 1))),
-            Inline::Strong(x) => s.push_str(&format!("**{}**", inlines_to_md_at(x, depth + 1))),
-            Inline::Code(t) => s.push_str(&format!("`{}`", t)),
+            // The only call to `escape::text` in the crate. Every other arm
+            // below emits markup the writer chose, which must not be escaped.
+            Inline::Text(t) => s.push_str(&escape::text(t, ctx, false)),
+            Inline::Emph(x) => s.push_str(&format!("*{}*", inlines_to_md_at(x, depth + 1, ctx))),
+            Inline::Strong(x) => {
+                s.push_str(&format!("**{}**", inlines_to_md_at(x, depth + 1, ctx)))
+            }
+            Inline::Code(t) => s.push_str(&escape::code_span(t)),
             Inline::Math(t) => s.push_str(&format!("${}$", t)),
             Inline::Link {
                 target: RefTarget::External(u),
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                inlines_to_md_at(inlines, depth + 1),
-                u
+                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx)),
+                escape::dest_url(u)
             )),
-            Inline::Link { inlines, .. } => s.push_str(&inlines_to_md_at(inlines, depth + 1)), // unresolved -> text
+            Inline::Link { inlines, .. } => s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx)),
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
     }
@@ -378,5 +387,58 @@ mod tests {
             !md.contains("nesting truncated"),
             "the guard must not fire this shallow: {md}"
         );
+    }
+
+    #[test]
+    fn text_runs_are_escaped_but_markup_is_not() {
+        let blocks = vec![Block::Para(vec![
+            Inline::Text("a*b".into()),
+            Inline::Strong(vec![Inline::Text("c[d".into())]),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        // The writer's own `**` survives; the document's `*` and `[` do not.
+        assert!(md.contains("a\\*b**c\\[d**"), "got: {md}");
+    }
+
+    #[test]
+    fn a_code_span_containing_a_backtick_does_not_break_out() {
+        let blocks = vec![Block::Para(vec![Inline::Code("a ` b".into())])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("`` a ` b ``"), "got: {md}");
+    }
+
+    #[test]
+    fn an_external_destination_is_encoded_and_its_label_escaped() {
+        let blocks = vec![Block::Para(vec![Inline::Link {
+            target: RefTarget::External("https://e.com/a b(1)".into()),
+            inlines: vec![Inline::Text("see [this]".into())],
+        }])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(
+            md.contains("[see \\[this\\]](https://e.com/a%20b%281%29)"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn a_heading_stays_on_one_line() {
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: vec![Inline::Text("Title\nspilled".into())],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("## Title spilled\n"), "got: {md}");
+        assert_eq!(md.lines().filter(|l| l.starts_with("##")).count(), 1);
+    }
+
+    #[test]
+    fn math_is_emitted_verbatim_but_a_dollar_in_prose_is_not() {
+        let blocks = vec![Block::Para(vec![
+            Inline::Math("x^2".into()),
+            Inline::Text(" costs 5$".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("$x^2$ costs 5\\$"), "got: {md}");
     }
 }

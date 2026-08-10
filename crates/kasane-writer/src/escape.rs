@@ -5,7 +5,6 @@
 //! mechanism: a backslash escapes in flow text, is a literal character inside
 //! a code span, is inert inside an HTML block, and means something else again
 //! inside a YAML double-quoted scalar.
-#![allow(dead_code)] // callers arrive in Task 6; removed there
 
 /// Where a text run lands. The rules differ per context, so the renderers
 /// must state which one they are in — `inlines_to_md` takes this as a
@@ -195,6 +194,7 @@ pub(crate) fn one_line(s: &str) -> String {
 /// `[` with `(`, which changes the rendered text — forbidden by §5, because
 /// anchors are computed from unescaped IR text and must still match what the
 /// heading renders to.
+#[allow(dead_code)] // consumed by Task 11
 pub(crate) fn label(s: &str) -> String {
     one_line(&text(s, Ctx::Flow, false))
 }
@@ -226,6 +226,7 @@ pub(crate) fn code_span(s: &str) -> String {
 }
 
 /// A whole fenced code block, trailing newline included (§3.4).
+#[allow(dead_code)] // consumed by Task 7
 pub(crate) fn fenced_block(text: &str, lang: Option<&str>) -> String {
     let ticks = "`".repeat(longest_backtick_run(text).max(2) + 1);
     let info = lang.map(sanitize_info).unwrap_or_default();
@@ -264,6 +265,7 @@ fn sanitize_info(lang: &str) -> String {
 /// would otherwise emit a destination parsing as path `C` with a fragment; the
 /// rest because they end or nest a bare destination. `/` stays literal — it is
 /// the path separator.
+#[allow(dead_code)] // consumed by Task 11
 pub(crate) fn dest_path(s: &str) -> String {
     encode(s, &['%', '#', '?', ' ', '(', ')', '<', '>', '\\', '"'])
 }
