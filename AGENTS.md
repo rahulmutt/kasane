@@ -58,10 +58,17 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   its own output. They diverge one further way, added alongside
   `kasane-writer`'s escaping policy: `anchor_slug` now folds every newline
   spelling in the heading's inline text to a single space before slugging —
-  `\r\n` to one separator, a lone `\n` or `\r` each to one, tabs left alone,
-  no run collapsing — mirroring `kasane-writer::escape::one_line` exactly,
+  any run of newline characters, in any spelling, to exactly one separator,
+  tabs left alone, literal spaces left uncollapsed — mirroring
+  `kasane-writer::escape::one_line` exactly,
   because GitHub computes an id from the *rendered* heading line, where the
-  writer has already applied that fold. `path_slug` does not fold newlines and
+  writer has already applied that fold. `escape::one_line` collapsing runs is
+  what lets the writer have ONE such fold: `Block::Heading` escapes then folds,
+  `file_to_markdown`'s title heading folds then escapes, and `escape::code_span`
+  folds unescaped content, so without the collapse the three disagreed on a
+  blank line (`## A B` against `# A  B`) and the emitted anchor was right for
+  one path and dead for the others.
+  `path_slug` does not fold newlines and
   is unchanged. The two folds live in different crates with no shared
   function between them (`kasane-core` cannot depend on `kasane-writer`), so
   they must be kept in step by hand — a future change to one fold that is not
@@ -130,16 +137,35 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   Math is the one inline the writer escapes nothing inside: `Inline::Math`
   and `Block::MathBlock` are both pushed verbatim — the inline form between
   `$…$`, the block form between `$$…$$` — on the strength of a contract that
-  lives in a different crate and is otherwise invisible from here.
-  `kasane-adapters`'s `math::latex::sanitize` (`math/latex.rs`) neutralizes
-  `$`, `{`, `}`, a backslash, and newlines in `<mn>`/`<mtext>` content,
-  specifically because those are the characters that
-  would corrupt the delimiters this writer generates — a stray `$` closes the
-  span early, an unbalanced `{`/`}` breaks a `\text{}` group it opened.
-  Changing the writer's math delimiter, or the adapter's neutralized set,
-  changes half of a cross-crate contract without seeing the other half; this
-  note and `latex.rs`'s own doc comment are the only two places it is written
-  down.
+  lives in a different crate and is otherwise invisible from here. There is no
+  escape to fall back on, which is why it is a contract rather than a rule:
+  `\$` would corrupt adapter output that already spells a literal dollar that
+  way, and neutralizing `\`/`{`/`}` would destroy the `\frac{1}{2}` an adapter
+  legitimately emits. So `escape::math_span`/`math_block` carry a self-check
+  instead of an escape: content that would close the delimiter (a `$`; any
+  newline inline, since inline math can land in a table cell; a blank line in
+  the block form) degrades to a code span or a fenced block, which cannot break
+  out by construction. Adapter output never reaches that branch — it exists for
+  a caller who builds `Inline::Math` by hand and calls `blocks_to_markdown`,
+  the same reader `render_block`'s depth guard is written for.
+  `kasane-adapters` neutralizes `$`, `{`, `}`, a backslash, and newlines in
+  **every** node kind that carries document text, specifically because those
+  are the characters that would corrupt the delimiters this writer generates —
+  a stray `$` closes the span early, an unbalanced `{`/`}` breaks a `\text{}`
+  group it opened. `math::latex::sanitize` (`math/latex.rs`) covers
+  `<mn>`/`<mtext>` (`Number`/`Text`) and, via `latex::fence`, the untrusted
+  `mfenced open=`/`<m:begChr>` delimiter attributes;
+  `math::symbols::map_text` (`math/symbols.rs`) applies the identical set,
+  character for character, to `<mi>`/`<mo>` and every OMML run
+  (`Ident`/`Op`) — which is all of PowerPoint's equation text and the majority
+  of MathML's, so a guarantee scoped to `<mn>`/`<mtext>` would leave the span
+  open on almost every real equation. That completeness is what lets
+  `omml::nary_op` hand `map_text` a raw operator character rather than a
+  ready-made `\sum`: with no emitter-chosen LaTeX on that path, a backslash in
+  it can be dropped. Changing the writer's math delimiter, or the adapter's
+  neutralized set, changes half of a cross-crate contract without seeing the
+  other half; this note and `latex.rs`'s own doc comment are the only two
+  places it is written down.
 - `crates/kasane-cli`     `kasane` binary; wires the pipeline; owns exit codes.
   `convert.rs` converts one document (`WorkItem` -> `Converted`) and returns a
   `Result` rather than exiting, which is what makes per-file failure isolation

@@ -322,7 +322,10 @@ fn html_text(s: &str) -> String {
 cargo test -p kasane-writer escape 2>&1 | tail -20
 ```
 
-Expected: PASS, 7 tests.
+Expected: PASS. `cargo test -p kasane-writer escape` filters by *name*, so its
+count is cumulative across the whole branch, not this task's own: it reported 7
+when this task ran, and on the finished branch the same command reports 39.
+Read the figure as "no failures", not as a target.
 
 - [ ] **Step 5: Lint**
 
@@ -455,7 +458,8 @@ pub(crate) fn label(s: &str) -> String {
 cargo test -p kasane-writer escape 2>&1 | tail -20
 ```
 
-Expected: PASS, 11 tests.
+Expected: PASS. 11 when this task ran; 39 on the finished branch (the filter is
+cumulative — see Task 1, Step 4).
 
 - [ ] **Step 5: Commit**
 
@@ -628,7 +632,8 @@ fn sanitize_info(lang: &str) -> String {
 cargo test -p kasane-writer escape 2>&1 | tail -20
 ```
 
-Expected: PASS, 18 tests.
+Expected: PASS. 18 when this task ran; 39 on the finished branch (the filter is
+cumulative — see Task 1, Step 4).
 
 - [ ] **Step 5: Commit**
 
@@ -748,7 +753,8 @@ fn encode(s: &str, extra: &[char]) -> String {
 cargo test -p kasane-writer escape 2>&1 | tail -20
 ```
 
-Expected: PASS, 19 tests.
+Expected: PASS. 19 when this task ran; 39 on the finished branch (the filter is
+cumulative — see Task 1, Step 4).
 
 - [ ] **Step 5: Commit**
 
@@ -2453,7 +2459,8 @@ fn heading_anchors(text: &str) -> HashSet<String> {
 cargo test -p kasane-writer --test properties 2>&1 | tail -40
 ```
 
-Expected: PASS, eight properties. A failure writes `crates/kasane-writer/tests/properties.proptest-regressions` — **commit that file** if it appears; it is what turns a found case into a permanent regression test. If a property fails, read the shrunk case before touching anything: P7 failing means a real missed escape, and the fix belongs in `escape.rs`, not in the test.
+Expected: PASS, eight properties (P1-P8) plus the two pinned end-to-end tests
+in the same file — ten tests in total. A failure writes `crates/kasane-writer/tests/properties.proptest-regressions` — **commit that file** if it appears; it is what turns a found case into a permanent regression test. If a property fails, read the shrunk case before touching anything: P7 failing means a real missed escape, and the fix belongs in `escape.rs`, not in the test.
 
 - [ ] **Step 6: Commit**
 
@@ -2872,4 +2879,4 @@ carries a heading whose inline text contains a newline, the one shape section
 
 **One assertion is flagged as needing verification rather than stated as fact:** `assert_no_unescaped` applied to `\` in Task 14. A lone backslash escapes to `\\`, an even-length run, which the odd-length rule reads differently from the other eight characters. The task says so, gives the narrower assertion to fall back to, and forbids weakening the other eight. Everything else in the plan is stated because it was checked: `pulldown-cmark` 0.13.4's event and tag names, `\*`/`\|` round-tripping, `<br>` arriving as `InlineHtml`, footnote continuation parsing, and fence widening were all run against the real crate before this plan was written.
 
-**Type consistency.** `Ctx` is `{ Flow, Cell, Html }` throughout. `escape::text(&str, Ctx, bool) -> String`, `code_span(&str) -> String` (delimiters included), `fenced_block(&str, Option<&str>) -> String` (trailing newline included), `dest_path`/`dest_url`/`label`/`one_line`/`yaml_scalar`/`comment_note`: `&str -> String`. `inlines_to_md(&[Inline], Ctx, bool) -> String` after Task 6, the third argument being `at_line_start`; `inlines_to_html(&[Inline], usize) -> String` from Task 8. `indent_continuation(&str, &str) -> String` is introduced in Task 9 and consumed in Task 10. `Sentinel` gains `payload` in Task 12 and is read by P7 in Task 13. `parse_events(&str) -> Parsed` is defined once in Task 13 and used by `links_in`, `heading_anchors`, P7 and P8.
+**Type consistency.** `Ctx` is `{ Flow, Cell, Html }` throughout. `escape::text(&str, Ctx, bool) -> String`, `code_span(&str, Ctx) -> String` (delimiters included; the `Ctx` is for GFM's in-cell `\|`, added by the final fix wave), `fenced_block(&str, Option<&str>) -> String` (trailing newline included), `math_span`/`math_block` (`&str -> String`, added by the final fix wave), `dest_path`/`dest_url`/`label`/`one_line`/`yaml_scalar`/`comment_note`: `&str -> String`. `inlines_to_md(&[Inline], Ctx, bool) -> String` after Task 6, the third argument being `at_line_start`; `inlines_to_html(&[Inline], usize) -> String` from Task 8. `indent_continuation(&str, &str) -> String` is introduced in Task 9 and consumed in Task 10. `Sentinel` gains `payload` in Task 12 and is read by P7 in Task 13. `parse_events(&str) -> Parsed` is defined once in Task 13 and used by `links_in`, `heading_anchors`, P7 and P8.

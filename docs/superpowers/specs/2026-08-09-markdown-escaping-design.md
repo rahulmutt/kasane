@@ -118,13 +118,26 @@ was called.
 pub(crate) enum Ctx { Flow, Cell, Html }
 
 pub(crate) fn text(s: &str, ctx: Ctx, at_line_start: bool) -> String;
-pub(crate) fn code_span(s: &str) -> String;
-pub(crate) fn fence(text: &str, lang: Option<&str>) -> String;
+pub(crate) fn code_span(s: &str, ctx: Ctx) -> String;
+pub(crate) fn fenced_block(text: &str, lang: Option<&str>) -> String;
 pub(crate) fn dest_path(s: &str) -> String;
 pub(crate) fn dest_url(s: &str) -> String;
 pub(crate) fn label(s: &str) -> String;
+pub(crate) fn one_line(s: &str) -> String;
+pub(crate) fn math_span(s: &str) -> String;
+pub(crate) fn math_block(s: &str) -> String;
 pub(crate) fn yaml_scalar(s: &str) -> String;
 ```
+
+`code_span` takes a `Ctx` for one reason and only one: GFM's table grammar
+splits a row on `|` *before* any inline is parsed, so a pipe inside a code span
+still ends the cell, and GFM's own answer is a backslash it strips back out
+(`` `b \| az` `` renders `b | az`). Nothing else about a code span is
+context-dependent.
+
+`math_span` and `math_block` are the writer's half of the math contract (§3.7)
+and did not exist in this section's first draft, which had the two math arms
+formatting `${t}$` and `$$\n{s}\n$$` inline in `markdown.rs`.
 
 `inlines_to_md` and `inlines_to_md_at` take `Ctx` as a required parameter, not
 as a defaulted field or a struct with a `Default` impl. That is the enforcement
@@ -260,10 +273,20 @@ Two functions, and the split is load-bearing.
 **`dest_path`** is today's `link_dest`, unchanged in rule and moved in
 location: it percent-encodes `%`, `#`, `?`, space, `(`, `)`, `<`, `>`, `\`,
 `"`, and control characters, leaving `/` literal as a path separator. It is for
-destinations kasane *constructs* from the filesystem: `_assets/<filename>`,
-the library index's `rel_dir`, and internal links. Encoding `%` is essential
-there, because a literal `%` in a filename would otherwise read back as an
-escape.
+destinations kasane *constructs* from the filesystem: `_assets/<filename>` and
+the library index's `rel_dir`. Encoding `%` is essential there, because a
+literal `%` in a filename would otherwise read back as an escape.
+
+An in-book cross-reference is **not** one of them, despite the shape looking
+like a path. `refs::relativize` resolves a `RefTarget::Internal` into a
+`RefTarget::External` holding `path#anchor`, which reaches `dest_url`
+(`markdown.rs`'s external-link arm) — and that is correct, not an oversight:
+`dest_path` encodes `#`, so routing a cross-reference through it would
+percent-encode the fragment separator and break every anchor kasane emits. The
+path half is safe under `dest_url`'s narrower set because `path_slug`'s
+alphabet is closed (`markdown.rs`'s
+`path_slugs_contain_nothing_that_breaks_a_bare_destination` pins it), and the
+anchor half likewise (`anchors_contain_nothing_that_breaks_a_bare_destination`).
 
 **`dest_url`** is for `RefTarget::External`, which is a URL that arrived from a
 source document's `href` and is therefore *already* percent-encoded. Encoding
@@ -294,6 +317,26 @@ block has one rule instead of five, and the closed-alphabet argument is one
 more thing that would have to stay true. `source_pages` stays unquoted — it is
 `{integer}-{integer}` built by `format!`, never text.
 
+### 3.7 Math
+
+`Inline::Math` and `Block::MathBlock` carry LaTeX, not Markdown, and the writer
+escapes nothing inside them: there is no escape available. `\$` would corrupt
+adapter output that already spells a literal dollar that way, and neutralizing
+`\`, `{` or `}` would destroy the `\frac{1}{2}` an adapter legitimately emits.
+Safety comes from a contract in `kasane-adapters`, which neutralizes `$`, `{`,
+`}`, `\` and newlines in every node kind that carries document text —
+`math::latex::sanitize` for `<mn>`/`<mtext>` and for `mfenced`'s delimiter
+attributes, `math::symbols::map_text` for `<mi>`/`<mo>` and every OMML run.
+
+The writer nonetheless carries a **self-check**, because `blocks_to_markdown`
+is public API over a public IR and a caller who builds `Inline::Math` by hand
+never passes an adapter. Content that would close the delimiter the writer
+opens — a `$` in either form, any newline in the inline form (which can land in
+a table cell), a blank line in the block form — degrades to a code span or a
+fenced block instead. The LaTeX is still there for a reader, verbatim, and it
+cannot break out of a code fence by construction. Adapter-produced math never
+reaches that branch, which is exactly the shape of `render_block`'s depth guard.
+
 ## 4. What escaping alone cannot fix
 
 ### 4.1 Newlines
@@ -302,12 +345,27 @@ A newline is not an escapable character, so each context decides:
 
 | Context | Rule |
 |---|---|
-| Heading (`markdown.rs:27-34`, `lib.rs:32`) | fold `\r\n`/`\n`/`\r` to one space |
+| Heading (`markdown.rs`'s `Block::Heading`, `lib.rs`'s title) | fold any *run* of `\r\n`/`\n`/`\r` to one space |
 | GFM cell | fold to `<br>` |
 | HTML cell | fold to `<br>` |
-| Link label, image alt | fold to one space |
-| YAML scalar | fold to one space |
+| Link label, image alt | fold a run to one space |
+| Code span | fold a run to one space |
+| YAML scalar | fold a run to one space |
 | Flow text | keep a single `\n` as a soft break; collapse runs of 2+ to one |
+
+The run-collapsing is what lets `escape::one_line` be a *single* function
+serving every row above it, and it is load-bearing rather than tidy. The two
+heading paths reach it from opposite directions — `Block::Heading` escapes then
+folds, so `escape::text`'s own collapse has already run; `file_to_markdown`'s
+title heading folds then escapes, so nothing has collapsed anything — and
+`code_span` folds unescaped content, a third variant. Without the collapse the
+three disagreed on a blank line (`## A B` against `# A  B`), and
+`kasane-core`'s `anchor_fold`, which predicts the rendered heading line to
+compute a fragment, can only predict one of them: a heading containing a blank
+line rendered `## A B` (GitHub id `a-b`) while the emitted cross-reference
+pointed at `#a--b`. `slug::fold_newlines` is the hand-kept mirror and collapses
+identically. Literal spaces are a different mechanism and are *not* collapsed
+on either side, so `Background & Notes` still anchors `background--notes`.
 
 A heading is one line by grammar: a newline in a title today turns the tail of
 the title into a separate block. `<br>` is GFM's only multi-line-cell carrier.
@@ -357,6 +415,29 @@ literally inside `<!-- -->`. `comment_note` therefore cannot escape a
 dangerous run, only transform it, and the transformation is forced by the
 format rather than chosen. §5 documents the consequence: `Block::Raw` is the
 one place this policy's own invariant does not hold.
+
+### 4.5 Emphasis delimiters at a line start
+
+`at_line_start` guards `Inline::Text`, but not the markup the *writer* emits at
+column 0. `Block::Para([Emph([Text(" x")])])` rendered `* x*`, which a GFM
+parser reads as a bullet list rather than a paragraph — reachable from
+`<p><em> Note:</em> …</p>`. The same output has a second defect independent of
+position: CommonMark's flanking rules mean a `*` with adjacent whitespace is
+never an emphasis delimiter, so the emphasis was silently lost mid-line too.
+
+Both are fixed by moving whitespace at the edges of the rendered inner content
+*outside* the delimiters — `" *x*"` — which is what CommonMark's "emphasis
+cannot begin or end with whitespace" rule asks for anyway. The rendered text is
+unchanged (§5), the emphasis now applies, and the first character on the line
+is a space rather than a bullet marker. Inner content that is entirely
+whitespace gets no delimiters at all.
+
+A sibling case is **not** fixed and is recorded here rather than in a ledger:
+`Block::Para([FootnoteRef(1), Text(": note")])` renders `[^1]: note` at column
+0, which parses as a footnote *definition*. It needs a different mechanism —
+the `:` belongs to the *next* inline, so escaping it requires cross-inline
+state plus a new rule for a character no context escapes today — and putting
+that decision in `markdown.rs` would break §2's "`escape.rs` owns every rule".
 
 ## 5. The invariant that ties this to the slug rules
 
@@ -434,18 +515,45 @@ collected the same way `Text`/`Code` is, and the `\$`-in-prose case was
 re-verified directly against the parser: an escaped `$` still never opens a
 math span, so the two sides still agree without a special case.
 
-For each file of a generated case: render with `file_to_markdown`, parse, and
-fold the event stream into a text sequence; derive the same sequence directly
-from the IR (the payloads of `Text`, `Code` and `Math`, in document order,
-**excluding `Block::Raw`** — see §5's carve-out); and require exact equality.
-A missed escape appears as text that came back changed.
+**What shipped is an occurrence count, not an equality.** For each file of a
+generated case: render with `file_to_markdown`, parse, fold the event stream
+into one string, whitespace-normalize it, and require each generated sentinel's
+**payload** to appear the number of times its shape says it should
+(`Expect::Exactly(1)` for most, `AtLeast(1)` for a heading, `Exactly(2)` for a
+numbered figure's twice-rendered caption). Payloads whose `Block::Raw` note
+`escape::comment_note` actually transforms are skipped — §5's carve-out, scoped
+to the transformation rather than to the shape.
 
-A structural half rides along, since text equality alone would accept a
-paragraph that became a list: heading levels and their order, table row and
-column counts, list nesting depth, and one footnote definition per
-`Block::Footnote`. The merged-table path arrives as `Event::Html`; the test
-extracts its text through a small tag-stripping and entity-decoding step rather
-than adding an HTML parser to the writer's dev-dependencies.
+That is weaker than the "derive the same sequence from the IR and require exact
+equality" this section originally specified, in three ways worth naming rather
+than glossing: the generated decoration inlines and the filler text around a
+payload are not checked at all; *extra* recovered text is invisible, since only
+occurrences of the payload are counted; and whitespace normalization means a
+lost space cannot fail it. Every other character in a payload is checked, which
+is what makes a missed escape a failure. The equality form was not built
+because deriving the IR-side sequence means re-implementing render order —
+including what `balance` moved between files and what `nav` synthesized — in
+the test, which is the drift the `#[doc(hidden)]` test seams exist to avoid.
+
+The structural half is **P8**, a separate property, and it checks: one footnote
+definition per `Block::Footnote`; the full sequence of heading levels in render
+order, the file's own title heading first at its breadcrumb depth and each
+`Block::Heading` after it at the level `render_block` clamps to; and, per
+non-merged GFM table, both the row count and the **cell** count. The cell count
+is what a row count alone cannot see — an unescaped `|` splits one cell into
+two without changing the number of rows, which is exactly how the missing pipe
+escape inside `escape::code_span` presented.
+
+List nesting depth is deliberately **not** checked. Unlike a row or a heading it
+has no event asserting "this is the same list the IR built": `balance` may have
+moved a list into another file, and a nested list that lost its indent appears
+as a *sibling* list, so the check would have to reconstruct the tree from the
+event stream. P1's `Expect::Exactly` plus `markdown.rs`'s
+continuation-indent unit tests cover the failure §4.3 was written for.
+
+The merged-table path arrives as `Event::Html`; the test extracts its text
+through a small tag-stripping and entity-decoding step rather than adding an
+HTML parser to the writer's dev-dependencies.
 
 ### 6.3 The existing helpers, rebuilt
 
@@ -466,15 +574,39 @@ parsed rendered text, and P2 passing on a hostile title is a direct proof of
 
 ### 6.4 The widened generator
 
-A hostile draw joins `WORDS` in `tests/generator/mod.rs`: `*`, `_`, `` ` ``,
-`[x]`, `]`, `|`, `#`, `- `, `1.`, `<b>`, `&amp;`, `&`, `$`, `~~`, `\`, `-->`, a
-triple-backtick run, a run containing an embedded newline, a combining-mark
-sample, and a CJK sample. It feeds section titles, paragraph text, table cell
-text, code-block and code-span text, figure captions, and external `href`s.
+A hostile draw (`HOSTILE`) joins `WORDS` in `tests/generator/mod.rs`, mixed
+into the same `filler()` both feed: the inline openers `*star*`, `_under_`,
+`[bracket]`, `]close`, `` `tick` ``, `<html>`, `$math$`, `~~strike~~`,
+`back\slash`, `!bang[`; the entity pair `&amp;` and `&raw`; the line-start
+openers `#hash`, `- bullet`, `1. ordered`, `> quote`, `= setext`; a `|pipe|`; a
+` ```fence `; the comment closer `-->`; and three newline shapes —
+`line\nbreak`, `a\n\nb` and `a\r\nb`. The combining-mark and CJK samples live
+in `WORDS` (`हिन्दी`, `第二章`) alongside `&`, `don't` and `foo_bar`, which
+exercise the slug rules.
+
+It feeds section titles, paragraph text, table cell text, code-block text,
+figure captions, `Block::Raw` notes, `Block::MathBlock` content, footnote
+bodies — and, since this section's first draft did not reach them, **code-span
+text and external `href`s**: `generator::inlines()` draws `Inline::Code` and an
+`Inline::Link { target: RefTarget::External(_) }` alongside `Emph`/`Strong`, the
+`href` from a small `HREFS` pool holding a space and a `)`, an already-encoded
+`%20`, a query and a fragment, and `<`/`>`/`"`. Without them
+`escape::code_span`, `escape::dest_url` on a real `href`, and
+`inlines_to_html`'s `<a href>` composition had no property-tier coverage at all
+— and adding them immediately failed P8 on the unescaped `|` inside a code span
+in a table cell, and P2 on `code_span` folding a newline run differently from
+`anchor_fold`.
 
 Titles carry the most weight and are drawn from it most often, because one
 title reaches the heading line, the frontmatter scalar, the anchor, the path
 component, and the library entry — five contexts from one string.
+
+`Block::MathBlock` draws the raw hostile fragment like every other shape. An
+earlier revision pre-neutralized `$` for that one shape, modelling
+`kasane-adapters`'s math contract instead of testing anything — and the
+contract had a hole exactly there. It is closed (§3.7), the writer carries a
+self-check for the callers no adapter guards, and the generator now draws the
+hostile fragment.
 
 The sentinel scheme is unaffected: `zq####` is alphanumeric, so no escape can
 appear inside a sentinel and P1's occurrence counting keeps working. `WORDS`
