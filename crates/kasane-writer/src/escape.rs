@@ -162,10 +162,41 @@ fn opens_entity(chars: &[char], i: usize) -> bool {
     j > start && chars.get(j) == Some(&';')
 }
 
-/// HTML-escape, for `Ctx::Html`. Implemented in Task 2; `text` already routes
-/// to it so the routing is written once.
+/// HTML-escape, for `Ctx::Html` — the `has_merged` `<table>` fallback.
+///
+/// Backslash escapes do not apply there: GFM parses an HTML block's content as
+/// raw HTML, not as Markdown. `&` is escaped unconditionally here, unlike in
+/// flow text, because inside HTML every `&` really is an entity opener.
 fn html_text(s: &str) -> String {
-    s.to_string()
+    let mut out = String::with_capacity(s.len());
+    for c in normalize_newlines(s).chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("<br>"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Fold every newline spelling to a single space, for the contexts where a
+/// newline is structurally impossible: heading lines, link labels, image alt
+/// text, YAML scalars (§4.1).
+pub(crate) fn one_line(s: &str) -> String {
+    s.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
+/// A link label or image alt text: flow rules, flattened to one line.
+///
+/// Escaped, never substituted. `library.rs`'s superseded `link_text` replaced
+/// `[` with `(`, which changes the rendered text — forbidden by §5, because
+/// anchors are computed from unescaped IR text and must still match what the
+/// heading renders to.
+pub(crate) fn label(s: &str) -> String {
+    one_line(&text(s, Ctx::Flow, false))
 }
 
 #[cfg(test)]
@@ -234,5 +265,39 @@ mod tests {
     fn flow_collapses_blank_lines_so_one_para_stays_one_para() {
         assert_eq!(text("a\n\n\nb", Ctx::Flow, false), "a\nb");
         assert_eq!(text("a\r\n\r\nb", Ctx::Flow, false), "a\nb");
+    }
+
+    #[test]
+    fn cell_escapes_pipes_everywhere_and_carries_newlines_as_br() {
+        assert_eq!(text("a|b", Ctx::Cell, false), "a\\|b");
+        assert_eq!(text("one\ntwo", Ctx::Cell, false), "one<br>two");
+        // Flow's rules still apply inside a cell.
+        assert_eq!(text("a*b", Ctx::Cell, false), "a\\*b");
+    }
+
+    #[test]
+    fn html_escapes_entities_not_backslashes() {
+        assert_eq!(
+            text("a & b < c > d \" e", Ctx::Html, false),
+            "a &amp; b &lt; c &gt; d &quot; e"
+        );
+        // A backslash is a literal character inside an HTML block.
+        assert_eq!(text("a\\b", Ctx::Html, false), "a\\b");
+        // Every `&` is an entity opener here, unconditionally.
+        assert_eq!(text("Q&A", Ctx::Html, false), "Q&amp;A");
+        assert_eq!(text("one\ntwo", Ctx::Html, false), "one<br>two");
+    }
+
+    #[test]
+    fn one_line_folds_every_newline_spelling_to_a_single_space() {
+        assert_eq!(one_line("a\nb\r\nc\rd"), "a b c d");
+    }
+
+    #[test]
+    fn label_escapes_and_flattens() {
+        // A label lives inside `[...]` on one line: brackets escaped, newline
+        // folded. Escaped, never substituted -- a substitution would change the
+        // rendered text, which section 5 forbids.
+        assert_eq!(label("a [b]\nc"), "a \\[b\\] c");
     }
 }
