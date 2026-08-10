@@ -207,11 +207,17 @@ pub(crate) fn label(s: &str) -> String {
 pub(crate) fn code_span(s: &str) -> String {
     let content = one_line(s);
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
-    if content.is_empty() || content.chars().all(|c| c == ' ') {
-        // Empty content or all-spaces: pad with a space on the left only
-        format!("{ticks} {content}{ticks}")
-    } else if content.starts_with('`') || content.ends_with('`') || content.contains('`') {
-        // Contains backticks: pad with spaces on both sides
+    if content.is_empty() {
+        // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
+        format!("{ticks} {ticks}")
+    } else if content.chars().all(|c| c == ' ') {
+        // Rule 2: All-spaces content pads not at all; CommonMark's carve-out means the
+        // content is not stripped, so no padding is needed to preserve input.
+        format!("{ticks}{content}{ticks}")
+    } else if content.contains('`') || content.starts_with(' ') || content.ends_with(' ') {
+        // Rule 3: Pad if the content contains a backtick, or starts/ends with space.
+        // For non-all-spaces content, CommonMark strips exactly one space from each end
+        // iff it begins and ends with space, so padding is invisible in the render.
         format!("{ticks} {content} {ticks}")
     } else {
         // Plain content: no padding
@@ -368,10 +374,22 @@ mod tests {
 
     #[test]
     fn code_span_handles_all_spaces_and_empty_content() {
-        assert_eq!(code_span("  "), "`   `");
+        // All-spaces content receives no padding because CommonMark's carve-out
+        // means "consists entirely of space characters" are not stripped, so the
+        // input round-trips exactly.
+        assert_eq!(code_span("  "), "`  `");
         // CommonMark cannot express an empty code span; a single space is the
         // closest thing, and P7 normalizes whitespace so it round-trips.
         assert_eq!(code_span(""), "` `");
+    }
+
+    #[test]
+    fn code_span_preserves_spaces_at_both_ends() {
+        // Content with space at both ends gets padded. CommonMark strips exactly
+        // one space from each end (because the content begins and ends with space
+        // but does not consist entirely of spaces), so the outer padding is
+        // invisible and the input's own spaces survive the render.
+        assert_eq!(code_span(" a "), "`  a  `");
     }
 
     #[test]

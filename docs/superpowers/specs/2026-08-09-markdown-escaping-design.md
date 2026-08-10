@@ -233,11 +233,19 @@ Neither takes backslash escapes; both are solved by choosing a delimiter the
 content cannot contain.
 
 **`code_span`** follows CommonMark: the wrapper is a backtick run one longer
-than the longest backtick run in the content, and the content is padded with a
-single space at each end when it begins or ends with a backtick, or consists
-entirely of spaces. (A reader strips exactly one space from each end, so the
-padding is invisible.) Newlines inside a code span fold to spaces, since a
-blank line would end the enclosing paragraph.
+than the longest backtick run in the content. Padding with a single space at
+each end is added in three cases:
+
+1. Empty content: a single space fills the span (the one acknowledged divergence
+   from round-trip, required because CommonMark cannot express an empty code span).
+2. Content containing backticks, or starting/ending with space: a reader strips
+   exactly one space from each end when the span begins and ends with space but
+   does not consist entirely of spaces, so the padding is invisible.
+3. Content consisting entirely of spaces receives no padding, because the
+   carve-out means no stripping occurs; the input round-trips exactly.
+
+Newlines inside a code span fold to spaces, since a blank line would end the
+enclosing paragraph.
 
 **`fence`** picks a backtick fence of `max(3, longest_run + 1)` against runs at
 any position in the body, and sanitizes the info string to its first

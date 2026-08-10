@@ -506,10 +506,22 @@ Append to `mod tests`:
 
     #[test]
     fn code_span_handles_all_spaces_and_empty_content() {
-        assert_eq!(code_span("  "), "`   `");
+        // All-spaces content receives no padding because CommonMark's carve-out
+        // means "consists entirely of space characters" are not stripped, so the
+        // input round-trips exactly.
+        assert_eq!(code_span("  "), "`  `");
         // CommonMark cannot express an empty code span; a single space is the
         // closest thing, and P7 normalizes whitespace so it round-trips.
         assert_eq!(code_span(""), "` `");
+    }
+
+    #[test]
+    fn code_span_preserves_spaces_at_both_ends() {
+        // Content with space at both ends gets padded. CommonMark strips exactly
+        // one space from each end (because the content begins and ends with space
+        // but does not consist entirely of spaces), so the outer padding is
+        // invisible and the input's own spaces survive the render.
+        assert_eq!(code_span(" a "), "`  a  `");
     }
 
     #[test]
@@ -559,10 +571,19 @@ Append to `escape.rs` (above `mod tests`):
 pub(crate) fn code_span(s: &str) -> String {
     let content = one_line(s);
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
-    let pad = content.is_empty()
-        || content.starts_with('`')
-        || content.ends_with('`')
-        || content.chars().all(|c| c == ' ');
+    let pad = if content.is_empty() {
+        // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
+        true
+    } else if content.chars().all(|c| c == ' ') {
+        // Rule 2: All-spaces content pads not at all; CommonMark's carve-out means the
+        // content is not stripped, so no padding is needed to preserve input.
+        false
+    } else {
+        // Rule 3: Pad if the content contains a backtick, or starts/ends with space.
+        // For non-all-spaces content, CommonMark strips exactly one space from each end
+        // iff it begins and ends with space, so padding is invisible in the render.
+        content.contains('`') || content.starts_with(' ') || content.ends_with(' ')
+    };
     if pad {
         format!("{ticks} {content} {ticks}")
     } else {
@@ -607,7 +628,7 @@ fn sanitize_info(lang: &str) -> String {
 cargo test -p kasane-writer escape 2>&1 | tail -20
 ```
 
-Expected: PASS, 17 tests.
+Expected: PASS, 18 tests.
 
 - [ ] **Step 5: Commit**
 
