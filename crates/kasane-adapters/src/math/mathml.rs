@@ -180,6 +180,32 @@ mod tests {
         assert_eq!(c.latex, "\\sqrt{2}");
     }
 
+    /// `<mi>` and `<mo>` are `Ident`/`Op`, which reach `map_text`, not
+    /// `sanitize`. Before that arm neutralized anything, this exact island
+    /// produced `Inline::Math("a$ [x](http://y) $b")`, which the writer wrapped
+    /// as `$a$ [x](http://y) $b$` -- a real, clickable link injected into the
+    /// document from `<mo>` content.
+    #[test]
+    fn operator_and_identifier_text_cannot_escape_the_math_span() {
+        let c = mathml_to_latex("<math><mo>a$ [x](http://y) $b</mo></math>");
+        assert_eq!(c.latex, "a\\$ [x](http://y) \\$b");
+        let c = mathml_to_latex("<math><mi>a$b</mi></math>");
+        assert_eq!(c.latex, "a\\$b");
+        // The other half: a brace cannot unbalance a `\text{}` group, and a
+        // backslash cannot start a command.
+        let c = mathml_to_latex("<math><mi>a{b}\\c</mi></math>");
+        assert_eq!(c.latex, "a\\{b\\}c");
+    }
+
+    /// `mfenced`'s `open`/`close` are untrusted attributes and land straight
+    /// in a `\left`/`\right`, so they take the same neutralization.
+    #[test]
+    fn a_fence_attribute_cannot_escape_the_math_span() {
+        let c =
+            mathml_to_latex("<math><mfenced open=\"$\" close=\"$\"><mn>1</mn></mfenced></math>");
+        assert_eq!(c.latex, "\\left\\$1\\right\\$");
+    }
+
     #[test]
     fn greek_identifier_maps() {
         let c = mathml_to_latex("<math><mi>α</mi></math>");

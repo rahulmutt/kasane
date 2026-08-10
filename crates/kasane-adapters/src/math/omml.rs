@@ -199,25 +199,25 @@ fn delim_chars(n: Node) -> (String, String, String) {
     (get("begChr", "("), get("endChr", ")"), get("sepChr", ","))
 }
 
-/// `<m:chr m:val="…"/>` on `<m:naryPr>`, mapped to LaTeX commands where known;
-/// default is the integral sign. Unknown operators are passed through for the
-/// emitter's symbol table to degrade via placeholder.
+/// `<m:chr m:val="…"/>` on `<m:naryPr>`, as the raw operator character;
+/// default is the integral sign.
+///
+/// The Unicode → LaTeX mapping deliberately lives in `symbols::symbol` rather
+/// than here, even though this used to hold its own copy. `m:val` is an
+/// untrusted attribute, so the fallback arm always did hand document text to
+/// `map_text`; returning a ready-made `\sum` alongside it meant `map_text` saw
+/// both emitter-chosen LaTeX and document text on one code path and could not
+/// neutralize a backslash in either without destroying the other. With the
+/// mapping moved, every string reaching `map_text` is document text.
+/// `symbols::symbol` gained `∮`, `⋃` and `⋂` so this table's coverage is
+/// unchanged; an operator in neither table still degrades to the placeholder,
+/// exactly as the pass-through arm did before.
 fn nary_op(n: Node) -> String {
-    let chr = child(n, "naryPr")
+    child(n, "naryPr")
         .and_then(|p| child(p, "chr"))
         .and_then(attr_val)
-        .unwrap_or_else(|| "∫".to_string());
-    // Map known operator chars to LaTeX commands; unknown chars pass through
-    // for the emitter to degrade to placeholder.
-    match chr.trim() {
-        "∑" => "\\sum".to_string(),
-        "∏" => "\\prod".to_string(),
-        "∫" => "\\int".to_string(),
-        "∮" => "\\oint".to_string(),
-        "⋃" => "\\bigcup".to_string(),
-        "⋂" => "\\bigcap".to_string(),
-        other => other.to_string(),
-    }
+        .map(|c| c.trim().to_string())
+        .unwrap_or_else(|| "∫".to_string())
 }
 
 /// The `m:val` attribute (any namespace prefix), matched by local name.
@@ -247,6 +247,26 @@ mod tests {
         );
         assert_eq!(c.latex, "{x}^{2}");
         assert!(c.complete);
+    }
+
+    /// Every OMML run is `MathNode::Ident`, so `map_text` -- not `sanitize` --
+    /// is the only thing between PowerPoint's equation text and the `$…$`
+    /// span `kasane-writer` opens around it. This is the whole of PPTX math.
+    #[test]
+    fn run_text_cannot_escape_the_math_span() {
+        let c = omml_to_latex("<m:oMath><m:r><m:t>a$ [x](http://y) $b</m:t></m:r></m:oMath>");
+        assert_eq!(c.latex, "a\\$ [x](http://y) \\$b");
+    }
+
+    /// `<m:begChr>`/`<m:endChr>` are untrusted attributes reaching a
+    /// `\left`/`\right`.
+    #[test]
+    fn a_delimiter_attribute_cannot_escape_the_math_span() {
+        let c = omml_to_latex(
+            "<m:oMath><m:d><m:dPr><m:begChr m:val=\"$\"/><m:endChr m:val=\"$\"/></m:dPr>\
+             <m:e><m:r><m:t>1</m:t></m:r></m:e></m:d></m:oMath>",
+        );
+        assert_eq!(c.latex, "\\left\\$1\\right\\$");
     }
 
     #[test]
