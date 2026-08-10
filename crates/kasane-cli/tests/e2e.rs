@@ -109,9 +109,16 @@ fn batch_mode_converts_a_deeply_block_nested_epub_without_aborting() {
         .map(|(_, s)| s.as_str())
         .expect("converted chapter missing");
 
+    // The innermost item sits under accumulated continuation indent: 31 levels at 2 columns
+    // each = 62 spaces, then the marker, then the text. The assertion checks both that the
+    // text survived and that it is indented (inside the nesting, not at column zero).
+    let innermost_line = chapter
+        .lines()
+        .find(|l| l.trim_start() == "- x")
+        .expect("innermost list item text missing -- the bound must flatten, not truncate");
     assert!(
-        chapter.contains("\n- x\n"),
-        "innermost list item text missing -- the bound must flatten, not truncate: {chapter:.400}"
+        innermost_line.starts_with("  "),
+        "innermost list item must be indented to be inside its nesting: got: {innermost_line:?}"
     );
 
     let deepest = chapter

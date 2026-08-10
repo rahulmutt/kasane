@@ -39,17 +39,23 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
         }
         Block::List { ordered, items } => {
             for (i, item) in items.iter().enumerate() {
-                if *ordered {
-                    out.push_str(&format!("{}. ", i + 1));
+                let marker = if *ordered {
+                    format!("{}. ", i + 1)
                 } else {
-                    out.push_str("- ");
-                }
-                // render first block inline, subsequent blocks indented
+                    "- ".to_string()
+                };
                 let mut inner = String::new();
                 for bb in item {
                     render_block(bb, assets, &mut inner, depth + 1);
                 }
-                out.push_str(inner.trim_end());
+                // Continuation lines are indented by the marker's own width;
+                // without it an item holding a paragraph and a nested list
+                // drops to column zero on its second line and leaves the item
+                // (§4.3). The first block still renders on the marker's line,
+                // which is what keeps `- ## Notes` intact.
+                let indent = " ".repeat(marker.chars().count());
+                out.push_str(&marker);
+                out.push_str(&indent_continuation(inner.trim_end(), &indent));
                 out.push('\n');
             }
         }
@@ -654,5 +660,53 @@ mod tests {
             lines[1], "    second",
             "the second block escaped the definition: {md}"
         );
+    }
+
+    #[test]
+    fn a_multi_block_list_item_stays_inside_its_item() {
+        let blocks = vec![Block::List {
+            ordered: false,
+            items: vec![vec![
+                Block::Para(vec![Inline::Text("first".into())]),
+                Block::List {
+                    ordered: false,
+                    items: vec![vec![Block::Para(vec![Inline::Text("nested".into())])]],
+                },
+            ]],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines[0], "- first", "got: {md}");
+        assert_eq!(lines[1], "  - nested", "got: {md}");
+    }
+
+    #[test]
+    fn an_ordered_item_indents_by_its_own_marker_width() {
+        let blocks = vec![Block::List {
+            ordered: true,
+            items: vec![vec![
+                Block::Para(vec![Inline::Text("a".into())]),
+                Block::Para(vec![Inline::Text("b".into())]),
+            ]],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines[0], "1. a", "got: {md}");
+        assert_eq!(lines[1], "   b", "got: {md}");
+    }
+
+    #[test]
+    fn a_heading_leading_a_list_item_still_renders_on_the_marker_line() {
+        // properties.rs's strip_list_markers depends on this shape.
+        let blocks = vec![Block::List {
+            ordered: false,
+            items: vec![vec![Block::Heading {
+                level: 2,
+                id: BlockId(0),
+                inlines: vec![Inline::Text("Notes".into())],
+            }]],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("- ## Notes"), "got: {md}");
     }
 }
