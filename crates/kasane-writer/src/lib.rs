@@ -1,3 +1,4 @@
+mod escape;
 mod frontmatter;
 mod library;
 mod markdown;
