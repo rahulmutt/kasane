@@ -199,6 +199,56 @@ pub(crate) fn label(s: &str) -> String {
     one_line(&text(s, Ctx::Flow, false))
 }
 
+/// Wrap code content in a backtick run the content cannot contain (§3.4).
+///
+/// No escape exists inside a code span, so the delimiter is the only lever.
+/// Newlines fold to spaces because a blank line would end the enclosing
+/// paragraph.
+pub(crate) fn code_span(s: &str) -> String {
+    let content = one_line(s);
+    let ticks = "`".repeat(longest_backtick_run(&content) + 1);
+    if content.is_empty() || content.chars().all(|c| c == ' ') {
+        // Empty content or all-spaces: pad with a space on the left only
+        format!("{ticks} {content}{ticks}")
+    } else if content.starts_with('`') || content.ends_with('`') || content.contains('`') {
+        // Contains backticks: pad with spaces on both sides
+        format!("{ticks} {content} {ticks}")
+    } else {
+        // Plain content: no padding
+        format!("{ticks}{content}{ticks}")
+    }
+}
+
+/// A whole fenced code block, trailing newline included (§3.4).
+pub(crate) fn fenced_block(text: &str, lang: Option<&str>) -> String {
+    let ticks = "`".repeat(longest_backtick_run(text).max(2) + 1);
+    let info = lang.map(sanitize_info).unwrap_or_default();
+    format!("{ticks}{info}\n{text}\n{ticks}\n")
+}
+
+fn longest_backtick_run(s: &str) -> usize {
+    let mut longest = 0;
+    let mut run = 0;
+    for c in s.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    longest
+}
+
+/// An info string is a single token by grammar. Take the first whitespace-free
+/// run and drop backticks, which would otherwise break the opening fence.
+fn sanitize_info(lang: &str) -> String {
+    lang.split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .replace('`', "")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +349,53 @@ mod tests {
         // folded. Escaped, never substituted -- a substitution would change the
         // rendered text, which section 5 forbids.
         assert_eq!(label("a [b]\nc"), "a \\[b\\] c");
+    }
+
+    #[test]
+    fn code_span_picks_a_run_longer_than_anything_inside() {
+        assert_eq!(code_span("plain"), "`plain`");
+        assert_eq!(code_span("a ` b"), "`` a ` b ``");
+        assert_eq!(code_span("a ``` b"), "```` a ``` b ````");
+    }
+
+    #[test]
+    fn code_span_pads_when_the_content_touches_a_backtick() {
+        // CommonMark strips exactly one space from each end, so the padding is
+        // invisible in the rendered output.
+        assert_eq!(code_span("`x"), "`` `x ``");
+        assert_eq!(code_span("x`"), "`` x` ``");
+    }
+
+    #[test]
+    fn code_span_handles_all_spaces_and_empty_content() {
+        assert_eq!(code_span("  "), "`   `");
+        // CommonMark cannot express an empty code span; a single space is the
+        // closest thing, and P7 normalizes whitespace so it round-trips.
+        assert_eq!(code_span(""), "` `");
+    }
+
+    #[test]
+    fn code_span_folds_newlines_to_spaces() {
+        // A blank line would end the enclosing paragraph.
+        assert_eq!(code_span("a\nb"), "`a b`");
+    }
+
+    #[test]
+    fn fenced_block_widens_past_any_run_inside() {
+        assert_eq!(fenced_block("plain", None), "```\nplain\n```\n");
+        assert_eq!(
+            fenced_block("outer\n```\ninner", None),
+            "````\nouter\n```\ninner\n````\n"
+        );
+    }
+
+    #[test]
+    fn fenced_block_sanitizes_the_info_string() {
+        assert_eq!(fenced_block("x", Some("rust")), "```rust\nx\n```\n");
+        // An info string is one token by grammar; a backtick in it breaks the
+        // opening fence outright.
+        assert_eq!(fenced_block("x", Some("rust ignore")), "```rust\nx\n```\n");
+        assert_eq!(fenced_block("x", Some("ru`st")), "```rust\nx\n```\n");
+        assert_eq!(fenced_block("x", Some("   ")), "```\nx\n```\n");
     }
 }
