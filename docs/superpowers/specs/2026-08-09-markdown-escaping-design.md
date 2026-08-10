@@ -449,7 +449,7 @@ unchanged (§5), the emphasis now applies, and the first character on the line
 is a space rather than a bullet marker. Inner content that is entirely
 whitespace gets no delimiters at all.
 
-Two sibling cases are **not** fixed and are recorded here rather than in a
+Three sibling cases are **not** fixed and are recorded here rather than in a
 ledger.
 
 `Block::Para([FootnoteRef(1), Text(": note")])` renders `[^1]: note` at column
@@ -468,7 +468,23 @@ instance of a gap that predates this policy: `escape::text` clears
 the class means `at_line_start` surviving leading whitespace, which changes
 the line-start rules for every context at once and is not a pre-merge change.
 
-Neither of these has property-tier coverage, and neither does the emphasis fix
+**A `\r`/`\n` split across an inline boundary still diverges when an
+`Inline::Code` sits between them.** In a heading, `[Text("A\r"), Code("\nB")]`
+gives `anchor_fold` the two characters adjacent in `inline_text`, which
+collapses them to one separator and anchors `a-b`; the renderer folds each run
+separately and `code_span` then pads its content, so the parsed heading text
+carries *two* spaces and GitHub computes `a--b` — one hyphen more than kasane
+embeds.
+The mechanism is the code span's padding, not the fold, which is why §4.1's
+shared `one_line` does not close it. The `Emph`/`Strong` form of the same shape
+*was* closed, by this section's whitespace extraction: moving the inner run's
+leading newline outside the delimiters puts the two newlines adjacent, where
+`one_line` collapses them. So this is strictly narrower than what the branch
+closed, not something it introduced — before the branch, the same input
+anchored `ab`. The property tier cannot reach it: no `HOSTILE` fragment ends in
+`\r`, so the two characters never land on either side of an inline boundary.
+
+None of these has property-tier coverage, and neither does the emphasis fix
 itself — see §6.4 for why the generator cannot reach it.
 
 ## 5. The invariant that ties this to the slug rules
