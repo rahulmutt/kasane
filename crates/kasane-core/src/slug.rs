@@ -5,7 +5,7 @@
 //! `path_slug` turns the same text into a portable file or directory name.
 //!
 //! They share `is_word` as their base character class and then diverge on
-//! three axes, all deliberate. An anchor lands in the fragment of a link and a
+//! four axes, all deliberate. An anchor lands in the fragment of a link and a
 //! path slug lands in the path portion, so nothing forces them to agree and
 //! nothing breaks when they don't.
 //!
@@ -19,6 +19,9 @@
 //!    want invisible characters, and the `slug` fuzz target's confinement
 //!    argument rests on the path alphabet staying closed.
 //! 3. **NFC.** `path_slug` normalizes; `anchor_slug` deliberately does not.
+//! 4. **Newline folding.** `anchor_slug` first folds every newline spelling in
+//!    the inline text to a single space; `path_slug` does not. See
+//!    [`fold_newlines`] for why.
 //!
 //! That third one is the one a future reader will want to "fix". Do not.
 //! kasane writes a file's heading line from the *unnormalized* title text
@@ -136,8 +139,36 @@ fn is_join_control(c: char) -> bool {
     matches!(c, '\u{200C}' | '\u{200D}')
 }
 
-/// The anchor's fold: the inline text, outer whitespace trimmed,
-/// Unicode-lowercased, and **not normalized**.
+/// Mirrors `escape::one_line` in `kasane-writer`: fold every newline spelling
+/// in a heading's text to a single space, the same fold the renderer applies
+/// before GitHub ever computes an id from the rendered line.
+///
+/// `kasane-core` must not depend on `kasane-writer` (the dependency runs the
+/// other way), so this is a deliberate duplicate of `escape::one_line`, not a
+/// shared call — the two must be kept in step by hand, and a change to
+/// either's newline handling needs the identical change made to the other.
+///
+/// `\r\n` folds to **one** separator: replacing the pair first is what stops
+/// it from also matching the lone-`\r`/`\n` arm and folding to two. A lone
+/// `\n` or `\r` each fold to one separator too. Tabs are deliberately
+/// untouched — `one_line` does not touch them either, so a tab survives into
+/// the rendered heading line exactly as it does today, where the filter in
+/// [`anchor_slug`] drops it (a tab is not in `\p{Word}`, `-`, or space).
+/// "Fixing" that here would newly diverge from a tab's current, correct
+/// treatment. Runs are not collapsed, matching both `one_line` and GitHub's
+/// anchor rule: `"line\n\nbreak"` folds to two spaces and therefore anchors
+/// with two hyphens, the same as any other doubled space (`Background &
+/// Notes` → `background--notes`, pinned below).
+fn fold_newlines(s: &str) -> String {
+    s.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
+/// The anchor's fold: the inline text, newlines folded to spaces, outer
+/// whitespace trimmed, Unicode-lowercased, and **not normalized**.
+///
+/// The newline fold runs first because it mirrors what the *renderer* does
+/// to the text before GitHub ever sees it — trimming and lowercasing are
+/// steps GitHub's own filter performs on top of that already-folded line.
 ///
 /// The trim mirrors the renderer rather than the filter: a Markdown parser
 /// strips a heading's surrounding whitespace before GitHub ever computes an
@@ -146,7 +177,7 @@ fn is_join_control(c: char) -> bool {
 ///
 /// The absence of NFC is the load-bearing part; the module doc says why.
 fn anchor_fold(inlines: &[Inline]) -> String {
-    inline_text(inlines)
+    fold_newlines(&inline_text(inlines))
         .trim()
         .chars()
         .flat_map(char::to_lowercase)
@@ -392,6 +423,18 @@ mod tests {
         // from the heading's text before computing the id. Interior runs are
         // not trimmed, per the row above.
         assert_eq!(anchor_slug(&t("  Intro  ")), "intro");
+        // An embedded newline is not itself in `\p{Word}`/`-`/space, but by
+        // the time GitHub computes an id the renderer has already folded it
+        // to a literal space (`escape::one_line`), so the anchor must match
+        // that rendered line -- one hyphen, not a silently dropped character.
+        // NOT covered by the 2026-08-09 github.com parity check (design spec
+        // §8.2): that run predates this fold.
+        assert_eq!(anchor_slug(&t("line\nbreak")), "line-break");
+        // `\r\n` is two bytes but ONE line ending. `escape::one_line` folds
+        // the pair to a single space before it ever considers a lone `\r` or
+        // `\n`, so this must anchor identically to the lone-`\n` row above --
+        // one hyphen, not two. Also not covered by the 2026-08-09 check.
+        assert_eq!(anchor_slug(&t("line\r\nbreak")), "line-break");
         // No character in the class at all: GitHub emits an empty id, which
         // would be a dead link here. The documented divergence.
         assert_eq!(anchor_slug(&t("***")), "section");

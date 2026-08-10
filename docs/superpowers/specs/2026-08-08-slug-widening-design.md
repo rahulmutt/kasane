@@ -473,3 +473,19 @@ parity gap.
 This does not make the mirror self-maintaining: it is a measurement taken on
 one date against a service that can change. Re-run it when the table is next
 edited.
+
+### 8.2 Newline rows added 2026-08-10 — pending re-check
+
+The markdown-escaping branch (`2026-08-09-markdown-escaping`) added
+`anchor_slug`'s newline fold and, with it, two rows to the case table: a
+heading with an embedded `\n`, and one with an embedded `\r\n`, pinning that
+both spellings fold to a single separator. **Neither row was exercised by the
+2026-08-09 run above.** That run predates the fold and could not have covered
+it; this is a plain record of the gap, not a claim that it is closed.
+
+The two rows are pinned against the case table's own reading of the
+algorithm — the same reading `anchor_fold`'s newline handling was written to
+match — and against the mechanism (GitHub computes an id from the *rendered*
+line, which `kasane-writer`'s `escape::one_line` has already folded by then).
+They have not been checked against an actual github.com render. Re-run §8.1's
+method for these two cases specifically before treating them as verified.
