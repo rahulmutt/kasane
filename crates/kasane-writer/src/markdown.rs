@@ -65,32 +65,25 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .find(|a| a.key == image.key)
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
+            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow, false));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
-                inlines_to_md(caption, Ctx::Flow, false),
-                fname
+                alt,
+                escape::dest_path(fname)
             ));
             if let Some(n) = number {
-                out.push_str(&format!(
-                    "*Figure {}: {}*\n",
-                    n,
-                    inlines_to_md(caption, Ctx::Flow, false)
-                ));
+                out.push_str(&format!("*Figure {}: {}*\n", n, alt));
             }
         }
         Block::CodeBlock { lang, text } => {
-            out.push_str(&format!(
-                "```{}\n{}\n```\n",
-                lang.clone().unwrap_or_default(),
-                text
-            ));
+            out.push_str(&escape::fenced_block(text, lang.as_deref()));
         }
         Block::MathBlock(s) => out.push_str(&format!("$$\n{}\n$$\n", s)),
         Block::Footnote { id, blocks } => {
             let body = blocks_to_markdown_at(blocks, assets, depth + 1);
             out.push_str(&format!("[^{}]: {}\n", id.0, body.trim()));
         }
-        Block::Raw { note } => out.push_str(&format!("<!-- {} -->\n", note)),
+        Block::Raw { note } => out.push_str(&format!("<!-- {} -->\n", escape::comment_note(note))),
     }
 }
 
@@ -492,5 +485,54 @@ mod tests {
         ])];
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("a\n\\- b"), "got: {md}");
+    }
+
+    #[test]
+    fn figure_alt_text_and_caption_are_escaped_and_the_asset_path_encoded() {
+        let assets = AssetBag {
+            items: vec![AssetItem {
+                key: "k".into(),
+                filename: "a b(1).png".into(),
+                bytes: vec![],
+            }],
+        };
+        let blocks = vec![Block::Figure {
+            image: AssetRef {
+                key: "k".into(),
+                bytes_ref: 0,
+            },
+            caption: vec![Inline::Text("fig [1]".into())],
+            number: Some("1".into()),
+        }];
+        let md = blocks_to_markdown(&blocks, &assets);
+        assert!(
+            md.contains("![fig \\[1\\]](_assets/a%20b%281%29.png)"),
+            "got: {md}"
+        );
+        assert!(md.contains("*Figure 1: fig \\[1\\]*"), "got: {md}");
+    }
+
+    #[test]
+    fn a_code_block_containing_a_fence_does_not_break_out() {
+        let blocks = vec![Block::CodeBlock {
+            lang: Some("rust ignore".into()),
+            text: "outer\n```\ninner".into(),
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(
+            md.contains("````rust\nouter\n```\ninner\n````"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn a_raw_note_cannot_close_its_own_comment() {
+        let blocks = vec![Block::Raw {
+            note: "a --> b -".into(),
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(!md.contains("--> b"), "the note closed the comment: {md}");
+        assert!(md.starts_with("<!-- "), "got: {md}");
+        assert!(md.trim_end().ends_with("-->"), "got: {md}");
     }
 }

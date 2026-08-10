@@ -30,7 +30,11 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
         out.push('#');
     }
     out.push(' ');
-    out.push_str(&file.frontmatter.title);
+    out.push_str(&escape::text(
+        &escape::one_line(&file.frontmatter.title),
+        escape::Ctx::Flow,
+        true,
+    ));
     out.push('\n');
     out.push('\n');
     out.push_str(&blocks_to_markdown(&file.blocks, assets));
@@ -122,7 +126,7 @@ fn file_stem(p: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::write_tree;
+    use super::{file_to_markdown, write_tree};
     use kasane_core::{FileNode, Frontmatter, SiteTree};
     use kasane_ir::{AssetBag, Block, BlockId, Inline};
 
@@ -202,7 +206,6 @@ mod tests {
 
     #[test]
     fn file_to_markdown_opens_with_the_title_heading() {
-        use crate::file_to_markdown;
         let file = FileNode {
             path: "01-intro/02-background.md".into(),
             frontmatter: Frontmatter {
@@ -224,7 +227,6 @@ mod tests {
 
     #[test]
     fn title_heading_level_is_clamped_to_six() {
-        use crate::file_to_markdown;
         let file = FileNode {
             path: "a/b/c/d/e/f/g.md".into(),
             frontmatter: Frontmatter {
@@ -240,5 +242,24 @@ mod tests {
         };
         let md = file_to_markdown(&file, &AssetBag::default());
         assert!(md.starts_with("###### Deep\n"), "got: {:?}", md);
+    }
+
+    #[test]
+    fn the_title_heading_is_escaped_and_kept_on_one_line() {
+        let file = FileNode {
+            path: "index.md".into(),
+            frontmatter: Frontmatter {
+                title: "# Notes\nspilled".into(),
+                breadcrumb: vec!["Book".into()],
+                parent: None,
+                prev: None,
+                next: None,
+                children: vec![],
+                source_pages: None,
+            },
+            blocks: vec![],
+        };
+        let md = file_to_markdown(&file, &AssetBag::default());
+        assert!(md.starts_with("# \\# Notes spilled\n"), "got: {md}");
     }
 }

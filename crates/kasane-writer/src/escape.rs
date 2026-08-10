@@ -226,7 +226,6 @@ pub(crate) fn code_span(s: &str) -> String {
 }
 
 /// A whole fenced code block, trailing newline included (§3.4).
-#[allow(dead_code)] // consumed by Task 7
 pub(crate) fn fenced_block(text: &str, lang: Option<&str>) -> String {
     let ticks = "`".repeat(longest_backtick_run(text).max(2) + 1);
     let info = lang.map(sanitize_info).unwrap_or_default();
@@ -265,7 +264,6 @@ fn sanitize_info(lang: &str) -> String {
 /// would otherwise emit a destination parsing as path `C` with a fragment; the
 /// rest because they end or nest a bare destination. `/` stays literal — it is
 /// the path separator.
-#[allow(dead_code)] // consumed by Task 11
 pub(crate) fn dest_path(s: &str) -> String {
     encode(s, &['%', '#', '?', ' ', '(', ')', '<', '>', '\\', '"'])
 }
@@ -308,6 +306,19 @@ pub(crate) fn yaml_scalar(s: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// Make a note safe inside `<!-- ... -->` (§4.4).
+///
+/// A note containing `-->` closes the comment early, and one ending in `-`
+/// leaves it malformed. Today's notes are internal fixed strings, so this is
+/// defence in depth on a surface the rest of this module already covers.
+pub(crate) fn comment_note(s: &str) -> String {
+    let mut out = one_line(s).replace("--", "- -");
+    if out.ends_with('-') {
+        out.push(' ');
+    }
     out
 }
 
