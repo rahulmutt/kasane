@@ -1,5 +1,7 @@
 mod escape;
 mod frontmatter;
+#[doc(hidden)]
+pub mod fuzz_entry;
 mod library;
 mod markdown;
 

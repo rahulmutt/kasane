@@ -103,7 +103,7 @@ description = "Fuzz every target for 5 minutes each"
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-for t in epub pptx mobi pdf djvu epub_zip pptx_zip detect math_island palmdoc guards xmltext; do
+for t in epub pptx mobi pdf djvu epub_zip pptx_zip detect math_island palmdoc guards xmltext slug escape; do
   echo "=== $t ==="
   mise run fuzz "$t" -- -max_total_time=300
 done
