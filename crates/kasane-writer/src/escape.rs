@@ -194,7 +194,6 @@ pub(crate) fn one_line(s: &str) -> String {
 /// `[` with `(`, which changes the rendered text — forbidden by §5, because
 /// anchors are computed from unescaped IR text and must still match what the
 /// heading renders to.
-#[allow(dead_code)] // consumed by Task 11
 pub(crate) fn label(s: &str) -> String {
     one_line(&text(s, Ctx::Flow, false))
 }

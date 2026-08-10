@@ -1,3 +1,4 @@
+use crate::escape;
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -25,7 +26,8 @@ pub struct LibraryFailure {
 /// Written even when every document failed, so a failed run leaves an on-disk
 /// record rather than only a stderr trace. The frontmatter holds no free text —
 /// only `kind` and two counts — so no YAML quoting is needed; titles appear
-/// solely as link labels, where `link_text` neutralizes them.
+/// solely as link labels, where `escape::label` handles them under the same
+/// policy as the rest of the writer.
 pub fn write_library_index(
     entries: &[LibraryEntry],
     failures: &[LibraryFailure],
@@ -51,8 +53,8 @@ pub fn write_library_index(
         };
         s.push_str(&format!(
             "- [{}]({}/index.md) — {}, {} files\n",
-            link_text(title),
-            link_dest(&e.rel_dir),
+            escape::label(title),
+            escape::dest_path(&e.rel_dir),
             e.format,
             e.files
         ));
@@ -62,9 +64,9 @@ pub fn write_library_index(
         s.push_str("\n## Failed\n\n");
         for f in failures {
             s.push_str(&format!(
-                "- `{}` — {}\n",
-                one_line(&f.input),
-                one_line(&f.reason)
+                "- {} — {}\n",
+                escape::code_span(&f.input),
+                escape::label(&f.reason)
             ));
         }
     }
@@ -73,52 +75,6 @@ pub fn write_library_index(
     let path = out.join("index.md");
     std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))?;
     Ok(())
-}
-
-/// Neutralize the narrow subset that would corrupt a Markdown link label. The
-/// repo-wide escaping policy is a separate, known-deferred item.
-fn link_text(s: &str) -> String {
-    s.replace('[', "(")
-        .replace(']', ")")
-        .replace(['\n', '\r'], " ")
-}
-
-/// Collapse a multi-line error message onto a single bullet line.
-fn one_line(s: &str) -> String {
-    s.replace(['\n', '\r'], " ")
-}
-
-/// Percent-encode the characters that would otherwise break a bare
-/// (non-`<…>`-wrapped) Markdown link destination, as `%XX` with uppercase hex:
-///
-/// - `%` — encoded first in spirit and in effect, so the output is
-///   unambiguous: a literal `%` in a filename (`50%20off`) would otherwise be
-///   read back as an escape and decode to a different, non-existent directory.
-/// - `#` and `?` — fragment and query delimiters. `C# Notes` would otherwise
-///   emit `C#%20Notes/index.md`, which parses as path `C` with fragment
-///   `#%20Notes/index.md`.
-/// - space, `(`, `)`, `<`, `>`, `\`, `"` — end or nest the destination.
-/// - control characters, including `\n`/`\r`, which would split the
-///   destination across lines.
-///
-/// `/` is deliberately left literal: `rel_dir` is a path and `/` is its
-/// separator, not something to hide.
-fn link_dest(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '%' | '#' | '?' | ' ' | '(' | ')' | '<' | '>' | '\\' | '"' => {
-                out.push('%');
-                out.push_str(&format!("{:02X}", c as u32));
-            }
-            c if c.is_ascii_control() => {
-                out.push('%');
-                out.push_str(&format!("{:02X}", c as u32));
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -181,10 +137,10 @@ mod tests {
     }
 
     #[test]
-    fn link_text_cannot_break_out_of_the_label() {
+    fn a_bracket_in_the_title_cannot_break_out_of_the_label() {
         let md = write(&[entry("Bracket] and\nnewline", "a/odd")], &[]);
         assert!(
-            md.contains("- [Bracket) and newline](a/odd/index.md)"),
+            md.contains("- [Bracket\\] and newline](a/odd/index.md)"),
             "got: {md}"
         );
     }
@@ -267,9 +223,10 @@ mod tests {
 
     #[test]
     fn empty_title_fallback_label_stays_literal_while_the_destination_still_encodes() {
-        // The label falls back to `rel_dir` verbatim (through `link_text`,
+        // The label falls back to `rel_dir` verbatim (through `escape::label`,
         // which does not escape spaces); the destination still goes through
-        // `link_dest`. Label and destination have different escaping rules.
+        // `escape::dest_path`. Label and destination have different escaping
+        // rules.
         let md = write(&[entry("   ", "a/War Stories")], &[]);
         assert!(
             md.contains("- [a/War Stories](a/War%20Stories/index.md)"),
@@ -289,6 +246,33 @@ mod tests {
         assert!(
             md.contains("- `c/weird name.pdf` — malformed input"),
             "got: {md}"
+        );
+    }
+
+    #[test]
+    fn a_title_with_markdown_in_it_is_escaped_not_substituted() {
+        // link_text replaced `[` with `(`, which changes the rendered text.
+        // Section 5 forbids that: anchors are computed from unescaped IR text.
+        let md = write(&[entry("A [b] *c*", "a/x")], &[]);
+        assert!(
+            md.contains("- [A \\[b\\] \\*c\\*](a/x/index.md)"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn a_failure_reason_is_escaped_inside_its_backticks() {
+        let md = write(
+            &[],
+            &[LibraryFailure {
+                input: "c/d`e.azw3".into(),
+                reason: "bad [thing]\nsecond line".into(),
+            }],
+        );
+        assert!(md.contains("bad \\[thing\\] second line"), "got: {md}");
+        assert!(
+            md.lines().filter(|l| l.starts_with("- ")).count() == 1,
+            "the reason spilled onto another line: {md}"
         );
     }
 }
