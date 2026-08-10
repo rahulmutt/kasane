@@ -314,8 +314,24 @@ pub(crate) fn yaml_scalar(s: &str) -> String {
 /// A note containing `-->` closes the comment early, and one ending in `-`
 /// leaves it malformed. Today's notes are internal fixed strings, so this is
 /// defence in depth on a surface the rest of this module already covers.
+///
+/// A one-shot `str::replace("--", "- -")` is not enough: it matches
+/// non-overlapping left-to-right, so an odd-length dash run leaves one dash
+/// unreplaced right after a chunk that itself ends in `-`, and the two
+/// recombine into a fresh `--` (`"--->"` -> `"- -->"`, which still closes the
+/// comment). Walking the characters one at a time and inserting a space
+/// whenever the character about to be pushed is `-` and the output so far
+/// already ends in `-` considers the *output*, not the input, so a pair
+/// created by an earlier insertion is caught too — no run of two or more
+/// dashes can ever survive into `out`.
 pub(crate) fn comment_note(s: &str) -> String {
-    let mut out = one_line(s).replace("--", "- -");
+    let mut out = String::new();
+    for c in one_line(s).chars() {
+        if c == '-' && out.ends_with('-') {
+            out.push(' ');
+        }
+        out.push(c);
+    }
     if out.ends_with('-') {
         out.push(' ');
     }
@@ -547,5 +563,25 @@ mod tests {
         // rather than dropping is what keeps two words from fusing.
         assert_eq!(yaml_scalar("a\u{7}b"), "\"a b\"");
         assert_eq!(yaml_scalar("cat\tnap"), "\"cat nap\"");
+    }
+
+    #[test]
+    fn comment_note_cannot_close_the_comment_early() {
+        // The property, not a literal output string: wrap the note the same
+        // way `markdown.rs`'s `Block::Raw` arm does, then require that the
+        // only `-->` in the whole thing is the wrapper's own closer. A
+        // one-shot `str::replace("--", "- -")` fails "--->" and "x--->y" --
+        // it leaves an odd dash unreplaced right after a chunk ending in
+        // `-`, and the two recombine.
+        for note in ["--->", "x--->y", "-----", "----"] {
+            let wrapped = format!("<!-- {} -->", comment_note(note));
+            let body = wrapped
+                .strip_suffix("-->")
+                .expect("the wrapper always ends in the closer");
+            assert!(
+                !body.contains("-->"),
+                "note {note:?} closed the comment early: {wrapped}"
+            );
+        }
     }
 }
