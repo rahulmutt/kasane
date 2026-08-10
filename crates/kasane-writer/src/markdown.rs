@@ -89,18 +89,20 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
 
 fn render_table(t: &Table, out: &mut String) {
     if t.has_merged {
+        // An HTML block's content is raw: GFM parses no Markdown inside it, so
+        // the inlines must be emitted as HTML tags and the text HTML-escaped.
+        // Emitting `**bold**` here (as this branch did) renders with the
+        // asterisks showing (§3.3).
         out.push_str("<table>\n");
-        // header + rows as HTML (merged cells not modeled per-cell here; emit flat)
-        let esc = |c: &Vec<Inline>| inlines_to_md(c, Ctx::Flow, false);
         out.push_str("<tr>");
         for c in &t.header {
-            out.push_str(&format!("<th>{}</th>", esc(c)));
+            out.push_str(&format!("<th>{}</th>", inlines_to_html(c, 0)));
         }
         out.push_str("</tr>\n");
         for r in &t.rows {
             out.push_str("<tr>");
             for c in r {
-                out.push_str(&format!("<td>{}</td>", esc(c)));
+                out.push_str(&format!("<td>{}</td>", inlines_to_html(c, 0)));
             }
             out.push_str("</tr>\n");
         }
@@ -110,7 +112,7 @@ fn render_table(t: &Table, out: &mut String) {
     let cells = |row: &Vec<Vec<Inline>>| {
         let joined: Vec<String> = row
             .iter()
-            .map(|c| inlines_to_md(c, Ctx::Flow, false))
+            .map(|c| inlines_to_md(c, Ctx::Cell, true))
             .collect();
         format!("| {} |", joined.join(" | "))
     };
@@ -122,6 +124,45 @@ fn render_table(t: &Table, out: &mut String) {
         out.push_str(&cells(r));
         out.push('\n');
     }
+}
+
+/// Render inlines as HTML, for the merged-table fallback only.
+///
+/// Math is the one inline with no HTML spelling here: `$…$` is not parsed
+/// inside an HTML block either, so a merged-cell equation degrades to its
+/// literal LaTeX. That renders no worse than today, and the alternative is
+/// emitting MathML the IR does not carry (§3.3).
+fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return String::new();
+    }
+    let mut s = String::new();
+    for i in inls {
+        match i {
+            Inline::Text(t) => s.push_str(&escape::text(t, Ctx::Html, false)),
+            Inline::Emph(x) => s.push_str(&format!("<em>{}</em>", inlines_to_html(x, depth + 1))),
+            Inline::Strong(x) => s.push_str(&format!(
+                "<strong>{}</strong>",
+                inlines_to_html(x, depth + 1)
+            )),
+            Inline::Code(t) => s.push_str(&format!(
+                "<code>{}</code>",
+                escape::text(t, Ctx::Html, false)
+            )),
+            Inline::Math(t) => s.push_str(&format!("${}$", escape::text(t, Ctx::Html, false))),
+            Inline::Link {
+                target: RefTarget::External(u),
+                inlines,
+            } => s.push_str(&format!(
+                "<a href=\"{}\">{}</a>",
+                escape::text(&escape::dest_url(u), Ctx::Html, false),
+                inlines_to_html(inlines, depth + 1)
+            )),
+            Inline::Link { inlines, .. } => s.push_str(&inlines_to_html(inlines, depth + 1)),
+            Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
+        }
+    }
+    s
 }
 
 pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, at_line_start: bool) -> String {
@@ -534,5 +575,39 @@ mod tests {
         assert!(!md.contains("--> b"), "the note closed the comment: {md}");
         assert!(md.starts_with("<!-- "), "got: {md}");
         assert!(md.trim_end().ends_with("-->"), "got: {md}");
+    }
+
+    #[test]
+    fn a_pipe_in_a_cell_does_not_split_the_row() {
+        let t = Table {
+            header: vec![vec![Inline::Text("a|b".into())]],
+            rows: vec![vec![vec![Inline::Text("c\nd".into())]]],
+            has_merged: false,
+        };
+        let md = blocks_to_markdown(&[Block::Table(t)], &AssetBag::default());
+        assert!(md.contains("| a\\|b |"), "got: {md}");
+        assert!(md.contains("| c<br>d |"), "got: {md}");
+    }
+
+    #[test]
+    fn the_merged_path_emits_html_markup_and_html_escaped_text() {
+        // GFM parses nothing inside an HTML block, so `**bold**` there renders
+        // with its asterisks showing. Emit tags instead.
+        let t = Table {
+            header: vec![vec![Inline::Text("a & b".into())]],
+            rows: vec![vec![vec![
+                Inline::Strong(vec![Inline::Text("bold".into())]),
+                Inline::Text(" <x>".into()),
+                Inline::Code("c<d".into()),
+            ]]],
+            has_merged: true,
+        };
+        let md = blocks_to_markdown(&[Block::Table(t)], &AssetBag::default());
+        assert!(md.contains("<th>a &amp; b</th>"), "got: {md}");
+        assert!(
+            md.contains("<td><strong>bold</strong> &lt;x&gt;<code>c&lt;d</code></td>"),
+            "got: {md}"
+        );
+        assert!(!md.contains("**bold**"), "markdown markup leaked: {md}");
     }
 }
