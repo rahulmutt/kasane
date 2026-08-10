@@ -17,6 +17,7 @@ use generator::{Case, Expect};
 use kasane_core::{anchors_for_headings, est_tokens, structure, FileNode};
 use kasane_ir::Block;
 use proptest::prelude::*;
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
 
 /// Runs the pipeline and returns each file with the text a real conversion
@@ -50,110 +51,207 @@ fn resolve_relative(from_file: &str, rel: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// Every `[text](target)` in a rendered file.
+/// What a real GFM parser recovers from a rendered file.
+struct Parsed {
+    /// Concatenated text, code, math and stripped inline HTML, in document
+    /// order.
+    text: String,
+    /// Each heading's text, in render order.
+    headings: Vec<String>,
+    /// Every link destination.
+    links: Vec<String>,
+    footnote_defs: usize,
+    table_rows: usize,
+}
+
+/// Parse with exactly the GFM extensions kasane emits, plus math.
 ///
-/// A `](` inside a fenced code block would be collected as a link too — and
-/// unlike `heading_anchors`' analogous imprecision, this one runs the *unsafe*
-/// direction: an extra "link" is one more target P2 demands resolve, so a
-/// false positive here is a false test failure, not merely a permissive check.
-/// It is safe today only because the generator's `Shape::Code` body is a bare
-/// sentinel token with no brackets. A generator that ever puts arbitrary text
-/// in a code block needs a real fence-skipping pass here first.
-fn links_in(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == ']' && i + 1 < bytes.len() && bytes[i + 1] == '(' {
-            let mut j = i + 2;
-            let mut target = String::new();
-            while j < bytes.len() && bytes[j] != ')' {
-                target.push(bytes[j]);
-                j += 1;
+/// Math is **on**, unlike an earlier draft of this helper: GitHub renders
+/// `$…$`/`$$…$$` as math rather than re-parsing the interior as Markdown, so
+/// leaving the extension off tested something GitHub does not do. With it
+/// off, `Block::MathBlock`'s content — deliberately unescaped, real LaTeX —
+/// was read back through the *inline* Markdown grammar instead of treated as
+/// opaque, so a hostile character legitimately present in math (`*`, `_`,
+/// `` ` ``, …) came back as real emphasis/code/etc. instead of the literal
+/// text kasane wrote and GitHub would actually show.
+///
+/// The reason cited for keeping math off was that an escaped `\$` in prose
+/// must still arrive as literal text, matching a bare, unescaped `$…$`
+/// nowhere. That still holds with the extension on: `pulldown-cmark`'s
+/// backslash-escape handling runs before its math-delimiter scan, so `\$`
+/// never opens a math span, on either side of it, with or without a real
+/// math span next to it (checked directly against the parser: `"costs
+/// 5\\$"`, `` "\\$math\\$ in prose" `` and `"$x^2$ costs 5\\$"` all decode the
+/// escaped `$` to plain `Text`, never `InlineMath`/`DisplayMath`). Prose and
+/// math therefore still agree without a special case — the brief's original
+/// concern, just satisfied by a fact about the parser rather than by leaving
+/// a whole construct untested.
+fn parse_events(md: &str) -> Parsed {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_MATH);
+
+    let mut p = Parsed {
+        text: String::new(),
+        headings: Vec::new(),
+        links: Vec::new(),
+        footnote_defs: 0,
+        table_rows: 0,
+    };
+    let mut heading_depth = 0usize;
+    let mut heading = String::new();
+
+    for ev in Parser::new_ext(md, opts) {
+        match ev {
+            Event::Text(t) | Event::Code(t) => {
+                p.text.push_str(&t);
+                if heading_depth > 0 {
+                    heading.push_str(&t);
+                }
             }
-            if j < bytes.len() {
-                out.push(target);
+            // An HTML block or inline tag: keep its text, drop its markup. The
+            // merged-table path and `<br>` in cells both arrive this way.
+            //
+            // Math is padded the same way and for the same reason: `$$…$$`
+            // wraps its content in the writer's own newlines, but `$…$`
+            // (never generated today, since the property tier only draws
+            // hostile text into `Block::MathBlock`) would not, and could
+            // otherwise fuse onto neighboring text with no boundary at all.
+            Event::Html(h) | Event::InlineHtml(h) => {
+                let stripped = strip_tags(&h);
+                p.text.push(' ');
+                p.text.push_str(&stripped);
+                p.text.push(' ');
+                if heading_depth > 0 {
+                    heading.push_str(&stripped);
+                }
             }
-            i = j;
+            Event::InlineMath(t) | Event::DisplayMath(t) => {
+                p.text.push(' ');
+                p.text.push_str(&t);
+                p.text.push(' ');
+                if heading_depth > 0 {
+                    heading.push_str(&t);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => p.text.push(' '),
+            Event::Start(Tag::Heading { .. }) => {
+                heading_depth += 1;
+                heading.clear();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                heading_depth = heading_depth.saturating_sub(1);
+                p.headings.push(heading.trim().to_string());
+            }
+            Event::Start(Tag::Link { dest_url, .. }) => p.links.push(dest_url.to_string()),
+            Event::Start(Tag::FootnoteDefinition(_)) => p.footnote_defs += 1,
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => p.table_rows += 1,
+            Event::End(TagEnd::Paragraph) => p.text.push(' '),
+            _ => {}
         }
-        i += 1;
     }
-    out
+    p
 }
 
-/// Strips the list markers `render_block` prepends, so a heading that is the
-/// first block of a list item is visible to `heading_anchors`.
+/// Drop HTML tags and decode the four entities `escape::text(_, Ctx::Html, _)`
+/// produces, so an HTML block's text can be compared with the IR's.
 ///
-/// `render_block` renders a list item's first block on the marker's own line
-/// (`markdown.rs`: it pushes `- ` or `N. `, then `inner.trim_end()`), so a
-/// heading leading a list item comes out as `- ## Notes`. GFM parses that as a
-/// heading and gives it an id, which is why `count_headings` counts it — and
-/// `trim_start().strip_prefix('#')` would never have seen it, so the helper's
-/// order and the engine's order diverged for exactly that shape.
-/// `heading_anchors_sees_a_heading_that_leads_a_list_item` pins the marker
-/// spellings against `render_block`'s real output rather than against this
-/// comment.
-///
-/// Loops, because nested list items nest their markers on one line too
-/// (`- - ## Notes`).
-fn strip_list_markers(line: &str) -> &str {
-    let mut l = line.trim_start();
-    loop {
-        let rest = if let Some(r) = l.strip_prefix("- ") {
-            r
-        } else {
-            let digits = l.find(|c: char| !c.is_ascii_digit()).unwrap_or(l.len());
-            match l.split_at(digits) {
-                (d, r) if !d.is_empty() && r.starts_with(". ") => &r[2..],
-                _ => return l,
+/// An `escape::comment_note` comment (`Block::Raw`) is handled first and
+/// separately from ordinary tags. It arrives as a single `Html` event with
+/// exactly one `<` (in `<!--`) and one `>` (in `-->`) bracketing the whole
+/// note, so the generic tag-stripping loop below would treat everything
+/// between them as "inside a tag" and discard the note entirely — the
+/// opposite of what it does for a real tag pair like `<td>text</td>`, where
+/// the content sits *between* two separate `<...>` groups. `comment_note`
+/// also never HTML-escapes (a `<` or `&` inside a comment does not open
+/// anything), so the interior is taken verbatim, with no entity decoding.
+fn strip_tags(html: &str) -> String {
+    let trimmed = html.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("<!--")
+        .and_then(|s| s.strip_suffix("-->"))
+    {
+        return inner.to_string();
+    }
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
             }
-        };
-        l = rest.trim_start();
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
     }
+    out.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
 }
 
-/// Every heading line's anchor, as the engine would compute it for this file.
+/// Collapse whitespace runs and trim, on both sides of every comparison.
 ///
-/// Two shapes would be counted here that the engine does not count: a
-/// `#`-prefixed line inside a fenced code block, and a list item whose
-/// paragraph merely *starts* with `#` (`- #x`), which `strip_list_markers`
-/// hands over as a heading line. Neither is merely a permissive check — that
-/// stopped being true when order started mattering. A spurious heading line
-/// consumes a counter slot, so a real heading whose base matches it computes
-/// `base-1` here against the engine's `base`: a false P2 failure, not a
-/// lenient one.
+/// Markdown normalizes whitespace at line boundaries — a soft break is a
+/// newline in the source and a space in the render — so an exact comparison
+/// would fail on formatting rather than on escaping. The cost is that a lost
+/// *space* is invisible to P7; every other character is not.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Count blocks matching `pred`, recursing into lists and footnotes.
+fn count_blocks(blocks: &[Block], pred: fn(&Block) -> bool) -> usize {
+    sum_blocks(blocks, move |b| usize::from(pred(b)))
+}
+
+fn sum_blocks<F: Fn(&Block) -> usize + Copy>(blocks: &[Block], f: F) -> usize {
+    let mut total = 0;
+    for b in blocks {
+        total += f(b);
+        match b {
+            Block::List { items, .. } => {
+                for item in items {
+                    total += sum_blocks(item, f);
+                }
+            }
+            Block::Footnote { blocks, .. } => total += sum_blocks(blocks, f),
+            _ => {}
+        }
+    }
+    total
+}
+
+/// Every link destination in a rendered file, as a real parser sees them.
 ///
-/// Both are unreachable today for the same reason: the generator's only text
-/// is `WORDS` and a `zq####` sentinel, and neither contains a `#`. A generator
-/// that ever draws arbitrary text — into a code block or into a list item —
-/// needs a real Markdown pass here first, the same warning `links_in` carries.
+/// Superseded a hand-rolled `](`-scanner whose own doc comment named its
+/// limit: it collected a false link from a fenced code block, and a false
+/// positive here is one more target P2 demands resolve — a false failure, not
+/// a lenient check. The generator now draws bracket-bearing text into code
+/// blocks, so that limit is reached on the first hostile draw.
+fn links_in(text: &str) -> Vec<String> {
+    parse_events(text).links
+}
+
+/// Every heading's anchor, as the engine would compute it for this file.
 ///
-/// Order matters now, and did not before: duplicate anchors are suffixed per
-/// file in render order, so this feeds the whole ordered list to the engine's
-/// own counter rather than slugging each line independently.
+/// Also superseded a line scanner. It stripped list markers by hand to see a
+/// heading leading a list item, and stripped `*` and `` ` `` to undo the
+/// writer's own markup — both of which a parser does correctly and neither of
+/// which survives contact with hostile text, since a paragraph beginning with
+/// `#` looked like a heading to it and consumed a duplicate-suffix slot.
 ///
-/// The emphasis markers *are* stripped first, and that one is not optional.
-/// The engine anchors a heading at `anchor_slug(inlines)`, which reduces
-/// through `inline_text` and therefore never sees a marker; the rendered line
-/// comes from `inlines_to_md`, which writes `*`/`**` around `Emph`/`Strong`
-/// and backticks around `Code`. A demoted heading rendered as
-/// `## Chapter*One*` would otherwise anchor to `chapter-one` here against the
-/// engine's `chapterone` -- a false failure of P2, not a real one.
-///
-/// `_` is deliberately NOT stripped, and used to be. It was in the set
-/// defensively, against a writer that might switch emphasis markers -- but `_`
-/// is Connector_Punctuation, inside `\p{Word}`, so the engine now keeps a
-/// literal underscore. Stripping it here would compute `foobar` against the
-/// engine's `foo_bar`.
+/// Order still matters: duplicate anchors are suffixed per file in render
+/// order, so the whole ordered list goes to the engine's own counter rather
+/// than each line being slugged independently.
 fn heading_anchors(text: &str) -> HashSet<String> {
-    let titles: Vec<String> = text
-        .lines()
-        .map(strip_list_markers)
-        .filter_map(|l| l.strip_prefix('#'))
-        .map(|l| l.trim_start_matches('#').trim())
-        .map(|t| t.replace(['*', '`'], ""))
-        .collect();
-    anchors_for_headings(&titles).into_iter().collect()
+    anchors_for_headings(&parse_events(text).headings)
+        .into_iter()
+        .collect()
 }
 
 proptest! {
@@ -320,6 +418,79 @@ proptest! {
         let a: Vec<_> = render(&case).into_iter().map(|(p, t, _)| (p, t)).collect();
         let b: Vec<_> = render(&case).into_iter().map(|(p, t, _)| (p, t)).collect();
         prop_assert_eq!(a, b, "structure + render is not deterministic");
+    }
+
+    /// P7 — Round trip. Every generated payload survives escaping, verbatim,
+    /// into the text a real GFM parser recovers from the rendered file.
+    ///
+    /// This is the check a case table cannot make. The table pins kasane's
+    /// reading of CommonMark; this pins the reading against an implementation
+    /// of it (design spec §6.2). A missed escape shows up here as a payload
+    /// that came back changed, or did not come back at all.
+    ///
+    /// `Sentinel::is_comment` payloads are skipped: a `Block::Raw` note is
+    /// design spec §5's one documented exception to this property's own
+    /// premise, because an HTML comment has no escape mechanism for a `-->`
+    /// run, so `escape::comment_note` transforms rather than escapes and a
+    /// payload containing one legitimately does not survive verbatim.
+    /// Proving a note cannot break *out* of its comment is the fuzz seam's
+    /// job (design spec §6.5), not this property's.
+    #[test]
+    fn p7_round_trip(case in generator::case()) {
+        let files = render(&case);
+        let recovered: String = files
+            .iter()
+            .map(|(_, t, _)| normalize_ws(&parse_events(t).text))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for s in case.sentinels.iter().filter(|s| !s.is_comment) {
+            let needle = normalize_ws(&s.payload);
+            let n = recovered.matches(&needle).count();
+            match s.expect {
+                Expect::Exactly(k) => prop_assert_eq!(
+                    n, k,
+                    "payload {:?} survived {} times in parsed text, expected exactly {}",
+                    s.payload, n, k
+                ),
+                Expect::AtLeast(k) => prop_assert!(
+                    n >= k,
+                    "payload {:?} survived {} times in parsed text, expected at least {}",
+                    s.payload, n, k
+                ),
+            }
+        }
+    }
+
+    /// P8 — Structure. The parsed block structure matches the IR that produced
+    /// it: one footnote definition per `Block::Footnote`, one heading per
+    /// heading (plus the file's own title), and a full grid per GFM table.
+    #[test]
+    fn p8_structure_survives(case in generator::case()) {
+        for (path, text, f) in render(&case) {
+            let parsed = parse_events(&text);
+            let want_notes = count_blocks(&f.blocks, |b| matches!(b, Block::Footnote { .. }));
+            prop_assert_eq!(
+                parsed.footnote_defs, want_notes,
+                "{}: {} footnote definitions parsed, {} in the IR",
+                path, parsed.footnote_defs, want_notes
+            );
+            let want_headings =
+                count_blocks(&f.blocks, |b| matches!(b, Block::Heading { .. })) + 1; // + the title
+            prop_assert_eq!(
+                parsed.headings.len(), want_headings,
+                "{}: {} headings parsed, {} expected",
+                path, parsed.headings.len(), want_headings
+            );
+            let want_rows: usize = sum_blocks(&f.blocks, |b| match b {
+                Block::Table(t) if !t.has_merged => 1 + t.rows.len(),
+                _ => 0,
+            });
+            prop_assert_eq!(
+                parsed.table_rows, want_rows,
+                "{}: {} table rows parsed, {} expected",
+                path, parsed.table_rows, want_rows
+            );
+        }
     }
 }
 

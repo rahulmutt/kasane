@@ -1333,8 +1333,14 @@ Add to `escape.rs`:
 /// Make a note safe inside `<!-- ... -->` (§4.4).
 ///
 /// A note containing `-->` closes the comment early, and one ending in `-`
-/// leaves it malformed. Today's notes are internal fixed strings, so this is
-/// defence in depth on a surface the rest of this module already covers.
+/// leaves it malformed. **Revised during implementation:** this is
+/// load-bearing, not precautionary -- notes are not always internal fixed
+/// strings. `epub/xhtml.rs` and `epub/mod.rs` both build a note with
+/// `format!("image unavailable: {src}")`, interpolating an untrusted `<img
+/// src>` attribute value straight off the document. An HTML comment has no
+/// escape mechanism at all, so this transformation is forced, not chosen --
+/// design spec §5 documents `Block::Raw` as the one exception to the
+/// invariant tying this policy together.
 ///
 /// A one-shot `str::replace("--", "- -")` is not enough: it matches
 /// non-overlapping left-to-right, so an odd-length dash run leaves one dash
@@ -2245,7 +2251,8 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// What a real GFM parser recovers from a rendered file.
 struct Parsed {
-    /// Concatenated text, code and stripped inline HTML, in document order.
+    /// Concatenated text, code, math and stripped inline HTML, in document
+    /// order.
     text: String,
     /// Each heading's text, in render order.
     headings: Vec<String>,
@@ -2255,16 +2262,23 @@ struct Parsed {
     table_rows: usize,
 }
 
-/// Parse with exactly the GFM extensions kasane emits.
+/// Parse with exactly the GFM extensions kasane emits, plus math.
 ///
-/// Math stays **off**: kasane emits `$…$` deliberately, and with the extension
-/// off it arrives as literal text — which is also what an escaped `\$` in prose
-/// arrives as, so both sides of P7 agree without a special case.
+/// **Revised during implementation.** This originally kept math off,
+/// reasoning that kasane's own `$…$` would then arrive as literal text,
+/// matching an escaped `\$` in prose. That reasoning covers the `$`
+/// delimiter but not math *content*: with the extension off, a hostile
+/// character legitimately present in verbatim math (`*`, `_`, `` ` ``, …) is
+/// read back through the ordinary inline grammar instead of treated as
+/// opaque, which is not what GitHub does. Math is on; `\$` in prose still
+/// decodes to a literal `$` and never opens a math span, verified directly
+/// against the parser, so the two sides still agree without a special case.
 fn parse_events(md: &str) -> Parsed {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_MATH);
 
     let mut p = Parsed {
         text: String::new(),
@@ -2295,6 +2309,15 @@ fn parse_events(md: &str) -> Parsed {
                     heading.push_str(&stripped);
                 }
             }
+            // `Block::MathBlock`/`Inline::Math` content, verbatim.
+            Event::InlineMath(t) | Event::DisplayMath(t) => {
+                p.text.push(' ');
+                p.text.push_str(&t);
+                p.text.push(' ');
+                if heading_depth > 0 {
+                    heading.push_str(&t);
+                }
+            }
             Event::SoftBreak | Event::HardBreak => p.text.push(' '),
             Event::Start(Tag::Heading { .. }) => {
                 heading_depth += 1;
@@ -2316,7 +2339,20 @@ fn parse_events(md: &str) -> Parsed {
 
 /// Drop HTML tags and decode the four entities `escape::text(_, Ctx::Html, _)`
 /// produces, so an HTML block's text can be compared with the IR's.
+///
+/// **Revised during implementation** to special-case an `escape::comment_note`
+/// HTML comment (`Block::Raw`) before the generic tag loop: it arrives as a
+/// single `Html` event with exactly one `<` and one `>` bracketing the whole
+/// note, so the generic loop below would treat the entire note as "inside a
+/// tag" and discard it.
 fn strip_tags(html: &str) -> String {
+    let trimmed = html.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("<!--")
+        .and_then(|s| s.strip_suffix("-->"))
+    {
+        return inner.to_string();
+    }
     let mut out = String::new();
     let mut in_tag = false;
     for c in html.chars() {

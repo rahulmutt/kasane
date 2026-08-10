@@ -42,6 +42,14 @@ pub struct Sentinel {
     /// escape a failure rather than a curiosity.
     pub payload: String,
     pub expect: Expect,
+    /// Whether this sentinel was stamped into a `Block::Raw` note.
+    ///
+    /// P7 skips these: `escape::comment_note` is design spec §5's one
+    /// documented exception to "escaping must never change what the
+    /// Markdown renders to" -- an HTML comment has no escape mechanism for a
+    /// `-->` run, so `comment_note` transforms rather than escapes, and the
+    /// payload legitimately does not survive verbatim. See `p7_round_trip`.
+    pub is_comment: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -280,6 +288,24 @@ fn build(shape: &Shape, deco: &[Inline], payload: &str, idx: u32) -> (Block, Exp
     }
 }
 
+/// Neutralizes a literal `$` the way `kasane-adapters`'s `math::latex::sanitize`
+/// does before any document text reaches a LaTeX string.
+///
+/// The contract: the adapter guarantees math content carries no bare `$`
+/// (`$` would close the `$…$`/`$$…$$` span `kasane-writer` opens around it),
+/// so the writer can emit math verbatim, trusting that guarantee rather than
+/// re-checking it. A `Shape::Math` payload has to keep that contract too, or
+/// this generator draws IR no adapter can produce -- not adapter-realistic,
+/// per this module's own charter. Only `$` is touched, mirroring exactly the
+/// one `sanitize` arm this case is about: braces, backslashes and newlines
+/// are `sanitize`'s business elsewhere, and widening the neutralization here
+/// would silently narrow the hostile coverage every other shape still needs.
+/// Not a call into `kasane-adapters` -- `kasane-writer`'s tests must not
+/// depend on it -- a deliberate, narrow mirror instead.
+fn math_safe(s: &str) -> String {
+    s.replace('$', "\\$")
+}
+
 /// A generated case: document, options, assets, and the sentinel ledger.
 pub fn case() -> impl Strategy<Value = Case> {
     // Each entry pairs a block shape with generated nested inline markup, so
@@ -303,7 +329,15 @@ pub fn case() -> impl Strategy<Value = Case> {
         for (i, (sh, deco, hostile)) in shapes.iter().enumerate() {
             let idx = i as u32;
             let token = format!("zq{:04}", idx);
-            let payload = format!("{token} {hostile}");
+            // `Shape::Math` stamps straight into `Block::MathBlock`'s
+            // verbatim content, so it alone needs `math_safe`'s neutralized
+            // draw -- every other shape keeps the raw fragment, which is
+            // exactly what the escaping policy is for.
+            let payload = if matches!(sh, Shape::Math) {
+                format!("{token} {}", math_safe(hostile))
+            } else {
+                format!("{token} {hostile}")
+            };
             let (block, expect) = build(sh, deco, &payload, idx);
 
             // A figure needs a matching asset or the renderer emits "missing".
@@ -323,6 +357,7 @@ pub fn case() -> impl Strategy<Value = Case> {
                 token,
                 payload,
                 expect,
+                is_comment: matches!(sh, Shape::Raw),
             });
         }
 

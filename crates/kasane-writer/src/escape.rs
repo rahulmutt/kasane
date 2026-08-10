@@ -311,8 +311,20 @@ pub(crate) fn yaml_scalar(s: &str) -> String {
 /// Make a note safe inside `<!-- ... -->` (§4.4).
 ///
 /// A note containing `-->` closes the comment early, and one ending in `-`
-/// leaves it malformed. Today's notes are internal fixed strings, so this is
-/// defence in depth on a surface the rest of this module already covers.
+/// leaves it malformed. This is load-bearing, not precautionary: notes are
+/// not always internal fixed strings. `epub/xhtml.rs` and `epub/mod.rs` both
+/// build a note with `format!("image unavailable: {src}")`, interpolating an
+/// untrusted `<img src>` attribute value straight off the document, so a
+/// crafted or merely unusual EPUB can put arbitrary text here. `Block::Raw`
+/// is `Ctx::Html`'s comment sibling with one difference the rest of this
+/// module doesn't have to face: an HTML comment admits no escape mechanism
+/// at all -- no backslash, no entity, nothing that represents a literal
+/// `-->` inside `<!-- -->`. `comment_note` therefore cannot escape, only
+/// transform, and design spec §5 documents `Block::Raw` as the one place its
+/// own invariant ("escaping must never change what the Markdown renders to")
+/// does not hold -- forced by the format, not chosen, and harmless only
+/// because a comment's content is never rendered for a reader to see the
+/// difference.
 ///
 /// A one-shot `str::replace("--", "- -")` is not enough: it matches
 /// non-overlapping left-to-right, so an odd-length dash run leaves one dash

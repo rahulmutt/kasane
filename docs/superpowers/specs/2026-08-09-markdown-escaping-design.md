@@ -340,9 +340,20 @@ counting it feeds keep working unchanged.
 ### 4.4 `Block::Raw` comments
 
 `<!-- {note} -->` (`markdown.rs:88`) breaks on a note containing `-->`, and is
-malformed for a note ending in `-`. Today's notes are internal fixed strings,
-so this is defence in depth on the same surface: `--` runs in the note are
-broken with a space, and a trailing `-` gets one.
+malformed for a note ending in `-`. Notes are **not** always internal fixed
+strings — `epub/xhtml.rs` and `epub/mod.rs` both build one with
+`format!("image unavailable: {src}")`, where `src` is an untrusted `<img
+src>` attribute value read straight off the document — so this is load-bearing
+mitigation on live, adapter-reachable content, not defence in depth on a
+surface that can't be hit: `--` runs in the note are broken with a space, and
+a trailing `-` gets one.
+
+An HTML comment has no escape mechanism at all, unlike every other construct
+this spec covers — no backslash, no entity, nothing that lets `-->` appear
+literally inside `<!-- -->`. `comment_note` therefore cannot escape a
+dangerous run, only transform it, and the transformation is forced by the
+format rather than chosen. §5 documents the consequence: `Block::Raw` is the
+one place this policy's own invariant does not hold.
 
 ## 5. The invariant that ties this to the slug rules
 
@@ -369,6 +380,20 @@ Three consequences follow, and all three are load-bearing:
 - The newline foldings in §4.1 are the one deliberate exception, and each is a
   case where the current output does not render as its text at all.
 
+**`Block::Raw` is a documented exception to the invariant itself**, not
+another case where the rendered text happens not to matter. §4.4's
+`comment_note` breaks up a `--` run inside a note, and that transformation
+*does* change what the comment's content reads as. It is an exception rather
+than a bug for two reasons together: an HTML comment has no escape mechanism
+at all, so there is no way to represent `-->` literally inside `<!-- -->` —
+every other construct in this spec has one (a backslash in flow text, `<br>`
+in a cell, a longer delimiter run for a code span, entity escapes in HTML,
+quoting in YAML) and `Block::Raw` alone does not; and a comment's content is
+never rendered, so no reader ever sees the difference the transformation
+makes. §6.2's round-trip property (P7) accordingly excludes `Block::Raw`
+payloads from its check — proving a note cannot break out of its comment is
+the fuzz seam's job (§6.5), not P7's.
+
 ## 6. Testing
 
 ### 6.1 The case table
@@ -388,13 +413,22 @@ of CommonMark — §6.2 is what checks the reading.
 
 `pulldown-cmark` joins `kasane-writer`'s dev-dependencies (MIT, test-only,
 never in the shipped binary), with the GFM extensions kasane emits enabled:
-tables, footnotes, strikethrough. Math stays disabled, so `$…$` arrives as
-literal text and the expectation mapping renders `Inline::Math(x)` as `$x$`.
+tables, footnotes, strikethrough, **and math**. Math was disabled in the
+original plan, on the reasoning that kasane's own `$…$` would then arrive as
+literal text, matching an escaped `\$` in prose. That covers the `$`
+delimiter but not math *content*: with the extension off, a hostile
+character legitimately present in verbatim math is read back through the
+ordinary inline grammar instead of treated as opaque, which is not what
+GitHub does. With math on, `InlineMath`/`DisplayMath` event text is
+collected the same way `Text`/`Code` is, and the `\$`-in-prose case was
+re-verified directly against the parser: an escaped `$` still never opens a
+math span, so the two sides still agree without a special case.
 
 For each file of a generated case: render with `file_to_markdown`, parse, and
 fold the event stream into a text sequence; derive the same sequence directly
-from the IR (the payloads of `Text`, `Code` and `Math`, in document order); and
-require exact equality. A missed escape appears as text that came back changed.
+from the IR (the payloads of `Text`, `Code` and `Math`, in document order,
+**excluding `Block::Raw`** — see §5's carve-out); and require exact equality.
+A missed escape appears as text that came back changed.
 
 A structural half rides along, since text equality alone would accept a
 paragraph that became a list: heading levels and their order, table row and
