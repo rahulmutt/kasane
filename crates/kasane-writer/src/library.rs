@@ -65,7 +65,7 @@ pub fn write_library_index(
         for f in failures {
             s.push_str(&format!(
                 "- {} — {}\n",
-                escape::code_span(&f.input),
+                escape::code_span(&f.input, escape::Ctx::Flow),
                 escape::label(&f.reason)
             ));
         }

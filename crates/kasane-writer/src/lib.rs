@@ -32,6 +32,10 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
         out.push('#');
     }
     out.push(' ');
+    // Folds first and escapes after, where `Block::Heading` escapes first and
+    // folds after. That only reaches the same heading line because
+    // `escape::one_line` collapses newline runs -- see its doc comment, and
+    // `slug::fold_newlines`, which has to predict whichever line this emits.
     out.push_str(&escape::text(
         &escape::one_line(&file.frontmatter.title),
         escape::Ctx::Flow,

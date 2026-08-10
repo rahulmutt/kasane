@@ -51,7 +51,7 @@ pub fn escape(data: &[u8]) {
     assert_html_specials_are_closed(&html, text);
 
     // A code span's delimiter run must not appear inside its content.
-    let span = escape::code_span(text);
+    let span = escape::code_span(text, Ctx::Flow);
     let ticks = span.chars().take_while(|c| *c == '`').count();
     assert!(ticks >= 1, "code_span emitted no delimiter: {span:?}");
     let inner = &span[ticks..span.len() - ticks];

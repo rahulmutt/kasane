@@ -181,11 +181,46 @@ fn html_text(s: &str) -> String {
     out
 }
 
-/// Fold every newline spelling to a single space, for the contexts where a
-/// newline is structurally impossible: heading lines, link labels, image alt
-/// text, YAML scalars (§4.1).
+/// Fold every newline spelling to a single space, **collapsing runs**, for the
+/// contexts where a newline is structurally impossible: heading lines, link
+/// labels, image alt text, code spans, YAML scalars (§4.1).
+///
+/// One fold for the whole crate, and the collapse is what makes that possible.
+/// The two heading paths reach this from opposite directions and used to
+/// disagree because it did not collapse: `markdown.rs`'s `Block::Heading`
+/// escapes first and folds after, so `escape::text`'s own `normalize_newlines`
+/// had already collapsed the run by the time it got here and `"A\n\nB"`
+/// rendered `## A B`; `lib.rs`'s file-title heading folds first and escapes
+/// after, so nothing had collapsed anything and the same title rendered
+/// `# A  B`. `code_span` is a third caller with the same split — it folds
+/// unescaped content, so nothing collapses ahead of it either.
+///
+/// That is not cosmetic. `kasane-core::slug`'s `anchor_fold` computes a
+/// heading's fragment by predicting the rendered heading line, and it can only
+/// predict one rule; whichever paths disagree with it emit a cross-reference
+/// pointing at an id GitHub does not assign. `slug::fold_newlines` is this
+/// function's hand-kept mirror in `kasane-core`, which cannot depend on this
+/// crate — changing one without the other reopens that mismatch, and P2 is
+/// what catches it.
+///
+/// Literal spaces are a different mechanism and are deliberately *not*
+/// collapsed, here or in the mirror: `Background & Notes` still anchors
+/// `background--notes`.
 pub(crate) fn one_line(s: &str) -> String {
-    s.replace("\r\n", " ").replace(['\n', '\r'], " ")
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_newline = false;
+    for c in s.chars() {
+        if c == '\n' || c == '\r' {
+            if !last_was_newline {
+                out.push(' ');
+            }
+            last_was_newline = true;
+        } else {
+            out.push(c);
+            last_was_newline = false;
+        }
+    }
+    out
 }
 
 /// A link label or image alt text: flow rules, flattened to one line.
@@ -200,11 +235,23 @@ pub(crate) fn label(s: &str) -> String {
 
 /// Wrap code content in a backtick run the content cannot contain (§3.4).
 ///
-/// No escape exists inside a code span, so the delimiter is the only lever.
-/// Newlines fold to spaces because a blank line would end the enclosing
-/// paragraph.
-pub(crate) fn code_span(s: &str) -> String {
+/// No escape exists inside a code span *for the code grammar*, so the
+/// delimiter is the only lever there. Newlines fold to spaces because a blank
+/// line would end the enclosing paragraph.
+///
+/// `Ctx` is required for the one thing that is not true of that: GFM's table
+/// grammar runs *before* inline parsing, so a `|` splits a row even from
+/// inside a code span, and GFM's own answer is a backslash — `` `b \| az` ``
+/// renders `b | az` in a cell. That is why this takes a context at all rather
+/// than being context-free like `fenced_block`; P8 fails on a row that gained
+/// a cell otherwise.
+pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     let content = one_line(s);
+    let content = if ctx == Ctx::Cell {
+        content.replace('|', "\\|")
+    } else {
+        content
+    };
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
     if content.is_empty() {
         // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
@@ -222,6 +269,57 @@ pub(crate) fn code_span(s: &str) -> String {
         // Plain content: no padding
         format!("{ticks}{content}{ticks}")
     }
+}
+
+/// Inline math: `$…$` around verbatim content, or a code span when that
+/// content would break out of the span.
+///
+/// Math is the one inline the writer escapes nothing inside, on the strength
+/// of a contract held in `kasane-adapters` (`math::latex::sanitize` and
+/// `math::symbols::map_text` neutralize `$`, `{`, `}`, `\` and newlines in
+/// every node kind that carries document text). That contract is real and is
+/// tested where it lives — but `blocks_to_markdown` is public API over a
+/// public IR, so a caller who builds `Inline::Math("a$ [x](http://y) $b")` by
+/// hand reaches this function without ever passing an adapter, and gets a
+/// document with a live injected link in it.
+///
+/// There is no escape available: a `\$` would be corrupted for adapter output
+/// that already spells a literal dollar that way, and neutralizing `\`, `{` or
+/// `}` here would destroy the `\frac{1}{2}` the adapter legitimately emits.
+/// The only lever left is the one `code_span` already uses — pick a delimiter
+/// the content cannot contain — and for math there is no wider delimiter to
+/// pick. So unsafe content degrades to a code span instead: the LaTeX is still
+/// there for a reader, verbatim, and it cannot break out of a code span by
+/// construction. Same shape as `render_block`'s depth guard, and reachable for
+/// the same reason: a caller who bypasses the adapters.
+///
+/// A newline is unsafe too, not only `$`: inline math can land in a GFM table
+/// cell, where any newline ends the row.
+pub(crate) fn math_span(s: &str) -> String {
+    if s.contains('$') || s.contains('\n') || s.contains('\r') {
+        code_span(s, Ctx::Flow)
+    } else {
+        format!("${s}$")
+    }
+}
+
+/// Display math: `$$…$$` around verbatim content, or a fenced code block when
+/// that content would break out. See [`math_span`] for the argument.
+///
+/// A blank line is unsafe here rather than any newline: `$$…$$` spans lines by
+/// design, but a blank line ends the block it sits in, leaving the closing
+/// `$$` stranded as literal text.
+pub(crate) fn math_block(s: &str) -> String {
+    if s.contains('$') || has_blank_line(s) {
+        fenced_block(s, None)
+    } else {
+        format!("$$\n{s}\n$$\n")
+    }
+}
+
+/// Whether `s` contains a blank line, in any newline spelling.
+fn has_blank_line(s: &str) -> bool {
+    s.replace("\r\n", "\n").replace('\r', "\n").contains("\n\n")
 }
 
 /// A whole fenced code block, trailing newline included (§3.4).
@@ -454,8 +552,35 @@ mod tests {
     }
 
     #[test]
-    fn one_line_folds_every_newline_spelling_to_a_single_space() {
+    fn one_line_folds_every_newline_run_to_a_single_space() {
         assert_eq!(one_line("a\nb\r\nc\rd"), "a b c d");
+        // The rows this used to get wrong: a blank line is ONE separator on the
+        // rendered line, so it must be one space here and one hyphen in
+        // `anchor_slug`.
+        assert_eq!(one_line("a\n\nb"), "a b");
+        assert_eq!(one_line("a\r\n\r\nb"), "a b");
+        assert_eq!(one_line("a\n\r\n\rb"), "a b");
+        // Literal spaces are a different mechanism and are NOT collapsed --
+        // `Background & Notes` still anchors `background--notes`.
+        assert_eq!(one_line("a  b"), "a  b");
+    }
+
+    /// GFM splits a row on `|` before it parses any inline, so a code span is
+    /// no shelter -- and GFM's own answer is a backslash, which it strips back
+    /// out when it renders the cell.
+    #[test]
+    fn code_span_escapes_a_pipe_in_a_cell_but_not_in_flow() {
+        assert_eq!(code_span("a|b", Ctx::Cell), "`a\\|b`");
+        assert_eq!(code_span("a|b", Ctx::Flow), "`a|b`");
+    }
+
+    #[test]
+    fn code_span_folds_a_newline_run_the_same_way_a_heading_does() {
+        // `inline_text` feeds `Inline::Code`'s text to `anchor_slug` like any
+        // other text, so a code span in a heading has to fold newlines the way
+        // `anchor_fold` does or the emitted fragment misses by a hyphen. P2
+        // found this the first time the generator drew a newline run.
+        assert_eq!(code_span("a\n\nb", Ctx::Flow), "`a b`");
     }
 
     #[test]
@@ -468,17 +593,17 @@ mod tests {
 
     #[test]
     fn code_span_picks_a_run_longer_than_anything_inside() {
-        assert_eq!(code_span("plain"), "`plain`");
-        assert_eq!(code_span("a ` b"), "`` a ` b ``");
-        assert_eq!(code_span("a ``` b"), "```` a ``` b ````");
+        assert_eq!(code_span("plain", Ctx::Flow), "`plain`");
+        assert_eq!(code_span("a ` b", Ctx::Flow), "`` a ` b ``");
+        assert_eq!(code_span("a ``` b", Ctx::Flow), "```` a ``` b ````");
     }
 
     #[test]
     fn code_span_pads_when_the_content_touches_a_backtick() {
         // CommonMark strips exactly one space from each end, so the padding is
         // invisible in the rendered output.
-        assert_eq!(code_span("`x"), "`` `x ``");
-        assert_eq!(code_span("x`"), "`` x` ``");
+        assert_eq!(code_span("`x", Ctx::Flow), "`` `x ``");
+        assert_eq!(code_span("x`", Ctx::Flow), "`` x` ``");
     }
 
     #[test]
@@ -486,10 +611,10 @@ mod tests {
         // All-spaces content receives no padding because CommonMark's carve-out
         // means "consists entirely of space characters" are not stripped, so the
         // input round-trips exactly.
-        assert_eq!(code_span("  "), "`  `");
+        assert_eq!(code_span("  ", Ctx::Flow), "`  `");
         // CommonMark cannot express an empty code span; a single space is the
         // closest thing, and P7 normalizes whitespace so it round-trips.
-        assert_eq!(code_span(""), "` `");
+        assert_eq!(code_span("", Ctx::Flow), "` `");
     }
 
     #[test]
@@ -498,13 +623,37 @@ mod tests {
         // one space from each end (because the content begins and ends with space
         // but does not consist entirely of spaces), so the outer padding is
         // invisible and the input's own spaces survive the render.
-        assert_eq!(code_span(" a "), "`  a  `");
+        assert_eq!(code_span(" a ", Ctx::Flow), "`  a  `");
     }
 
     #[test]
     fn code_span_folds_newlines_to_spaces() {
         // A blank line would end the enclosing paragraph.
-        assert_eq!(code_span("a\nb"), "`a b`");
+        assert_eq!(code_span("a\nb", Ctx::Flow), "`a b`");
+    }
+
+    /// Adapter-produced math is emitted verbatim; content that would break out
+    /// of the delimiter degrades to a construct that cannot.
+    ///
+    /// Only reachable from a caller who builds `Inline::Math` /
+    /// `Block::MathBlock` by hand — `kasane-adapters` neutralizes `$` and
+    /// newlines in every node kind that carries document text — but
+    /// `blocks_to_markdown` is public API over a public IR, so that caller
+    /// exists.
+    #[test]
+    fn math_degrades_when_its_content_would_close_the_delimiter() {
+        assert_eq!(math_span("x^2"), "$x^2$");
+        assert_eq!(math_span("\\frac{1}{2}"), "$\\frac{1}{2}$");
+        // A `$` closes the span; a newline ends a table row.
+        assert_eq!(math_span("a$ [x](http://y) $b"), "`a$ [x](http://y) $b`");
+        assert_eq!(math_span("a\nb"), "`a b`");
+
+        assert_eq!(math_block("x^2"), "$$\nx^2\n$$\n");
+        // Display math spans lines by design, so a lone newline is fine.
+        assert_eq!(math_block("a\nb"), "$$\na\nb\n$$\n");
+        // A blank line ends the block, stranding the closing `$$`.
+        assert_eq!(math_block("a\n\nb"), "```\na\n\nb\n```\n");
+        assert_eq!(math_block("a$b"), "```\na$b\n```\n");
     }
 
     #[test]

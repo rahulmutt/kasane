@@ -78,13 +78,23 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 escape::dest_path(fname)
             ));
             if let Some(n) = number {
-                out.push_str(&format!("*Figure {}: {}*\n", n, alt));
+                // Escaped like any other document text, even though every
+                // adapter sets `None` today: `blocks_to_markdown` is public
+                // API over a public IR, and "escape.rs is the only path from
+                // document text to an output buffer" is stated without
+                // qualification. `Ctx::Flow` with `at_line_start: false`,
+                // because the `*` before it is already on the line.
+                out.push_str(&format!(
+                    "*Figure {}: {}*\n",
+                    escape::text(n, Ctx::Flow, false),
+                    alt
+                ));
             }
         }
         Block::CodeBlock { lang, text } => {
             out.push_str(&escape::fenced_block(text, lang.as_deref()));
         }
-        Block::MathBlock(s) => out.push_str(&format!("$$\n{}\n$$\n", s)),
+        Block::MathBlock(s) => out.push_str(&escape::math_block(s)),
         Block::Footnote { id, blocks } => {
             // Four spaces is GFM's footnote continuation indent. Without it a
             // body of more than one line puts its second line at column zero,
@@ -203,16 +213,16 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
             // The only call to `escape::text` in the crate. Every other arm
             // below emits markup the writer chose, which must not be escaped.
             Inline::Text(t) => s.push_str(&escape::text(t, ctx, line_start)),
-            Inline::Emph(x) => s.push_str(&format!(
-                "*{}*",
-                inlines_to_md_at(x, depth + 1, ctx, line_start)
+            Inline::Emph(x) => s.push_str(&emphasize(
+                &inlines_to_md_at(x, depth + 1, ctx, line_start),
+                "*",
             )),
-            Inline::Strong(x) => s.push_str(&format!(
-                "**{}**",
-                inlines_to_md_at(x, depth + 1, ctx, line_start)
+            Inline::Strong(x) => s.push_str(&emphasize(
+                &inlines_to_md_at(x, depth + 1, ctx, line_start),
+                "**",
             )),
-            Inline::Code(t) => s.push_str(&escape::code_span(t)),
-            Inline::Math(t) => s.push_str(&format!("${}$", t)),
+            Inline::Code(t) => s.push_str(&escape::code_span(t, ctx)),
+            Inline::Math(t) => s.push_str(&escape::math_span(t)),
             Inline::Link {
                 target: RefTarget::External(u),
                 inlines,
@@ -230,6 +240,34 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
         line_start = s.ends_with('\n');
     }
     s
+}
+
+/// Wrap already-rendered inner content in an emphasis delimiter, with any
+/// whitespace at its edges moved *outside* the delimiters.
+///
+/// Two problems, one fix. `at_line_start` guards `Inline::Text` but not the
+/// markup the writer itself emits at column 0, so `Block::Para([Emph([Text("
+/// x")])])` rendered `* x*` — which a GFM parser reads as a bullet list, not a
+/// paragraph, losing the paragraph outright. Reachable from `<p><em>
+/// Note:</em> …</p>`. And CommonMark's flanking rules mean a `*` with an
+/// adjacent space is never an emphasis delimiter *anywhere*, so the same
+/// output silently dropped the emphasis mid-line too.
+///
+/// Moving the whitespace out fixes both at once, and is what CommonMark's own
+/// "emphasis cannot begin or end with whitespace" rule asks for: the rendered
+/// text is unchanged (§5's invariant), the emphasis now actually applies, and
+/// the first character on the line is a space rather than a bullet marker.
+/// Content that is *entirely* whitespace (or empty) gets no delimiters at all,
+/// since there is nothing left to emphasize and `**` at column 0 is markup for
+/// its own sake.
+fn emphasize(inner: &str, delim: &str) -> String {
+    let core = inner.trim();
+    if core.is_empty() {
+        return inner.to_string();
+    }
+    let lead = &inner[..inner.len() - inner.trim_start().len()];
+    let trail = &inner[inner.trim_end().len()..];
+    format!("{lead}{delim}{core}{delim}{trail}")
 }
 
 /// Indent every line after the first by `indent`, leaving blank lines blank so
@@ -517,6 +555,65 @@ mod tests {
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("## Title spilled\n"), "got: {md}");
         assert_eq!(md.lines().filter(|l| l.starts_with("##")).count(), 1);
+    }
+
+    /// The two heading paths now fold newlines identically, and the fold
+    /// collapses runs. Before, `Block::Heading` collapsed (via
+    /// `escape::text`'s `normalize_newlines`) and `file_to_markdown`'s title
+    /// heading did not, so `"A\n\nB"` rendered `## A B` in one and `# A  B` in
+    /// the other -- and `anchor_slug`, which can only predict one rendered
+    /// line, emitted `#a--b` against a heading GitHub ids as `a-b`.
+    #[test]
+    fn a_blank_line_in_a_heading_is_one_separator() {
+        for (input, want) in [
+            ("A\n\nB", "## A B\n"),
+            ("A\r\n\r\nB", "## A B\n"),
+            ("A\nB", "## A B\n"),
+            // Literal spaces are a different mechanism and stay.
+            ("A  B", "## A  B\n"),
+        ] {
+            let blocks = vec![Block::Heading {
+                level: 2,
+                id: BlockId(0),
+                inlines: vec![Inline::Text(input.into())],
+            }];
+            let md = blocks_to_markdown(&blocks, &AssetBag::default());
+            assert!(md.contains(want), "input {input:?} got: {md}");
+        }
+    }
+
+    /// Emphasis whose content begins or ends with whitespace moves that
+    /// whitespace outside the delimiters.
+    ///
+    /// At column 0 the old output was `* x*`, which GFM reads as a bullet
+    /// list rather than a paragraph; the second half of the same bug is that
+    /// CommonMark's flanking rules mean `* x*` is not emphasis anywhere, so
+    /// the markup was silently lost mid-line too.
+    #[test]
+    fn emphasis_moves_edge_whitespace_outside_its_delimiters() {
+        let blocks = vec![Block::Para(vec![Inline::Emph(vec![Inline::Text(
+            " x".into(),
+        )])])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.starts_with(" *x*"), "a bullet list at column 0: {md}");
+
+        // Mid-line, the emphasis must survive rather than be dropped by the
+        // flanking rules.
+        let blocks = vec![Block::Para(vec![
+            Inline::Text("a".into()),
+            Inline::Strong(vec![Inline::Text(" x ".into())]),
+            Inline::Text("b".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("a **x** b"), "got: {md}");
+
+        // Nothing to emphasize: no delimiters at all, so `**` cannot sit at
+        // column 0 as markup for its own sake.
+        let blocks = vec![Block::Para(vec![Inline::Strong(vec![Inline::Text(
+            "  ".into(),
+        )])])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(!md.contains('*'), "got: {md}");
     }
 
     #[test]
