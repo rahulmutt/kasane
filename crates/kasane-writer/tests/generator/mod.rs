@@ -130,6 +130,15 @@ const HOSTILE: &[&str] = &[
     "= setext",
     "line\nbreak",
     "!bang[",
+    // A newline RUN, in both spellings. These are the two fragments P2 needed
+    // to catch the heading fold disagreeing with `anchor_slug`: the body
+    // heading path collapsed a blank line to one space (`## a b`, GitHub id
+    // `a-b`) while `anchor_fold` did not (`#a--b`), so the emitted
+    // cross-reference was dead. P2 recomputes the anchor from parsed heading
+    // text, so it fails on exactly this shape -- but only if the shape is
+    // drawn.
+    "a\n\nb",
+    "a\r\nb",
 ];
 
 /// Filler text, with hostile fragments mixed in often enough that a case
@@ -142,10 +151,32 @@ fn filler() -> impl Strategy<Value = String> {
     proptest::collection::vec(word, 1..12).prop_map(|ws| ws.join(" "))
 }
 
+/// An external `href`, hostile in the ways a real one is: a space and a `)`
+/// end a bare destination, a `%` must survive `dest_url` unencoded, and a
+/// fragment and a query must stay literal.
+///
+/// P2 skips a destination starting with `http`, so these do not have to
+/// resolve to a file in the tree -- what they exercise is `escape::dest_url`
+/// on a real `href` and the `[label](dest)` composition around it, neither of
+/// which had any property-tier coverage while the generator emitted no
+/// author-supplied `RefTarget::External` at all (design spec §6.4).
+const HREFS: &[&str] = &[
+    "https://e.com/a b(1)",
+    "https://e.com/a%20b",
+    "https://e.com/p?q=1#f",
+    "https://e.com/x<y>\"z\"",
+];
+
 /// One inline run, nested at most `depth` levels. Boxed at every level because
 /// the strategy is recursive and its type would otherwise be infinite. The leaf
 /// is built twice rather than cloned, so this compiles without requiring the
 /// mapped strategy to be `Clone`.
+///
+/// `Inline::Code` and an external `Inline::Link` are drawn here rather than
+/// only as block shapes, because that is where the writer composes them:
+/// `escape::code_span`, `escape::dest_url` on an author-supplied `href`, and
+/// `inlines_to_html`'s `<a href>` in the merged-table path all sit on this
+/// walk and had no property-tier coverage until they did (design spec §6.4).
 fn inlines(depth: u32) -> BoxedStrategy<Vec<Inline>> {
     if depth == 0 {
         return filler().prop_map(|s| vec![Inline::Text(s)]).boxed();
@@ -154,6 +185,11 @@ fn inlines(depth: u32) -> BoxedStrategy<Vec<Inline>> {
         8 => filler().prop_map(|s| vec![Inline::Text(s)]),
         1 => inlines(depth - 1).prop_map(|x| vec![Inline::Emph(x)]),
         1 => inlines(depth - 1).prop_map(|x| vec![Inline::Strong(x)]),
+        1 => filler().prop_map(|s| vec![Inline::Code(s)]),
+        1 => (filler(), proptest::sample::select(HREFS)).prop_map(|(s, u)| vec![Inline::Link {
+            target: RefTarget::External(u.to_string()),
+            inlines: vec![Inline::Text(s)],
+        }]),
     ]
     .boxed()
 }
@@ -299,24 +335,6 @@ fn build(shape: &Shape, deco: &[Inline], payload: &str, idx: u32) -> (Block, Exp
     }
 }
 
-/// Neutralizes a literal `$` the way `kasane-adapters`'s `math::latex::sanitize`
-/// does before any document text reaches a LaTeX string.
-///
-/// The contract: the adapter guarantees math content carries no bare `$`
-/// (`$` would close the `$…$`/`$$…$$` span `kasane-writer` opens around it),
-/// so the writer can emit math verbatim, trusting that guarantee rather than
-/// re-checking it. A `Shape::Math` payload has to keep that contract too, or
-/// this generator draws IR no adapter can produce -- not adapter-realistic,
-/// per this module's own charter. Only `$` is touched, mirroring exactly the
-/// one `sanitize` arm this case is about: braces, backslashes and newlines
-/// are `sanitize`'s business elsewhere, and widening the neutralization here
-/// would silently narrow the hostile coverage every other shape still needs.
-/// Not a call into `kasane-adapters` -- `kasane-writer`'s tests must not
-/// depend on it -- a deliberate, narrow mirror instead.
-fn math_safe(s: &str) -> String {
-    s.replace('$', "\\$")
-}
-
 /// Whether `escape::comment_note` would actually alter `s`: a `--` run
 /// anywhere, or a trailing `-` -- the function's own two triggers, mirrored
 /// exactly rather than approximated. Not a call into `kasane-writer`'s
@@ -352,15 +370,14 @@ pub fn case() -> impl Strategy<Value = Case> {
         for (i, (sh, deco, hostile)) in shapes.iter().enumerate() {
             let idx = i as u32;
             let token = format!("zq{:04}", idx);
-            // `Shape::Math` stamps straight into `Block::MathBlock`'s
-            // verbatim content, so it alone needs `math_safe`'s neutralized
-            // draw -- every other shape keeps the raw fragment, which is
-            // exactly what the escaping policy is for.
-            let payload = if matches!(sh, Shape::Math) {
-                format!("{token} {}", math_safe(hostile))
-            } else {
-                format!("{token} {hostile}")
-            };
+            // `Shape::Math` draws the raw fragment like every other shape.
+            // It used to get a `math_safe` draw that pre-neutralized `$`,
+            // modelling the adapter's math contract rather than testing it --
+            // and the contract had a hole exactly there (`MathNode::Ident`/`Op`
+            // reached the writer unneutralized, which is all of PowerPoint's
+            // equation text). With the contract closed in `kasane-adapters`,
+            // the generator asserts it instead of assuming it.
+            let payload = format!("{token} {hostile}");
             let (block, expect) = build(sh, deco, &payload, idx);
 
             // A figure needs a matching asset or the renderer emits "missing".

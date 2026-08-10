@@ -58,10 +58,14 @@ struct Parsed {
     text: String,
     /// Each heading's text, in render order.
     headings: Vec<String>,
+    /// Each heading's level, in the same order.
+    heading_levels: Vec<usize>,
     /// Every link destination.
     links: Vec<String>,
     footnote_defs: usize,
     table_rows: usize,
+    /// Every table cell, header cells included.
+    table_cells: usize,
 }
 
 /// Parse with exactly the GFM extensions kasane emits, plus math.
@@ -97,8 +101,10 @@ fn parse_events(md: &str) -> Parsed {
         text: String::new(),
         headings: Vec::new(),
         links: Vec::new(),
+        heading_levels: Vec::new(),
         footnote_defs: 0,
         table_rows: 0,
+        table_cells: 0,
     };
     let mut heading_depth = 0usize;
     let mut heading = String::new();
@@ -137,9 +143,10 @@ fn parse_events(md: &str) -> Parsed {
                 }
             }
             Event::SoftBreak | Event::HardBreak => p.text.push(' '),
-            Event::Start(Tag::Heading { .. }) => {
+            Event::Start(Tag::Heading { level, .. }) => {
                 heading_depth += 1;
                 heading.clear();
+                p.heading_levels.push(level as usize);
             }
             Event::End(TagEnd::Heading(_)) => {
                 heading_depth = heading_depth.saturating_sub(1);
@@ -148,6 +155,7 @@ fn parse_events(md: &str) -> Parsed {
             Event::Start(Tag::Link { dest_url, .. }) => p.links.push(dest_url.to_string()),
             Event::Start(Tag::FootnoteDefinition(_)) => p.footnote_defs += 1,
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => p.table_rows += 1,
+            Event::Start(Tag::TableCell) => p.table_cells += 1,
             Event::End(TagEnd::Paragraph) => p.text.push(' '),
             _ => {}
         }
@@ -202,6 +210,26 @@ fn strip_tags(html: &str) -> String {
 /// *space* is invisible to P7; every other character is not.
 fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every `Block::Heading`'s rendered level, in render order.
+///
+/// `render_block` clamps to 6, so this must too, or a generated `level: 7`
+/// heading reads as a false failure. The walk order is `render_block`'s:
+/// a block, then anything nested inside it.
+fn collect_heading_levels(blocks: &[Block], out: &mut Vec<usize>) {
+    for b in blocks {
+        match b {
+            Block::Heading { level, .. } => out.push((*level).min(6) as usize),
+            Block::List { items, .. } => {
+                for item in items {
+                    collect_heading_levels(item, out);
+                }
+            }
+            Block::Footnote { blocks, .. } => collect_heading_levels(blocks, out),
+            _ => {}
+        }
+    }
 }
 
 /// Count blocks matching `pred`, recursing into lists and footnotes.
@@ -466,7 +494,22 @@ proptest! {
 
     /// P8 — Structure. The parsed block structure matches the IR that produced
     /// it: one footnote definition per `Block::Footnote`, one heading per
-    /// heading (plus the file's own title), and a full grid per GFM table.
+    /// heading (plus the file's own title) at the level the IR asked for and in
+    /// render order, and a full grid — every row *and* every cell — per GFM
+    /// table.
+    ///
+    /// The cell count is what a row count alone cannot see: a `|` the writer
+    /// failed to escape splits one cell into two without changing the number of
+    /// rows, which is exactly how the unescaped `|` inside `escape::code_span`
+    /// presented.
+    ///
+    /// List nesting depth is deliberately not checked here. Unlike a row or a
+    /// heading it has no event that says "this is the same list the IR built" —
+    /// `balance` may have moved a list into another file, and a nested list
+    /// that lost its indent shows up as a *sibling* list, so the check would
+    /// have to reconstruct the tree. `Expect::Exactly` in P1 plus the
+    /// continuation-indent unit tests in `markdown.rs` cover the failure that
+    /// motivated it.
     #[test]
     fn p8_structure_survives(case in generator::case()) {
         for (path, text, f) in render(&case) {
@@ -477,12 +520,15 @@ proptest! {
                 "{}: {} footnote definitions parsed, {} in the IR",
                 path, parsed.footnote_defs, want_notes
             );
-            let want_headings =
-                count_blocks(&f.blocks, |b| matches!(b, Block::Heading { .. })) + 1; // + the title
+            // The file's own title heading comes first, at its breadcrumb
+            // depth; every `Block::Heading` follows in render order, at the
+            // level the renderer clamps it to.
+            let mut want_levels = vec![f.frontmatter.breadcrumb.len().clamp(1, 6)];
+            collect_heading_levels(&f.blocks, &mut want_levels);
             prop_assert_eq!(
-                parsed.headings.len(), want_headings,
-                "{}: {} headings parsed, {} expected",
-                path, parsed.headings.len(), want_headings
+                &parsed.heading_levels, &want_levels,
+                "{}: heading levels {:?} parsed, {:?} expected",
+                path, parsed.heading_levels, want_levels
             );
             let want_rows: usize = sum_blocks(&f.blocks, |b| match b {
                 Block::Table(t) if !t.has_merged => 1 + t.rows.len(),
@@ -492,6 +538,15 @@ proptest! {
                 parsed.table_rows, want_rows,
                 "{}: {} table rows parsed, {} expected",
                 path, parsed.table_rows, want_rows
+            );
+            let want_cells: usize = sum_blocks(&f.blocks, |b| match b {
+                Block::Table(t) if !t.has_merged => t.header.len() * (1 + t.rows.len()),
+                _ => 0,
+            });
+            prop_assert_eq!(
+                parsed.table_cells, want_cells,
+                "{}: {} table cells parsed, {} expected",
+                path, parsed.table_cells, want_cells
             );
         }
     }
