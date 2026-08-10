@@ -34,8 +34,29 @@ pub enum Expect {
 
 #[derive(Clone, Debug)]
 pub struct Sentinel {
+    /// The bare `zq####` token. Alphanumeric, so no escape can appear inside
+    /// it and P1's raw-text counting is unaffected by the escaping policy.
     pub token: String,
+    /// The full text stamped into the block: the token plus a hostile suffix.
+    /// P7 counts *this* in the re-parsed text, which is what makes a missed
+    /// escape a failure rather than a curiosity.
+    pub payload: String,
     pub expect: Expect,
+    /// Whether this sentinel was stamped into a `Block::Raw` note *and*
+    /// `escape::comment_note` actually alters it -- a `--` run anywhere, or
+    /// a trailing `-`, mirroring `comment_note`'s own two triggers exactly.
+    ///
+    /// Not "every `Block::Raw` payload": `comment_note` is design spec §5's
+    /// one documented exception to "escaping must never change what the
+    /// Markdown renders to" (an HTML comment has no escape mechanism for a
+    /// `-->` run, so it transforms rather than escapes), but that exception
+    /// is narrow -- of `HOSTILE`'s 21 fragments, only `-->` triggers it; the
+    /// other 20 round-trip through a comment verbatim like anything else.
+    /// Scoping the skip to the one transformation, not the whole shape,
+    /// keeps P7 checking everything `comment_note` does not have to touch,
+    /// and would fail loudly if `comment_note` ever grew a transformation
+    /// this predicate doesn't know about.
+    pub is_comment: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -54,8 +75,12 @@ pub struct Case {
 /// produces the removed-not-replaced apostrophe, `foo_bar` guards the
 /// underscore that `heading_anchors` used to strip, and the CJK and Devanagari
 /// words put non-Latin text into both filenames and anchors. Bracket and
-/// parenthesis characters are deliberately absent: `links_in` would collect a
-/// false link and P2 would fail spuriously.
+/// parenthesis characters are deliberately absent -- not because they are
+/// unsafe (`links_in` is a real parser now, and `[bracket]`/`]close` are
+/// already in `HOSTILE`, drawn into this same filler text), but so `WORDS`
+/// stays "boring": when a shrunk case fails, a bracket or paren in it
+/// unambiguously came from the deliberately hostile channel, not from the
+/// filler pool meant to be free of anything under test.
 const WORDS: &[&str] = &[
     "alpha",
     "beta",
@@ -75,14 +100,83 @@ const WORDS: &[&str] = &[
     "हिन्दी",
 ];
 
+/// Markdown-hostile fragments, drawn into the same text `WORDS` feeds.
+///
+/// Every one of these renders as markup, or breaks a container, if the writer
+/// emits it unescaped: the inline openers, the line-start block openers, a
+/// pipe that splits a cell, a fence and a backtick that break out of code, an
+/// entity that would decode, an HTML comment closer, and an embedded newline.
+/// `zq` is deliberately absent, for the same reason `WORDS` avoids it — a
+/// fragment containing the sentinel prefix would corrupt P1's counting.
+const HOSTILE: &[&str] = &[
+    "*star*",
+    "_under_",
+    "[bracket]",
+    "]close",
+    "`tick`",
+    "```fence",
+    "<html>",
+    "&amp;",
+    "&raw",
+    "$math$",
+    "~~strike~~",
+    "back\\slash",
+    "-->",
+    "|pipe|",
+    "#hash",
+    "- bullet",
+    "1. ordered",
+    "> quote",
+    "= setext",
+    "line\nbreak",
+    "!bang[",
+    // A newline RUN, in both spellings. These are the two fragments P2 needed
+    // to catch the heading fold disagreeing with `anchor_slug`: the body
+    // heading path collapsed a blank line to one space (`## a b`, GitHub id
+    // `a-b`) while `anchor_fold` did not (`#a--b`), so the emitted
+    // cross-reference was dead. P2 recomputes the anchor from parsed heading
+    // text, so it fails on exactly this shape -- but only if the shape is
+    // drawn.
+    "a\n\nb",
+    "a\r\nb",
+];
+
+/// Filler text, with hostile fragments mixed in often enough that a case
+/// without one is rare.
 fn filler() -> impl Strategy<Value = String> {
-    proptest::collection::vec(proptest::sample::select(WORDS), 1..12).prop_map(|ws| ws.join(" "))
+    let word = prop_oneof![
+        3 => proptest::sample::select(WORDS),
+        1 => proptest::sample::select(HOSTILE),
+    ];
+    proptest::collection::vec(word, 1..12).prop_map(|ws| ws.join(" "))
 }
+
+/// An external `href`, hostile in the ways a real one is: a space and a `)`
+/// end a bare destination, a `%` must survive `dest_url` unencoded, and a
+/// fragment and a query must stay literal.
+///
+/// P2 skips a destination starting with `http`, so these do not have to
+/// resolve to a file in the tree -- what they exercise is `escape::dest_url`
+/// on a real `href` and the `[label](dest)` composition around it, neither of
+/// which had any property-tier coverage while the generator emitted no
+/// author-supplied `RefTarget::External` at all (design spec §6.4).
+const HREFS: &[&str] = &[
+    "https://e.com/a b(1)",
+    "https://e.com/a%20b",
+    "https://e.com/p?q=1#f",
+    "https://e.com/x<y>\"z\"",
+];
 
 /// One inline run, nested at most `depth` levels. Boxed at every level because
 /// the strategy is recursive and its type would otherwise be infinite. The leaf
 /// is built twice rather than cloned, so this compiles without requiring the
 /// mapped strategy to be `Clone`.
+///
+/// `Inline::Code` and an external `Inline::Link` are drawn here rather than
+/// only as block shapes, because that is where the writer composes them:
+/// `escape::code_span`, `escape::dest_url` on an author-supplied `href`, and
+/// `inlines_to_html`'s `<a href>` in the merged-table path all sit on this
+/// walk and had no property-tier coverage until they did (design spec §6.4).
 fn inlines(depth: u32) -> BoxedStrategy<Vec<Inline>> {
     if depth == 0 {
         return filler().prop_map(|s| vec![Inline::Text(s)]).boxed();
@@ -91,6 +185,18 @@ fn inlines(depth: u32) -> BoxedStrategy<Vec<Inline>> {
         8 => filler().prop_map(|s| vec![Inline::Text(s)]),
         1 => inlines(depth - 1).prop_map(|x| vec![Inline::Emph(x)]),
         1 => inlines(depth - 1).prop_map(|x| vec![Inline::Strong(x)]),
+        1 => filler().prop_map(|s| vec![Inline::Code(s)]),
+        // `pptx/slide.rs` pushes `Inline::Math` into a table cell and into a
+        // paragraph, so this is an adapter-realistic inline, not only a
+        // hand-built one -- and it is the only way the tier reaches
+        // `escape::math_span`, whose `Ctx::Cell` pipe rule is what a real PPTX
+        // equation needs. `Block::MathBlock` covers the display form; nothing
+        // covered the inline form until this draw.
+        1 => filler().prop_map(|s| vec![Inline::Math(s)]),
+        1 => (filler(), proptest::sample::select(HREFS)).prop_map(|(s, u)| vec![Inline::Link {
+            target: RefTarget::External(u.to_string()),
+            inlines: vec![Inline::Text(s)],
+        }]),
     ]
     .boxed()
 }
@@ -130,15 +236,21 @@ fn shape() -> impl Strategy<Value = Shape> {
     ]
 }
 
-/// Builds one block from a shape, stamping `token` into the single position
+/// Builds one block from a shape, stamping `payload` into the single position
 /// that renders, and reporting how many times it is expected to appear.
 ///
 /// `deco` is generated nested inline markup (depth <= 3) appended after the
 /// sentinel, so the engine's and the writer's inline walks are exercised on real
 /// nesting rather than only on flat text. It is appended, never wrapped around
-/// the token, so the token itself always renders as a bare run and the
+/// the payload, so the payload itself always renders as a bare run and the
 /// occurrence count stays exact.
-fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expect) {
+///
+/// Two shapes need no special handling despite carrying hostile text:
+/// `Shape::Code` puts the payload inside a code block, which is where
+/// ` ```fence` and `` `tick` `` do their work against `escape::fenced_block`.
+/// `Shape::Raw` puts it inside an HTML comment, which is where `-->` works
+/// against `escape::comment_note`.
+fn build(shape: &Shape, deco: &[Inline], payload: &str, idx: u32) -> (Block, Expect) {
     let text = |t: &str| {
         let mut v = vec![Inline::Text(t.to_string())];
         v.extend(deco.iter().cloned());
@@ -149,24 +261,24 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
             Block::Heading {
                 level: *level,
                 id: BlockId(idx),
-                inlines: text(token),
+                inlines: text(payload),
             },
             Expect::AtLeast(1),
         ),
-        Shape::Para => (Block::Para(text(token)), Expect::Exactly(1)),
+        Shape::Para => (Block::Para(text(payload)), Expect::Exactly(1)),
         Shape::List(ordered) => (
             Block::List {
                 ordered: *ordered,
-                items: vec![vec![Block::Para(text(token))]],
+                items: vec![vec![Block::Para(text(payload))]],
             },
             Expect::Exactly(1),
         ),
-        // The token sits at the bottom of the chain and renders exactly once,
-        // so the conservation invariant's arithmetic is unchanged from the
-        // flat-list case -- what changes is the depth the walks must survive
-        // to reach it.
+        // The payload sits at the bottom of the chain and renders exactly
+        // once, so the conservation invariant's arithmetic is unchanged from
+        // the flat-list case -- what changes is the depth the walks must
+        // survive to reach it.
         Shape::NestedList(ordered, depth) => {
-            let mut inner = vec![Block::Para(text(token))];
+            let mut inner = vec![Block::Para(text(payload))];
             for _ in 0..*depth {
                 inner = vec![Block::List {
                     ordered: *ordered,
@@ -181,13 +293,13 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
         // markdown.rs:79-106: both render paths call `inlines_to_md` exactly
         // once for the single generated row's single cell -- the merged
         // branch via `<td>{esc(c)}</td>` (line 92), the pipe-table branch via
-        // the `cells` closure (lines 99-101) -- so the token renders exactly
+        // the `cells` closure (lines 99-101) -- so the payload renders exactly
         // once whether or not `has_merged` is set. Generating the flag (not
         // pinning it) is what makes the HTML branch reachable at all.
         Shape::Table(merged) => (
             Block::Table(Table {
                 header: vec![text("col")],
-                rows: vec![vec![text(token)]],
+                rows: vec![vec![text(payload)]],
                 has_merged: *merged,
             }),
             Expect::Exactly(1),
@@ -201,7 +313,7 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
                     key: format!("img{}", idx),
                     bytes_ref: 0,
                 },
-                caption: text(token),
+                caption: text(payload),
                 number: numbered.then(|| "1".to_string()),
             },
             Expect::Exactly(if *numbered { 2 } else { 1 }),
@@ -209,32 +321,47 @@ fn build(shape: &Shape, deco: &[Inline], token: &str, idx: u32) -> (Block, Expec
         Shape::Code => (
             Block::CodeBlock {
                 lang: Some("rust".into()),
-                text: token.to_string(),
+                text: payload.to_string(),
             },
             Expect::Exactly(1),
         ),
-        Shape::Math => (Block::MathBlock(token.to_string()), Expect::Exactly(1)),
+        Shape::Math => (Block::MathBlock(payload.to_string()), Expect::Exactly(1)),
         Shape::Raw => (
             Block::Raw {
-                note: token.to_string(),
+                note: payload.to_string(),
             },
             Expect::Exactly(1),
         ),
         Shape::Footnote => (
             Block::Footnote {
                 id: NoteId(idx),
-                blocks: vec![Block::Para(text(token))],
+                blocks: vec![Block::Para(text(payload))],
             },
             Expect::Exactly(1),
         ),
     }
 }
 
+/// Whether `escape::comment_note` would actually alter `s`: a `--` run
+/// anywhere, or a trailing `-` -- the function's own two triggers, mirrored
+/// exactly rather than approximated. Not a call into `kasane-writer`'s
+/// `escape` module, which is private to that crate; a deliberate, narrow
+/// mirror, the same convention `math_safe` uses for `kasane-adapters`'s
+/// `sanitize`. Used to scope `Sentinel::is_comment` to the one payload in
+/// `HOSTILE` (`-->`) this actually applies to, rather than every
+/// `Shape::Raw` draw.
+fn comment_note_alters(s: &str) -> bool {
+    s.contains("--") || s.ends_with('-')
+}
+
 /// A generated case: document, options, assets, and the sentinel ledger.
 pub fn case() -> impl Strategy<Value = Case> {
     // Each entry pairs a block shape with generated nested inline markup, so
     // nesting depth up to 3 is present throughout rather than only in flat runs.
-    let shapes = proptest::collection::vec((shape(), inlines(3)), 1..40);
+    let shapes = proptest::collection::vec(
+        (shape(), inlines(3), proptest::sample::select(HOSTILE)),
+        1..40,
+    );
     let opts = (40usize..400, 5usize..40).prop_map(|(max_tokens, min_tokens)| Options {
         max_tokens,
         // min < max by construction, so the engine is never asked to satisfy
@@ -247,10 +374,18 @@ pub fn case() -> impl Strategy<Value = Case> {
         let mut sentinels = Vec::new();
         let mut assets = AssetBag::default();
 
-        for (i, (sh, deco)) in shapes.iter().enumerate() {
+        for (i, (sh, deco, hostile)) in shapes.iter().enumerate() {
             let idx = i as u32;
             let token = format!("zq{:04}", idx);
-            let (block, expect) = build(sh, deco, &token, idx);
+            // `Shape::Math` draws the raw fragment like every other shape.
+            // It used to get a `math_safe` draw that pre-neutralized `$`,
+            // modelling the adapter's math contract rather than testing it --
+            // and the contract had a hole exactly there (`MathNode::Ident`/`Op`
+            // reached the writer unneutralized, which is all of PowerPoint's
+            // equation text). With the contract closed in `kasane-adapters`,
+            // the generator asserts it instead of assuming it.
+            let payload = format!("{token} {hostile}");
+            let (block, expect) = build(sh, deco, &payload, idx);
 
             // A figure needs a matching asset or the renderer emits "missing".
             if let Shape::Figure(_) = sh {
@@ -265,7 +400,13 @@ pub fn case() -> impl Strategy<Value = Case> {
                 block,
                 prov: Provenance::default(),
             });
-            sentinels.push(Sentinel { token, expect });
+            let is_comment = matches!(sh, Shape::Raw) && comment_note_alters(&payload);
+            sentinels.push(Sentinel {
+                token,
+                payload,
+                expect,
+                is_comment,
+            });
         }
 
         Case {

@@ -54,10 +54,10 @@ fn render(node: &MathNode, out: &mut String, complete: &mut bool) {
         }
         MathNode::Fenced { open, close, body } => {
             out.push_str("\\left");
-            out.push_str(fence(open));
+            out.push_str(&fence(open));
             render(body, out, complete);
             out.push_str("\\right");
-            out.push_str(fence(close));
+            out.push_str(&fence(close));
         }
         MathNode::Nary { op, sub, sup, body } => {
             out.push_str(&map_text(op, complete));
@@ -124,18 +124,31 @@ fn script(
     }
 }
 
-/// `<mn>` / `<mtext>` hold literal document text, not LaTeX source, and unlike
-/// `Ident`/`Op` they never pass through `map_text`. Neutralize exactly the
-/// characters that would corrupt a delimiter this pipeline itself generates:
-/// `$` closes the `$…$` / `$$…$$` span `kasane-writer` opened, and `{` / `}`
-/// unbalance the `\text{}` braces the emitter opened. A stray `\` would start
-/// an arbitrary command, so it is dropped; newlines would break out of an
-/// inline span, so they collapse to a space.
+/// Neutralize exactly the characters that would corrupt a delimiter this
+/// pipeline itself generates: `$` closes the `$…$` / `$$…$$` span
+/// `kasane-writer` opened, and `{` / `}` unbalance the `\text{}` braces the
+/// emitter opened. A stray `\` would start an arbitrary command, so it is
+/// dropped; newlines would break out of an inline span, so they collapse to a
+/// space.
 ///
-/// Scoped deliberately: this is *not* general LaTeX escaping. `kasane-writer`
-/// escapes nothing anywhere (`Inline::Text` is pushed raw), so a repo-wide
-/// escaping policy is separate work; only the structural subset that corrupts
-/// generated delimiters is handled here.
+/// Every node kind that carries document text is covered, not just the two
+/// this function is called from. `<mn>`/`<mtext>` (`Number`/`Text`) come
+/// through here; `<mi>`/`<mo>` and every OMML run (`Ident`/`Op`) get the
+/// identical treatment in `symbols::map_text`'s pass-through arm, and
+/// `MathNode::Fenced`'s delimiters — untrusted `mfenced open=`/`m:begChr`
+/// attributes — come back through here via [`fence`]. That completeness is the
+/// contract, not a detail: `Ident`/`Op` alone is all of PowerPoint's equation
+/// text, so a guarantee scoped to `<mn>`/`<mtext>` would have left the span
+/// open to almost every real equation.
+///
+/// Scoped deliberately in the other direction: this is *not* general LaTeX
+/// escaping. `kasane-writer` has a repo-wide escaping policy (`escape.rs`) for
+/// flow text, cells, code spans, HTML and YAML, but `Inline::Math` is
+/// deliberately exempt from it — the writer pushes math content verbatim
+/// between the `$…$`/`$$…$$` delimiters it opens, so nothing on that side
+/// neutralizes these characters. This function is the other half of that
+/// decision: only the structural subset that corrupts the delimiters the
+/// writer generates is handled here.
 fn sanitize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -151,14 +164,20 @@ fn sanitize(s: &str) -> String {
     out
 }
 
-fn fence(s: &str) -> &str {
+/// A `\left` / `\right` delimiter.
+///
+/// The fallback runs through [`sanitize`] rather than passing the string
+/// through: a fence is not emitter-chosen text, it is an untrusted `mfenced
+/// open=`/`close=` attribute (MathML) or `<m:begChr>`/`<m:endChr>` (OMML), so
+/// a `$` here escapes the writer's math span exactly as one in `<mo>` would.
+/// `{` and `}` keep their own arms only for readability; `sanitize` maps them
+/// identically.
+fn fence(s: &str) -> String {
     match s {
-        "" => ".",
-        "{" => "\\{",
-        "}" => "\\}",
-        "⟨" => "\\langle",
-        "⟩" => "\\rangle",
-        other => other,
+        "" => ".".to_string(),
+        "⟨" => "\\langle".to_string(),
+        "⟩" => "\\rangle".to_string(),
+        other => sanitize(other),
     }
 }
 
@@ -220,10 +239,14 @@ mod tests {
         assert_eq!(to_conversion(&n).latex, "\\left(x\\right)");
     }
 
+    /// `Nary::op` carries the raw operator character, not a ready-made LaTeX
+    /// command: `omml::nary_op` stopped pre-mapping it so that every string
+    /// reaching `map_text` is document text and a backslash in it can be
+    /// dropped. The symbol table does the mapping instead.
     #[test]
     fn nary_sum_with_limits() {
         let n = MathNode::Nary {
-            op: "\\sum".into(),
+            op: "∑".into(),
             sub: Some(Box::new(ident("i"))),
             sup: Some(Box::new(ident("n"))),
             body: Box::new(ident("i")),
@@ -266,6 +289,33 @@ mod tests {
     fn greek_symbol_maps_via_table() {
         // An identifier carrying a Greek letter maps to its LaTeX command.
         assert_eq!(to_conversion(&ident("α")).latex, "\\alpha");
+    }
+
+    /// `Ident` and `Op` are the *majority* of document text in an equation --
+    /// MathML's `<mi>`/`<mo>` and every OMML run -- and they route through
+    /// `map_text` rather than `sanitize`. The guarantee the writer relies on
+    /// covers all four text-bearing node kinds or it covers nothing, so pin
+    /// the two `sanitize` does not see.
+    #[test]
+    fn ident_and_op_neutralize_the_same_characters_as_sanitize() {
+        assert_eq!(to_conversion(&ident("a$b")).latex, "a\\$b");
+        assert_eq!(to_conversion(&MathNode::Op("a$b".into())).latex, "a\\$b");
+        assert_eq!(to_conversion(&ident("a{b}c")).latex, "a\\{b\\}c");
+        assert_eq!(to_conversion(&ident("a\\b")).latex, "ab");
+        assert_eq!(to_conversion(&ident("a\nb")).latex, "a b");
+    }
+
+    /// A `\left`/`\right` delimiter is an untrusted attribute value, so it
+    /// gets `sanitize` too. `⟨`/`⟩` and the empty (`.`) fence keep their own
+    /// mappings.
+    #[test]
+    fn fenced_delimiters_are_sanitized() {
+        let n = MathNode::Fenced {
+            open: "$".into(),
+            close: "}".into(),
+            body: Box::new(ident("x")),
+        };
+        assert_eq!(to_conversion(&n).latex, "\\left\\$x\\right\\}");
     }
 
     #[test]

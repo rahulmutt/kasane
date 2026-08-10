@@ -178,6 +178,17 @@ See AGENTS.md for the codebase map.
   What they do not carry is total path length: depth comes from heading
   nesting plus whatever `-o` you pass, so a deep book in a deep output
   directory can still exceed Windows' 260-character default path limit.
+- Text that looks like Markdown is preserved as text, not as markup. A book
+  that literally prints `*`, `|`, `` ` ``, `[`, `&` or a line beginning with
+  `#` converts to a file where those characters render as themselves, which
+  means the Markdown source contains backslash escapes — `a\*b`, `1\. two`,
+  `a\|b` inside a table cell. That is deliberate: the source document is
+  content, not syntax. Two consequences worth knowing. A newline inside a
+  heading, a table cell, a link label or a frontmatter title is folded — to a
+  space, or to `<br>` in a cell — because those places are a single line by
+  grammar. And a merged-cell table, which is emitted as raw HTML, carries its
+  emphasis as `<strong>`/`<em>` tags and its equations as literal LaTeX, since
+  GitHub parses no Markdown inside an HTML block.
 - Block nesting is bounded, and deep nesting flattens rather than failing.
   Lists and footnotes nested past the EPUB parser's fidelity bound stop
   producing further nesting: an over-deep list's items become siblings at the

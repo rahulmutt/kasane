@@ -12,7 +12,7 @@ fn converts_minimal_epub_to_tree() {
         .unwrap();
     assert!(status.success());
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
-    assert!(idx.contains("title: Minimal Book"));
+    assert!(idx.contains("title: \"Minimal Book\""));
     // Chapter One became its own file; internal link resolved
     let ch = std::fs::read_to_string(out_dir.join("01-chapter-one.md"))
         .or_else(|_| std::fs::read_to_string(out_dir.join("01-chapter-one/index.md")))
@@ -36,7 +36,7 @@ fn converts_a_deeply_nested_epub_without_aborting() {
         .unwrap();
     assert!(status.success(), "conversion failed: {:?}", status);
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
-    assert!(idx.contains("title: Deep Nesting"));
+    assert!(idx.contains("title: \"Deep Nesting\""));
     // `title: Deep Nesting` comes from the OPF's <dc:title>, not the chapter
     // -- it is present even in the exact bug this seed exists to catch (the
     // chapter silently dropped by guard.rs's zip-bomb ratio guard, book
@@ -109,9 +109,16 @@ fn batch_mode_converts_a_deeply_block_nested_epub_without_aborting() {
         .map(|(_, s)| s.as_str())
         .expect("converted chapter missing");
 
+    // The innermost item sits under accumulated continuation indent: 31 levels at 2 columns
+    // each = 62 spaces, then the marker, then the text. The assertion checks both that the
+    // text survived and that it is indented (inside the nesting, not at column zero).
+    let innermost_line = chapter
+        .lines()
+        .find(|l| l.trim_start() == "- x")
+        .expect("innermost list item text missing -- the bound must flatten, not truncate");
     assert!(
-        chapter.contains("\n- x\n"),
-        "innermost list item text missing -- the bound must flatten, not truncate: {chapter:.400}"
+        innermost_line.starts_with("  "),
+        "innermost list item must be indented to be inside its nesting: got: {innermost_line:?}"
     );
 
     let deepest = chapter
@@ -259,7 +266,7 @@ fn converts_minimal_mobi_to_tree() {
         .unwrap();
     assert!(status.success());
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
-    assert!(idx.contains("title: Minimal Mobi"));
+    assert!(idx.contains("title: \"Minimal Mobi\""));
     let (all, files) = read_all_md_with_files(&out_dir);
     assert!(all.contains("Chapter One") && all.contains("Chapter Two"));
     assert!(
@@ -330,7 +337,7 @@ fn converts_minimal_azw3_to_tree() {
         .unwrap();
     assert!(status.success());
     let idx = std::fs::read_to_string(out_dir.join("index.md")).unwrap();
-    assert!(idx.contains("title: KF8 Minimal"));
+    assert!(idx.contains("title: \"KF8 Minimal\""));
     let (all, files) = read_all_md_with_files(&out_dir);
     assert!(all.contains("Part One") && all.contains("Part Two"));
     assert!(
@@ -492,7 +499,7 @@ fn single_file_output_shape_is_unchanged() {
     assert!(status.success());
     // `out` IS the document root — not a library wrapper around it.
     let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
-    assert!(idx.contains("title: Minimal Book"));
+    assert!(idx.contains("title: \"Minimal Book\""));
     assert!(!out.join("minimal").exists());
 }
 
@@ -760,7 +767,7 @@ fn single_file_mode_writes_no_library_index() {
     );
 
     let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
-    assert!(idx.contains("title: Minimal Book"));
+    assert!(idx.contains("title: \"Minimal Book\""));
     assert!(!idx.contains("kind: library"));
 }
 
