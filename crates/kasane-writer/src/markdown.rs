@@ -80,8 +80,17 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
         }
         Block::MathBlock(s) => out.push_str(&format!("$$\n{}\n$$\n", s)),
         Block::Footnote { id, blocks } => {
+            // Four spaces is GFM's footnote continuation indent. Without it a
+            // body of more than one line puts its second line at column zero,
+            // outside the definition, where it becomes a sibling paragraph
+            // (§4.2).
             let body = blocks_to_markdown_at(blocks, assets, depth + 1);
-            out.push_str(&format!("[^{}]: {}\n", id.0, body.trim()));
+            let body = body.trim();
+            out.push_str(&format!(
+                "[^{}]: {}\n",
+                id.0,
+                indent_continuation(body, "    ")
+            ));
         }
         Block::Raw { note } => out.push_str(&format!("<!-- {} -->\n", escape::comment_note(note))),
     }
@@ -215,6 +224,24 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
         line_start = s.ends_with('\n');
     }
     s
+}
+
+/// Indent every line after the first by `indent`, leaving blank lines blank so
+/// no line carries trailing whitespace.
+fn indent_continuation(body: &str, indent: &str) -> String {
+    let mut lines = body.lines();
+    let mut out = String::new();
+    if let Some(first) = lines.next() {
+        out.push_str(first);
+    }
+    for line in lines {
+        out.push('\n');
+        if !line.trim().is_empty() {
+            out.push_str(indent);
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -609,5 +636,23 @@ mod tests {
             "got: {md}"
         );
         assert!(!md.contains("**bold**"), "markdown markup leaked: {md}");
+    }
+
+    #[test]
+    fn a_multi_block_footnote_body_stays_inside_its_definition() {
+        let blocks = vec![Block::Footnote {
+            id: kasane_ir::NoteId(1),
+            blocks: vec![
+                Block::Para(vec![Inline::Text("first".into())]),
+                Block::Para(vec![Inline::Text("second".into())]),
+            ],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines[0], "[^1]: first", "got: {md}");
+        assert_eq!(
+            lines[1], "    second",
+            "the second block escaped the definition: {md}"
+        );
     }
 }
