@@ -334,8 +334,11 @@ for `- `, `N. `'s own width for an ordered item.
 
 This changes existing output for nested and multi-block list items. It does
 **not** change the marker line, so a heading leading a list item still renders
-`- ## Notes`, and `strip_list_markers` (`properties.rs:99`) and the anchor
-counting it feeds keep working unchanged.
+`- ## Notes`, and `heading_anchors` (`properties.rs`, rebuilt on
+`pulldown-cmark` by Task 13 — the hand-rolled `strip_list_markers` scanner it
+originally used no longer exists) and the anchor counting it feeds keep
+working unchanged: a real GFM parser reads `- ## Notes` as a heading
+regardless of the marker prefix, with no line-scanning helper needed.
 
 ### 4.4 `Block::Raw` comments
 
@@ -373,9 +376,16 @@ That is also why `link_text`'s bracket substitution does not survive the move:
 
 Three consequences follow, and all three are load-bearing:
 
-- Paths and anchors are byte-identical before and after this change. The churn
-  is entirely in file *content* — the exact opposite of the slug branch, which
-  churned paths and left content alone.
+- Paths are byte-identical before and after this change, with no exception.
+  Anchors are byte-identical **except** for a heading whose inline text
+  contains a newline: `anchor_slug` was corrected in `kasane-core` to fold
+  an embedded `\n` the same way `escape::one_line` folds it in the rendered
+  heading line, which moves that anchor's hyphenation to match what a real
+  parser now computes. Slug design spec §8.2
+  (`2026-08-08-slug-widening-design.md`) has the evidence and the two rows
+  that pin it. Outside that one shape, the churn is entirely in file
+  *content* — the exact opposite of the slug branch, which churned paths and
+  left content alone.
 - The size guard is unaffected: `est_tokens` measures IR (`balance.rs:171`).
 - The newline foldings in §4.1 are the one deliberate exception, and each is a
   case where the current output does not render as its text at all.
@@ -491,6 +501,15 @@ One conversion of an existing fixture, asserting that the emitted tree's paths
 and anchors are byte-identical to those the same fixture produced before the
 change — §5's first consequence, checked rather than asserted.
 
+**Pass condition, not a bare diff.** Paths must match with zero exceptions.
+An anchor diff is legitimate, and expected rather than a regression, *only*
+for a heading whose inline text contains a newline (`\n` or `\r\n`) — the
+one shape `anchor_slug`'s newline fold moves, per the amendment to this
+section's list above and slug design spec §8.2. Any other anchor diff, or
+any path diff at all, is a real regression. If the fixture used here
+happens to contain such a heading, expect and confirm exactly that diff
+rather than treating its presence as a failure.
+
 ## 7. Documentation
 
 - **README, Known limitations.** A short entry: output contains backslash
@@ -535,9 +554,11 @@ frontmatter, so no single pre-pass can be correct for all four.
 
 **Churn.** Every document whose prose contains an escaped character re-renders
 with backslashes, and every file's frontmatter changes because all scalars
-become quoted. Paths, anchors and cross-links are byte-identical (§5, checked
-by §6.6). Nested and multi-block list items re-render with continuation indents
-(§4.3).
+become quoted. Paths and cross-link targets are byte-identical (§5, checked
+by §6.6); anchors are byte-identical with the one exception §5 and §6.6 both
+name — a heading whose inline text contains a newline, where `anchor_slug`'s
+fold moves the hyphenation to match what a real parser now computes. Nested
+and multi-block list items re-render with continuation indents (§4.3).
 
 **The oracle is a mirror, and that is a named risk.** `pulldown-cmark` is a
 CommonMark + GFM implementation, not the `cmark-gfm` GitHub runs, so P7 pins

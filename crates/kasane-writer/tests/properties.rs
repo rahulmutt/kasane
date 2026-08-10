@@ -428,13 +428,16 @@ proptest! {
     /// of it (design spec §6.2). A missed escape shows up here as a payload
     /// that came back changed, or did not come back at all.
     ///
-    /// `Sentinel::is_comment` payloads are skipped: a `Block::Raw` note is
+    /// `Sentinel::is_comment` payloads are skipped: `Block::Raw`'s note is
     /// design spec §5's one documented exception to this property's own
     /// premise, because an HTML comment has no escape mechanism for a `-->`
-    /// run, so `escape::comment_note` transforms rather than escapes and a
-    /// payload containing one legitimately does not survive verbatim.
-    /// Proving a note cannot break *out* of its comment is the fuzz seam's
-    /// job (design spec §6.5), not this property's.
+    /// run, so `escape::comment_note` transforms rather than escapes a note
+    /// containing one, and that payload legitimately does not survive
+    /// verbatim. The flag is scoped to exactly the payloads
+    /// `comment_note` alters (a `--` run or a trailing `-`), not every
+    /// `Block::Raw` draw, so every other note is still checked here like
+    /// anything else. Proving a note cannot break *out* of its comment is
+    /// the fuzz seam's job (design spec §6.5), not this property's.
     #[test]
     fn p7_round_trip(case in generator::case()) {
         let files = render(&case);
@@ -605,8 +608,9 @@ fn merged_subsection_anchor_renders_as_a_heading() {
 /// This renders through `blocks_to_markdown` rather than asserting the marker
 /// spelling from memory: `render_block` puts a list item's first block on the
 /// marker's own line, and it is that real output — not this test's idea of it
-/// — that `strip_list_markers` has to survive. Both marker shapes are covered,
-/// since `Shape::List` generates `ordered` either way.
+/// — that `heading_anchors` (via `parse_events`, a real GFM parser) has to
+/// read as a heading. Both marker shapes are covered, since `Shape::List`
+/// generates `ordered` either way.
 #[test]
 fn heading_anchors_sees_a_heading_that_leads_a_list_item() {
     use kasane_ir::{AssetBag, BlockId, Inline};
@@ -633,8 +637,8 @@ fn heading_anchors_sees_a_heading_that_leads_a_list_item() {
         let marker = if ordered { "1. " } else { "- " };
         assert!(
             text.contains(&format!("{marker}### Nested")),
-            "render_block's list-item shape changed; strip_list_markers must \
-             follow it. Got:\n{text}"
+            "render_block's list-item shape changed; heading_anchors' parser \
+             must still read a heading off the marker line. Got:\n{text}"
         );
 
         let anchors = heading_anchors(&text);

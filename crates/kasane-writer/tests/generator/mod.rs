@@ -42,13 +42,20 @@ pub struct Sentinel {
     /// escape a failure rather than a curiosity.
     pub payload: String,
     pub expect: Expect,
-    /// Whether this sentinel was stamped into a `Block::Raw` note.
+    /// Whether this sentinel was stamped into a `Block::Raw` note *and*
+    /// `escape::comment_note` actually alters it -- a `--` run anywhere, or
+    /// a trailing `-`, mirroring `comment_note`'s own two triggers exactly.
     ///
-    /// P7 skips these: `escape::comment_note` is design spec §5's one
-    /// documented exception to "escaping must never change what the
-    /// Markdown renders to" -- an HTML comment has no escape mechanism for a
-    /// `-->` run, so `comment_note` transforms rather than escapes, and the
-    /// payload legitimately does not survive verbatim. See `p7_round_trip`.
+    /// Not "every `Block::Raw` payload": `comment_note` is design spec §5's
+    /// one documented exception to "escaping must never change what the
+    /// Markdown renders to" (an HTML comment has no escape mechanism for a
+    /// `-->` run, so it transforms rather than escapes), but that exception
+    /// is narrow -- of `HOSTILE`'s 21 fragments, only `-->` triggers it; the
+    /// other 20 round-trip through a comment verbatim like anything else.
+    /// Scoping the skip to the one transformation, not the whole shape,
+    /// keeps P7 checking everything `comment_note` does not have to touch,
+    /// and would fail loudly if `comment_note` ever grew a transformation
+    /// this predicate doesn't know about.
     pub is_comment: bool,
 }
 
@@ -68,8 +75,12 @@ pub struct Case {
 /// produces the removed-not-replaced apostrophe, `foo_bar` guards the
 /// underscore that `heading_anchors` used to strip, and the CJK and Devanagari
 /// words put non-Latin text into both filenames and anchors. Bracket and
-/// parenthesis characters are deliberately absent: `links_in` would collect a
-/// false link and P2 would fail spuriously.
+/// parenthesis characters are deliberately absent -- not because they are
+/// unsafe (`links_in` is a real parser now, and `[bracket]`/`]close` are
+/// already in `HOSTILE`, drawn into this same filler text), but so `WORDS`
+/// stays "boring": when a shrunk case fails, a bracket or paren in it
+/// unambiguously came from the deliberately hostile channel, not from the
+/// filler pool meant to be free of anything under test.
 const WORDS: &[&str] = &[
     "alpha",
     "beta",
@@ -306,6 +317,18 @@ fn math_safe(s: &str) -> String {
     s.replace('$', "\\$")
 }
 
+/// Whether `escape::comment_note` would actually alter `s`: a `--` run
+/// anywhere, or a trailing `-` -- the function's own two triggers, mirrored
+/// exactly rather than approximated. Not a call into `kasane-writer`'s
+/// `escape` module, which is private to that crate; a deliberate, narrow
+/// mirror, the same convention `math_safe` uses for `kasane-adapters`'s
+/// `sanitize`. Used to scope `Sentinel::is_comment` to the one payload in
+/// `HOSTILE` (`-->`) this actually applies to, rather than every
+/// `Shape::Raw` draw.
+fn comment_note_alters(s: &str) -> bool {
+    s.contains("--") || s.ends_with('-')
+}
+
 /// A generated case: document, options, assets, and the sentinel ledger.
 pub fn case() -> impl Strategy<Value = Case> {
     // Each entry pairs a block shape with generated nested inline markup, so
@@ -353,11 +376,12 @@ pub fn case() -> impl Strategy<Value = Case> {
                 block,
                 prov: Provenance::default(),
             });
+            let is_comment = matches!(sh, Shape::Raw) && comment_note_alters(&payload);
             sentinels.push(Sentinel {
                 token,
                 payload,
                 expect,
-                is_comment: matches!(sh, Shape::Raw),
+                is_comment,
             });
         }
 

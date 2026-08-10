@@ -697,7 +697,8 @@ mod tests {
 
     #[test]
     fn a_heading_leading_a_list_item_still_renders_on_the_marker_line() {
-        // properties.rs's strip_list_markers depends on this shape.
+        // properties.rs's heading_anchors (parser-based, via parse_events)
+        // depends on a real GFM parser reading this shape as a heading.
         let blocks = vec![Block::List {
             ordered: false,
             items: vec![vec![Block::Heading {
