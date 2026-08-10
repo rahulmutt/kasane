@@ -280,6 +280,30 @@ pub(crate) fn dest_url(s: &str) -> String {
     encode(s, &[' ', '(', ')', '<', '>', '\\', '"'])
 }
 
+/// A YAML double-quoted scalar, quotes included (§3.6).
+///
+/// Always quoted, rather than quoted-when-it-looks-risky. That deletes the
+/// question of which characters require quoting — a question the superseded
+/// `yaml_str` answered with `:` and `#`, and got wrong for a leading `-`, `[`,
+/// `{`, `&`, `*`, `!`, `|`, `>`, `%`, `@`, a quote character, a trailing space,
+/// and the bare words `true`, `null` and `~`, each of which YAML reads as
+/// something other than a string. The cost is two bytes per line.
+pub(crate) fn yaml_scalar(s: &str) -> String {
+    let flat = one_line(s);
+    let mut out = String::with_capacity(flat.len() + 2);
+    out.push('"');
+    for c in flat.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn encode(s: &str, extra: &[char]) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -479,5 +503,28 @@ mod tests {
         assert_eq!(dest_url("https://e.com/a\nb"), "https://e.com/a%0Ab");
         // A fragment and a query are meaningful in a URL and stay literal.
         assert_eq!(dest_url("https://e.com/p?q=1#f"), "https://e.com/p?q=1#f");
+    }
+
+    #[test]
+    fn yaml_scalar_always_quotes() {
+        assert_eq!(yaml_scalar("plain"), "\"plain\"");
+        assert_eq!(yaml_scalar("a: b"), "\"a: b\"");
+        // Each of these is a shape the old conditional quoting got wrong.
+        assert_eq!(yaml_scalar("- dash"), "\"- dash\"");
+        assert_eq!(yaml_scalar("[bracket"), "\"[bracket\"");
+        assert_eq!(yaml_scalar("&anchor"), "\"&anchor\"");
+        assert_eq!(yaml_scalar("*alias"), "\"*alias\"");
+        assert_eq!(yaml_scalar("true"), "\"true\"");
+        assert_eq!(yaml_scalar("null"), "\"null\"");
+        assert_eq!(yaml_scalar("trailing "), "\"trailing \"");
+    }
+
+    #[test]
+    fn yaml_scalar_escapes_quotes_and_backslashes_and_flattens() {
+        assert_eq!(yaml_scalar("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(yaml_scalar("a\\b"), "\"a\\\\b\"");
+        assert_eq!(yaml_scalar("a\nb"), "\"a b\"");
+        // A control character has no place in a title line.
+        assert_eq!(yaml_scalar("a\u{7}b"), "\"ab\"");
     }
 }

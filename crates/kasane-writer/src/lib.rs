@@ -152,7 +152,7 @@ mod tests {
         write_tree(&tree, &AssetBag::default(), &out, false).unwrap();
         let idx = std::fs::read_to_string(out.join("index.md")).unwrap();
         assert!(idx.starts_with("---\n"));
-        assert!(idx.contains("title: Book"));
+        assert!(idx.contains("title: \"Book\""));
         assert!(idx.contains("source_pages: 1-3"));
         assert!(idx.contains("# Book"));
     }
