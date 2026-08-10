@@ -498,10 +498,20 @@ proptest! {
     /// render order, and a full grid — every row *and* every cell — per GFM
     /// table.
     ///
-    /// The cell count is what a row count alone cannot see: a `|` the writer
-    /// failed to escape splits one cell into two without changing the number of
-    /// rows, which is exactly how the unescaped `|` inside `escape::code_span`
-    /// presented.
+    /// The cell count cannot fail on its own and is kept only as documentation
+    /// of the intended grid. `pulldown-cmark` pads a short row and drops a long
+    /// one against the header's column count (`firstpass.rs`), so a recognized
+    /// table always reports exactly `header.len() * (1 + rows.len())` — which
+    /// is `want_cells` by construction — and an unrecognized one reports 0 for
+    /// rows and cells alike, where the row assertion fires first.
+    ///
+    /// The **row** count is what actually catches an unescaped `|`, and it
+    /// catches it through the header: an extra pipe there changes the header's
+    /// column count, the delimiter row no longer matches it, and GFM stops
+    /// recognizing the table at all. That is how the committed regression
+    /// `cc 9ffd40…` presented (its `|pipe|` is in a header cell), and how
+    /// reverting `math_span`'s `Ctx::Cell` rule presents today: "0 table rows
+    /// parsed, 2 expected".
     ///
     /// List nesting depth is deliberately not checked here. Unlike a row or a
     /// heading it has no event that says "this is the same list the IR built" —

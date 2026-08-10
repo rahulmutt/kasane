@@ -222,7 +222,7 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
                 "**",
             )),
             Inline::Code(t) => s.push_str(&escape::code_span(t, ctx)),
-            Inline::Math(t) => s.push_str(&escape::math_span(t)),
+            Inline::Math(t) => s.push_str(&escape::math_span(t, ctx)),
             Inline::Link {
                 target: RefTarget::External(u),
                 inlines,
@@ -673,14 +673,17 @@ mod tests {
                 bytes_ref: 0,
             },
             caption: vec![Inline::Text("fig [1]".into())],
-            number: Some("1".into()),
+            // Deliberately a number with markup in it. `Some("1")` -- what
+            // this test used to pass -- exercises no rule at all, so reverting
+            // the `escape::text` on `number` left the suite green.
+            number: Some("*3*".into()),
         }];
         let md = blocks_to_markdown(&blocks, &assets);
         assert!(
             md.contains("![fig \\[1\\]](_assets/a%20b%281%29.png)"),
             "got: {md}"
         );
-        assert!(md.contains("*Figure 1: fig \\[1\\]*"), "got: {md}");
+        assert!(md.contains("*Figure \\*3\\*: fig \\[1\\]*"), "got: {md}");
     }
 
     #[test]
@@ -717,6 +720,30 @@ mod tests {
         let md = blocks_to_markdown(&[Block::Table(t)], &AssetBag::default());
         assert!(md.contains("| a\\|b |"), "got: {md}");
         assert!(md.contains("| c<br>d |"), "got: {md}");
+    }
+
+    /// `pptx/slide.rs` pushes `Inline::Math` straight into a table cell, and
+    /// `|` passes through the adapter's `map_text` untouched, so this reaches
+    /// the writer from a real PPTX rather than only from hand-built IR.
+    /// Unescaped, `$|x|$` splits into `$` and `x` and GFM drops the row's real
+    /// last cell.
+    #[test]
+    fn math_in_a_cell_does_not_split_the_row_on_either_branch() {
+        let t = Table {
+            header: vec![
+                vec![Inline::Text("h".into())],
+                vec![Inline::Text("i".into())],
+            ],
+            rows: vec![vec![
+                // Verbatim branch.
+                vec![Inline::Math("|x|".into())],
+                // Degrade branch: the `$` forces the code span.
+                vec![Inline::Math("$|y|".into())],
+            ]],
+            has_merged: false,
+        };
+        let md = blocks_to_markdown(&[Block::Table(t)], &AssetBag::default());
+        assert!(md.contains("| $\\|x\\|$ | `$\\|y\\|` |"), "got: {md}");
     }
 
     #[test]

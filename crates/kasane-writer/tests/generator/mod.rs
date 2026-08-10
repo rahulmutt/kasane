@@ -186,6 +186,13 @@ fn inlines(depth: u32) -> BoxedStrategy<Vec<Inline>> {
         1 => inlines(depth - 1).prop_map(|x| vec![Inline::Emph(x)]),
         1 => inlines(depth - 1).prop_map(|x| vec![Inline::Strong(x)]),
         1 => filler().prop_map(|s| vec![Inline::Code(s)]),
+        // `pptx/slide.rs` pushes `Inline::Math` into a table cell and into a
+        // paragraph, so this is an adapter-realistic inline, not only a
+        // hand-built one -- and it is the only way the tier reaches
+        // `escape::math_span`, whose `Ctx::Cell` pipe rule is what a real PPTX
+        // equation needs. `Block::MathBlock` covers the display form; nothing
+        // covered the inline form until this draw.
+        1 => filler().prop_map(|s| vec![Inline::Math(s)]),
         1 => (filler(), proptest::sample::select(HREFS)).prop_map(|(s, u)| vec![Inline::Link {
             target: RefTarget::External(u.to_string()),
             inlines: vec![Inline::Text(s)],

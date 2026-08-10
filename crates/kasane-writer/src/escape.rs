@@ -295,9 +295,22 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
 ///
 /// A newline is unsafe too, not only `$`: inline math can land in a GFM table
 /// cell, where any newline ends the row.
-pub(crate) fn math_span(s: &str) -> String {
+///
+/// `Ctx` is required for the same reason `code_span` takes one, and this is
+/// **not** a hand-built-IR concern like the rest of this function:
+/// `pptx/slide.rs` pushes `Inline::Math` straight into `cur_cell`, and `|`
+/// survives `map_text` untouched (it is `ascii_graphic` and not in the symbol
+/// table). A PPTX table cell holding `|x|` emitted `$|x|$`, which GFM splits
+/// into `$` and `x` and then *drops* the row's real last cell — content loss,
+/// or a destroyed table if the row is the header. Both branches escape it:
+/// the verbatim one because the span itself sits in the cell, the degrade one
+/// by passing `ctx` down. The backslash is consumed by the table grammar
+/// before the math renderer sees it, so `$\|x\|$` recovers `InlineMath("|x|")`.
+pub(crate) fn math_span(s: &str, ctx: Ctx) -> String {
     if s.contains('$') || s.contains('\n') || s.contains('\r') {
-        code_span(s, Ctx::Flow)
+        code_span(s, ctx)
+    } else if ctx == Ctx::Cell {
+        format!("${}$", s.replace('|', "\\|"))
     } else {
         format!("${s}$")
     }
@@ -309,11 +322,18 @@ pub(crate) fn math_span(s: &str) -> String {
 /// A blank line is unsafe here rather than any newline: `$$…$$` spans lines by
 /// design, but a blank line ends the block it sits in, leaving the closing
 /// `$$` stranded as literal text.
+///
+/// The guard tests the **wrapped** string, not `s`. Testing `s` alone missed
+/// content that merely starts or ends with a single newline, because the
+/// wrapper's own newlines then complete the blank line the guard exists to
+/// prevent: `"a\n"` became `"$$\na\n\n$$\n"`, which a real parser reads as two
+/// paragraphs of literal `$` with the closing fence stranded.
 pub(crate) fn math_block(s: &str) -> String {
-    if s.contains('$') || has_blank_line(s) {
+    let wrapped = format!("$$\n{s}\n$$\n");
+    if s.contains('$') || has_blank_line(&wrapped) {
         fenced_block(s, None)
     } else {
-        format!("$$\n{s}\n$$\n")
+        wrapped
     }
 }
 
@@ -642,11 +662,14 @@ mod tests {
     /// exists.
     #[test]
     fn math_degrades_when_its_content_would_close_the_delimiter() {
-        assert_eq!(math_span("x^2"), "$x^2$");
-        assert_eq!(math_span("\\frac{1}{2}"), "$\\frac{1}{2}$");
+        assert_eq!(math_span("x^2", Ctx::Flow), "$x^2$");
+        assert_eq!(math_span("\\frac{1}{2}", Ctx::Flow), "$\\frac{1}{2}$");
         // A `$` closes the span; a newline ends a table row.
-        assert_eq!(math_span("a$ [x](http://y) $b"), "`a$ [x](http://y) $b`");
-        assert_eq!(math_span("a\nb"), "`a b`");
+        assert_eq!(
+            math_span("a$ [x](http://y) $b", Ctx::Flow),
+            "`a$ [x](http://y) $b`"
+        );
+        assert_eq!(math_span("a\nb", Ctx::Flow), "`a b`");
 
         assert_eq!(math_block("x^2"), "$$\nx^2\n$$\n");
         // Display math spans lines by design, so a lone newline is fine.
@@ -654,6 +677,28 @@ mod tests {
         // A blank line ends the block, stranding the closing `$$`.
         assert_eq!(math_block("a\n\nb"), "```\na\n\nb\n```\n");
         assert_eq!(math_block("a$b"), "```\na$b\n```\n");
+        // Content that merely touches an edge manufactures the blank line
+        // together with the wrapper's own newlines, which is why the guard
+        // tests the wrapped string.
+        assert_eq!(math_block("a\n"), "```\na\n\n```\n");
+        assert_eq!(math_block("\na"), "```\n\na\n```\n");
+        assert_eq!(math_block("\r\na"), "```\n\r\na\n```\n");
+    }
+
+    /// A PPTX table cell really does hold `Inline::Math` (`pptx/slide.rs`
+    /// pushes it into `cur_cell`), and `|` survives the adapter's `map_text`,
+    /// so this is adapter-reachable rather than hand-built-IR defence. Both
+    /// branches must escape it: unescaped, `$|x|$` splits into `$` and `x` and
+    /// the row's real last cell is dropped outright.
+    #[test]
+    fn math_in_a_cell_escapes_a_pipe_on_both_branches() {
+        // Verbatim branch.
+        assert_eq!(math_span("|x|", Ctx::Cell), "$\\|x\\|$");
+        assert_eq!(math_span("|x|", Ctx::Flow), "$|x|$");
+        // Degrade branch: the `$` forces a code span, which must still carry
+        // the cell's pipe rule down with it.
+        assert_eq!(math_span("$|x|", Ctx::Cell), "`$\\|x\\|`");
+        assert_eq!(math_span("$|x|", Ctx::Flow), "`$|x|`");
     }
 
     #[test]
