@@ -126,8 +126,19 @@ Then translate the literal arguments — `true` becomes `Pos::LineStart`, `false
 | `markdown.rs` | `Block::Figure` `number` | `Pos::Mid` |
 | `markdown.rs` | `render_table`'s `cells` closure | `Pos::LineStart` |
 | `markdown.rs` | all four `Ctx::Html` calls in `inlines_to_html` | `Pos::Mid` |
-| `lib.rs` | `file_to_markdown`'s title heading | `Pos::LineStart` |
+| `lib.rs` | `file_to_markdown`'s title heading | `Pos::Mid` |
 | `fuzz_entry.rs` | the `Ctx::Html` call | `Pos::Mid` |
+
+**Correction (2026-08-13 fix wave, Finding 1):** this row read `Pos::LineStart`
+when the plan was written, and executing it as written is what produced the
+defect the fix wave closed. The title lands after the `# ` `file_to_markdown`
+already pushes, not at column 0 — the same fact that already makes
+`Block::Heading`'s body use `Pos::Mid`. Once Task 3's whitespace rule landed,
+the false `LineStart` claim turned a leading space in the title into `&#32;`,
+which disarms the ATX-content strip `anchor_fold` assumes happens, so the
+anchor `assign_paths` embeds no longer matched the id a renderer computed from
+the rendered heading — breaking every cross-reference into the file. Fixed by
+commit `2b97c0b`; the row above now reads `Pos::Mid`.
 
 - [ ] **Step 4: Widen the fuzz target's loop to three states**
 
@@ -1388,5 +1399,5 @@ correctly protecting that leading whitespace, not over-firing; the actual
 defect is upstream, in the adapter's intra-node whitespace handling, and is
 recorded as a follow-up in the design spec's Non-goals (§1) rather than fixed
 by this item, which does not touch `kasane-adapters`. A *different* hit —
-anywhere this fixture's ordinary prose, rather than its one hand-wrapped
+anywhere in this fixture's ordinary prose, rather than its one hand-wrapped
 paragraph — would still mean a rule is over-firing.

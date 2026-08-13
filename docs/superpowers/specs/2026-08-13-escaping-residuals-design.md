@@ -105,9 +105,8 @@ of the escaping spec while appearing to succeed.
   branch the same intra-node whitespace collapse the other two branches
   already have would remove the `&#32;` cosmetics at the source, rather than
   asking the writer to keep protecting a fidelity gap upstream of it. Out of
-  scope for this item
-  because it is an adapter fidelity fix, not an escaping rule, and this item
-  does not touch `kasane-adapters`.
+  scope for this item because it is an adapter fidelity fix, not an escaping
+  rule, and this item does not touch `kasane-adapters`.
 
 ## 2. The escaping position
 
