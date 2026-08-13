@@ -449,43 +449,30 @@ unchanged (§5), the emphasis now applies, and the first character on the line
 is a space rather than a bullet marker. Inner content that is entirely
 whitespace gets no delimiters at all.
 
-Three sibling cases are **not** fixed and are recorded here rather than in a
-ledger.
+All three sibling cases recorded here as unfixed were closed by the escaping
+residuals item (2026-08-13); see that spec for the mechanisms. Two of the
+three were smaller than this section assumed, and for the same reason: this
+section reasoned from the CommonMark grammar where a parser was available.
+`   \# h` does suppress the heading, but the parser then strips the three
+leading spaces, so the backslash form loses the text it was meant to protect —
+a §5 violation presenting as a fix. A numeric character reference preserves it
+and disarms the whole run, which made the "changes the line-start rules for
+every context at once" characterization an artifact of the mechanism rather
+than of the defect.
 
-`Block::Para([FootnoteRef(1), Text(": note")])` renders `[^1]: note` at column
-0, which parses as a footnote *definition*. It needs a different mechanism —
-the `:` belongs to the *next* inline, so escaping it requires cross-inline
-state plus a new rule for a character no context escapes today — and putting
-that decision in `markdown.rs` would break §2's "`escape.rs` owns every rule".
+Two cases remain open, both narrower than what was closed:
 
-**Leading whitespace at column 0 is a known, unhandled class.** Moving
-emphasis whitespace outside the delimiters can now put four or more spaces at
-column 0, so `Para([Emph([Text("    x")])])` becomes an indented code block
-where it previously became a bullet list — lateral, not a regression, and one
-instance of a gap that predates this policy: `escape::text` clears
-`line_start` on any leading space (`escape.rs`'s main loop), so
-`Text("  # h")` at column 0 already emits an unescaped ATX heading. Closing
-the class means `at_line_start` surviving leading whitespace, which changes
-the line-start rules for every context at once and is not a pre-merge change.
+- **A newline run split across an `Inline::FootnoteRef`.** The reference
+  renders as visible `[^1]` text that `inline_text` skips, so the fold cannot
+  collapse across it without dropping a space GitHub renders. Same root cause
+  as the `## Notes[^1]` divergence `kasane-core::slug` documents as surviving
+  on purpose; it needs §8's approach (iii), not a fold change.
+- **Whitespace inside the merged-table HTML fallback.** Not reachable by
+  escaping: an HTML renderer collapses whitespace runs whether they arrived
+  literally or as `&#32;`. One more cost of that path, alongside §3.3's.
 
-**A `\r`/`\n` split across an inline boundary still diverges when an
-`Inline::Code` sits between them.** In a heading, `[Text("A\r"), Code("\nB")]`
-gives `anchor_fold` the two characters adjacent in `inline_text`, which
-collapses them to one separator and anchors `a-b`; the renderer folds each run
-separately and `code_span` then pads its content, so the parsed heading text
-carries *two* spaces and GitHub computes `a--b` — one hyphen more than kasane
-embeds.
-The mechanism is the code span's padding, not the fold, which is why §4.1's
-shared `one_line` does not close it. The `Emph`/`Strong` form of the same shape
-*was* closed, by this section's whitespace extraction: moving the inner run's
-leading newline outside the delimiters puts the two newlines adjacent, where
-`one_line` collapses them. So this is strictly narrower than what the branch
-closed, not something it introduced — before the branch, the same input
-anchored `ab`. The property tier cannot reach it: no `HOSTILE` fragment ends in
-`\r`, so the two characters never land on either side of an inline boundary.
-
-None of these has property-tier coverage, and neither does the emphasis fix
-itself — see §6.4 for why the generator cannot reach it.
+The emphasis fix in this section still has no property-tier coverage — see
+§6.4 for why the generator cannot reach it.
 
 ## 5. The invariant that ties this to the slug rules
 
@@ -758,6 +745,26 @@ guard — §5's invariant inverted. And escaping is not context-free: the same
 string needs a backslash in flow text, an HTML entity in a cell of a merged
 table, a percent-encoding in a destination, and a YAML escape in the
 frontmatter, so no single pre-pass can be correct for all four.
+
+### 8.2 A shared crate for the anchor rule
+
+Not taken, here or — as approach (iii) — by the residuals item (2026-08-13),
+and recorded so the next anchor divergence finds the argument rather than
+re-deriving it.
+
+`anchor_slug` predicts the rendered heading line from IR inlines, and
+`escape::one_line` produces that line — two hand-kept mirrors in crates that
+cannot depend on each other. Moving both onto a shared crate would end the
+mirror and close the whole divergence class at once, including the
+footnote-reference case (§4.5) and the trailing-`#` case, both of which are
+currently documented as surviving on purpose.
+
+It was not taken because `assign_paths` needs the anchor at structuring time,
+before anything is rendered, so the shared model has to be a *prediction* of
+the rendered line either way — the crate boundary moves, the prediction
+remains. That makes it an architecture change with a real ripple and a
+smaller payoff than it first appears, and it deserves its own item rather
+than riding along with a fix.
 
 ## 9. Verification and risk
 

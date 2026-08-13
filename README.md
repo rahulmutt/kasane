@@ -182,8 +182,14 @@ See AGENTS.md for the codebase map.
   that literally prints `*`, `|`, `` ` ``, `[`, `&` or a line beginning with
   `#` converts to a file where those characters render as themselves, which
   means the Markdown source contains backslash escapes — `a\*b`, `1\. two`,
-  `a\|b` inside a table cell. That is deliberate: the source document is
-  content, not syntax. Two consequences worth knowing. A newline inside a
+  `a\|b` inside a table cell.
+  Leading whitespace on a line is carried by a character reference — `&#32;`
+  or `&#9;` — rather than a backslash, because a backslash would suppress the
+  construct by losing the whitespace. Table cells now keep the whitespace at
+  both their edges, which GFM would otherwise trim away: text that earlier
+  builds dropped silently now survives.
+  That is deliberate: the source document is content, not syntax. Two
+  consequences worth knowing. A newline inside a
   heading, a table cell, a link label or a frontmatter title is folded — to a
   space, or to `<br>` in a cell — because those places are a single line by
   grammar. And a merged-cell table, which is emitted as raw HTML, carries its
