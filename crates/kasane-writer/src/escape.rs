@@ -77,7 +77,19 @@ pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
 
         if c == '\n' {
             match ctx {
-                Ctx::Cell => out.push_str("<br>"),
+                Ctx::Cell => {
+                    out.push_str("<br>");
+                    // A `<br>` is inline markup inside the cell, not a fresh
+                    // line -- GFM only trims a cell's own outer edges, never
+                    // the run right after an internal `<br>`. Clearing this
+                    // keeps `line_start` honest: without it, `Text("\n  x")`
+                    // claimed the ` ` right after `<br>` was at column 0 and
+                    // spent a character reference on it for no reason. That
+                    // reference rendered as the space it names either way
+                    // (verified against the parser), so this is a position
+                    // fix, not a behaviour fix.
+                    line_start = false;
+                }
                 _ => {
                     out.push('\n');
                     line_start = true;
@@ -726,6 +738,56 @@ mod tests {
         assert_eq!(text("a*b", Ctx::Cell, Pos::Mid), "a\\*b");
     }
 
+    /// A `<br>` is inline markup inside the cell, not a fresh line: GFM's
+    /// cell-trim rule only ever looks at the cell's own outer edges, never at
+    /// what follows an interior `<br>`. `line_start` must not survive one, or
+    /// `Text("\n  x")` claims the space right after `<br>` is at column 0 and
+    /// spends a character reference on it for no reason.
+    #[test]
+    fn line_start_does_not_survive_a_br() {
+        assert_eq!(text("\n  x", Ctx::Cell, Pos::LineStart), "<br>  x");
+        assert_eq!(text("\n\tx", Ctx::Cell, Pos::LineStart), "<br>\tx");
+    }
+
+    /// The reference and the literal space it replaces must render
+    /// identically once a real GFM cell-trim rule is in play: only the last
+    /// character of the whole cell is at a trimmed edge, so the run right
+    /// after an interior `<br>` was never going to be trimmed either way.
+    #[test]
+    fn the_position_fix_after_a_br_does_not_change_what_renders() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        fn parse_cell_body(md: &str) -> String {
+            let mut opts = Options::empty();
+            opts.insert(Options::ENABLE_TABLES);
+            let (mut in_cell, mut seen_header_end, mut out) = (false, false, String::new());
+            for ev in Parser::new_ext(md, opts) {
+                match ev {
+                    Event::Start(Tag::TableCell) => in_cell = true,
+                    Event::End(TagEnd::TableHead) => seen_header_end = true,
+                    Event::Html(h) | Event::InlineHtml(h) if in_cell && seen_header_end => {
+                        if h.trim() == "<br>" {
+                            out.push('\n');
+                        }
+                    }
+                    Event::Text(t) if in_cell && seen_header_end => out.push_str(&t),
+                    _ => {}
+                }
+            }
+            out
+        }
+
+        for input in ["\n  x", "\n\tx", "a\n  b", "\n  "] {
+            let rendered = cell_edges(&text(input, Ctx::Cell, Pos::LineStart));
+            let md = format!("| h |\n| --- |\n| {rendered} |\n");
+            assert_eq!(
+                parse_cell_body(&md),
+                input,
+                "input {input:?}: got cell {rendered:?} from {md:?}"
+            );
+        }
+    }
+
     #[test]
     fn html_escapes_entities_not_backslashes() {
         assert_eq!(
@@ -1042,6 +1104,15 @@ mod tests {
         // Nothing to restore.
         assert_eq!(cell_edges("x"), "x");
         assert_eq!(cell_edges(""), "");
+        // An all-whitespace cell: the leading rule (`Pos::LineStart`) converts
+        // the first character, `cell_edges` converts the last, and the two
+        // references meet with nothing literal between them for a two-space
+        // run. Pins that this still parses back as the two spaces it names,
+        // not as an empty or collapsed cell.
+        assert_eq!(
+            cell_edges(&text("  ", Ctx::Cell, Pos::LineStart)),
+            "&#32;&#32;"
+        );
     }
 
     /// A comparable view of a folded run: one `(kind, content)` pair per
