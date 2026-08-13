@@ -603,18 +603,18 @@ mod tests {
     /// Emphasis whose content begins or ends with whitespace moves that
     /// whitespace outside the delimiters.
     ///
-    /// At column 0 the old output was `* x*`, which GFM reads as a bullet
-    /// list rather than a paragraph; the second half of the same bug is that
-    /// CommonMark's flanking rules mean `* x*` is not emphasis anywhere, so
-    /// the markup was silently lost mid-line too.
+    /// The column-0 case this test used to pin here -- `* x*` read by GFM as
+    /// a bullet list, dropping both the paragraph and the emphasis -- is
+    /// superseded by Task 3's line-start rule: `escape::text` now replaces
+    /// the leading space with a character reference before `emphasize` ever
+    /// runs, so there is no leading whitespace left for `trim` to move
+    /// outside the delimiters. See
+    /// `emphasis_at_column_zero_keeps_its_leading_space_inside` for that case
+    /// pinned end-to-end. What is left here is `emphasize`'s own behaviour
+    /// away from a line start, where CommonMark's flanking rules are still
+    /// the only thing standing between edge whitespace and dropped emphasis.
     #[test]
     fn emphasis_moves_edge_whitespace_outside_its_delimiters() {
-        let blocks = vec![Block::Para(vec![Inline::Emph(vec![Inline::Text(
-            " x".into(),
-        )])])];
-        let md = blocks_to_markdown(&blocks, &AssetBag::default());
-        assert!(md.starts_with(" *x*"), "a bullet list at column 0: {md}");
-
         // Mid-line, the emphasis must survive rather than be dropped by the
         // flanking rules.
         let blocks = vec![Block::Para(vec![
@@ -625,11 +625,15 @@ mod tests {
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("a **x** b"), "got: {md}");
 
-        // Nothing to emphasize: no delimiters at all, so `**` cannot sit at
-        // column 0 as markup for its own sake.
-        let blocks = vec![Block::Para(vec![Inline::Strong(vec![Inline::Text(
-            "  ".into(),
-        )])])];
+        // Nothing to emphasize, mid-line: no delimiters at all, so `**`
+        // cannot sit in the output as markup for its own sake. Kept off a
+        // line start deliberately -- at column 0 the line-start rule always
+        // converts the leading character, which the assertion above's
+        // sibling test now covers instead.
+        let blocks = vec![Block::Para(vec![
+            Inline::Text("a ".into()),
+            Inline::Strong(vec![Inline::Text("  ".into())]),
+        ])];
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(!md.contains('*'), "got: {md}");
     }
@@ -916,5 +920,40 @@ mod tests {
         }];
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("- ## Notes"), "got: {md}");
+    }
+
+    /// §3.5. At column 0 this rendered `* x*`, which GFM reads as a bullet
+    /// list — the paragraph was lost, and the emphasis was silently dropped
+    /// too, because a `*` with adjacent whitespace is never a delimiter.
+    /// `emphasize` moves edge whitespace outside the delimiters, but at a line
+    /// start the reference has already replaced it, so `*&` is left-flanking
+    /// and the space stays *inside* the emphasis where the IR put it.
+    #[test]
+    fn emphasis_at_column_zero_keeps_its_leading_space_inside() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let blocks = vec![Block::Para(vec![Inline::Emph(vec![Inline::Text(
+            " x".into(),
+        )])])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.starts_with("*&#32;x*"), "got:\n{md}");
+
+        let mut in_em = false;
+        let mut emphasized = String::new();
+        let mut is_list = false;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::Emphasis) => in_em = true,
+                Event::End(pulldown_cmark::TagEnd::Emphasis) => in_em = false,
+                Event::Start(pulldown_cmark::Tag::List(_)) => is_list = true,
+                Event::Text(t) if in_em => emphasized.push_str(&t),
+                _ => {}
+            }
+        }
+        assert!(!is_list, "a paragraph became a bullet list:\n{md}");
+        assert_eq!(
+            emphasized, " x",
+            "the emphasis must apply and keep its space:\n{md}"
+        );
     }
 }

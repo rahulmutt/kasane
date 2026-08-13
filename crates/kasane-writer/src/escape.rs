@@ -86,6 +86,23 @@ pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
         }
 
         if line_start {
+            // GFM reinterprets or discards whitespace at a line start: up to
+            // three spaces still open a heading or a list, four open an
+            // indented code block, and a cell's leading run is trimmed away
+            // entirely. None of that is reachable by escaping a marker — the
+            // code-block form has no marker, and `   \# h` suppresses the
+            // heading only by losing the spaces.
+            //
+            // A character reference renders as the character it names but is
+            // not whitespace to the block scanner, so one at the head of the
+            // run disarms the whole run: everything after it is no longer at
+            // column 0 (§3).
+            if c == ' ' || c == '\t' {
+                out.push_str(if c == ' ' { "&#32;" } else { "&#9;" });
+                i += 1;
+                line_start = false;
+                continue;
+            }
             if let Some(after_digits) = ordered_marker_delimiter(&chars, i) {
                 for d in &chars[i..after_digits] {
                     out.push(*d);
@@ -828,6 +845,66 @@ mod tests {
     #[test]
     fn a_cell_does_not_escape_the_footnote_colon() {
         assert_eq!(text(": note", Ctx::Cell, Pos::AfterFootnoteRef), ": note");
+    }
+
+    /// A character reference, not a backslash. `   \# h` does suppress the
+    /// heading, but the parser then strips the three leading spaces — the
+    /// text is gone, which is an escaping-spec §5 violation presenting as a
+    /// fix. A reference renders as the character and is not whitespace to the
+    /// block scanner, so one at the head of the run disarms all of it (§3).
+    #[test]
+    fn a_line_start_whitespace_run_becomes_a_character_reference() {
+        // The first character carries it; the rest of the run is literal,
+        // and the `#` needs no backslash because it is no longer at column 0.
+        assert_eq!(text("  # h", Ctx::Flow, Pos::LineStart), "&#32; # h");
+        // Four spaces would open an indented code block, which has no marker
+        // to escape.
+        assert_eq!(text("    x", Ctx::Flow, Pos::LineStart), "&#32;   x");
+        // A tab indents just as far.
+        assert_eq!(text("\tx", Ctx::Flow, Pos::LineStart), "&#9;x");
+        // Mid-line whitespace is ordinary text.
+        assert_eq!(text("  x", Ctx::Flow, Pos::Mid), "  x");
+    }
+
+    #[test]
+    fn line_start_whitespace_re_arms_after_an_interior_newline() {
+        assert_eq!(
+            text("intro\n  # not a heading", Ctx::Flow, Pos::Mid),
+            "intro\n&#32; # not a heading"
+        );
+    }
+
+    /// GFM trims a cell before parsing it, so a leading run is dropped
+    /// outright — document text lost. `render_table` renders every cell at a
+    /// line start, so this rule reaches the leading edge with no new
+    /// plumbing (§3.2).
+    #[test]
+    fn a_cell_keeps_its_leading_whitespace() {
+        assert_eq!(text("  x", Ctx::Cell, Pos::LineStart), "&#32; x");
+        assert_eq!(text("\tx", Ctx::Cell, Pos::LineStart), "&#9;x");
+    }
+
+    /// The reference has to survive as one, which means the `&` must not pick
+    /// up a backslash from the entity rule on the way out.
+    #[test]
+    fn the_emitted_reference_parses_back_to_the_whitespace() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let md = format!("{}\n", text("    x", Ctx::Flow, Pos::LineStart));
+        let mut got = String::new();
+        let mut is_code_block = false;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Text(t) => got.push_str(&t),
+                Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => is_code_block = true,
+                _ => {}
+            }
+        }
+        assert!(
+            !is_code_block,
+            "four spaces still opened a code block: {md:?}"
+        );
+        assert_eq!(got, "    x", "the whitespace must render back: {md:?}");
     }
 
     #[test]
