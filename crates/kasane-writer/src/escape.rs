@@ -315,8 +315,16 @@ fn fold_seq(inls: &[Inline], depth: usize, pending: &mut bool) -> Vec<Inline> {
     // `blocks_to_markdown` is public API over a public IR, and a hand-built
     // tree deeper than the bound would otherwise overflow the stack here
     // rather than being truncated there.
+    //
+    // Returns empty rather than `inls.to_vec()`: `Inline`'s derived `Clone`
+    // is itself recursive, so cloning the remainder would only relabel the
+    // recursion this guard exists to stop, as deep as whatever is left below
+    // it. Empty is safe to return because it is unobservable — the only
+    // consumer, `inlines_to_md_at`, has its own `MAX_INLINE_DEPTH` guard on a
+    // fresh counter and discards everything past that depth before it is
+    // ever read, so nothing this deep survives to be rendered either way.
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
-        return inls.to_vec();
+        return Vec::new();
     }
     inls.iter()
         .map(|i| match i {
@@ -1129,16 +1137,65 @@ mod tests {
     }
 
     /// The fold runs *before* `inlines_to_md_at`'s depth guard, so it needs
-    /// its own or a hand-built inline tree deeper than the bound overflows the
-    /// stack here instead of being truncated there.
+    /// its own — a hand-built inline tree deeper than the bound would
+    /// otherwise overflow the stack here instead of being truncated there.
+    ///
+    /// `10_000` matches the depth `tests/inline_depth.rs`'s
+    /// `deep_inline_nesting_does_not_abort` uses for the sibling depth guard
+    /// in `inlines_to_md_at`, not `MAX_INLINE_DEPTH` (256) plus a small
+    /// margin: the guard caps *actual* recursion at exactly
+    /// `MAX_INLINE_DEPTH` regardless of how deep the input nominally is, so a
+    /// nominal depth only slightly past the bound cannot tell "guard
+    /// present" apart from "guard absent, but that depth happens not to
+    /// overflow anyway" — it takes a depth in `inline_depth.rs`'s magnitude
+    /// to genuinely risk a stack-overflow abort if the guard were missing or
+    /// broken. No `RUST_MIN_STACK` override is needed here, matching that
+    /// sibling test's convention, because the guard returns rather than
+    /// cloning the remainder (see `fold_seq`).
     #[test]
     fn the_fold_stops_at_the_inline_depth_bound() {
         let mut deep = vec![Inline::Text("x".into())];
-        for _ in 0..(kasane_ir::MAX_INLINE_DEPTH + 50) {
+        for _ in 0..10_000 {
             deep = vec![Inline::Emph(deep)];
         }
-        // Must return rather than recurse to exhaustion.
-        let _ = fold_inline_newlines(&deep);
+        // Must return rather than recurse to exhaustion / abort the process.
+        let got = fold_inline_newlines(&deep);
+        assert!(!got.is_empty(), "must return rather than abort");
+    }
+
+    /// The depth-bound test above only proves the guard fires; it makes no
+    /// claim about what comes back. Pin the other half, the way
+    /// `inline_depth.rs`'s `nesting_within_the_bound_is_preserved` does for
+    /// the sibling guard: at a depth far under the bound, nothing truncates,
+    /// so a newline run split across a boundary inside the nested `Emph`s
+    /// must still collapse to exactly the shape
+    /// `a_newline_run_collapses_across_an_inline_boundary` pins at depth
+    /// zero. This is the check that would fail if `fold_seq`/`fold_leaf`
+    /// dropped or corrupted content while threading `pending` through the
+    /// recursion — an empty or non-empty `Vec` alone cannot show that.
+    #[test]
+    fn folding_within_the_bound_still_collapses_correctly() {
+        const DEPTH: usize = 8;
+        let mut deep = vec![Inline::Text("A\r".into()), Inline::Code("\nB".into())];
+        for _ in 0..DEPTH {
+            deep = vec![Inline::Emph(deep)];
+        }
+
+        let got = fold_inline_newlines(&deep);
+
+        // Unwrap the DEPTH layers of Emph the fold must have preserved
+        // faithfully, down to the leaves the boundary case landed on.
+        let mut cur = got.as_slice();
+        for _ in 0..DEPTH {
+            cur = match cur {
+                [Inline::Emph(inner)] => inner.as_slice(),
+                other => panic!("expected a single Emph wrapper, got {other:?}"),
+            };
+        }
+        assert_eq!(
+            shape(cur),
+            vec![("text", "A\n".to_string()), ("code", "B".to_string())]
+        );
     }
 
     #[test]
