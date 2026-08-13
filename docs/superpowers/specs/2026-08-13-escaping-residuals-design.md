@@ -74,7 +74,10 @@ of the escaping spec while appearing to succeed.
 - **The `insta` snapshot tier.** Still the last unbuilt tier from the original
   design spec §9.
 - **`epub/xhtml.rs`'s intra-node whitespace processing.** Recorded here as a
-  follow-up rather than fixed (2026-08-13 fix wave, Finding 4). `xhtml.rs`
+  follow-up rather than fixed (2026-08-13 fix wave, Finding 4), and **closed
+  by its own item on 2026-08-13** — see "How it was closed" at the end of this
+  bullet. The description below is the state of the gap as this item left it.
+  `xhtml.rs`
   never applies HTML's own whitespace-collapsing to a text fragment that
   contains a non-space character (`Event::Text`'s non-empty branch, around
   `xhtml.rs:905`) — unlike its own whitespace-only and reference-adjacent
@@ -107,6 +110,55 @@ of the escaping spec while appearing to succeed.
   asking the writer to keep protecting a fidelity gap upstream of it. Out of
   scope for this item because it is an adapter fidelity fix, not an escaping
   rule, and this item does not touch `kasane-adapters`.
+
+  **How it was closed.** The non-empty branch now applies HTML's
+  `white-space: normal` model, which is what the whitespace-only (`:892`) and
+  reference-adjacent (`:933`) branches had always applied to the runs they
+  keep. Three parts: `collapse_ws` reduces every run of *ASCII* whitespace in
+  the fragment to one space (`is_ascii_whitespace`, not `is_whitespace` —
+  Rust's Unicode `White_Space` includes U+00A0, the character `&#160;` exists
+  to produce, which HTML does not collapse); leading whitespace is stripped
+  when the fragment opens the depth-1 block frame, reusing the block-vs-inline
+  predicate the `GeneralRef` flush site already carried; and
+  `trim_block_trailing_ws` strips the trailing edge where the depth-1 frame is
+  popped into a `Block`, recursing through a trailing `Emph`/`Strong`/`Link`
+  but not into `Code`/`Math`. `<pre>` is untouched structurally — the verbatim
+  interception at the top of the event loop takes those events before the
+  `Event::Text` arm sees them.
+
+  Predicted effect and measured effect agreed: converting all four EPUB/MOBI/
+  AZW3 fixtures before and after produces exactly one diff in the whole
+  emitted tree — `rich.epub`'s `01-chapter-one.md` continuation line, which
+  goes from a wrapped `&#32;`-led line to `and a footnote[^1].` No path and no
+  anchor changed, and the MOBI/AZW3 trees are byte-identical (they share
+  `xhtml_to_blocks`, so they inherit the fix but had no fragment that
+  exercised it).
+
+  Two consequences beyond the reported defect, both pinned by their own tests
+  rather than left to be discovered:
+
+  - **A bare `<code>` span's runs now collapse**, since `<code>` outside
+    `<pre>` accumulates through the same `push_text!` path. Faithful — HTML
+    collapses inside `<code>` — but a real change.
+  - **Trailing whitespace at a block edge is now dropped even when a
+    character reference put it there.** This reverses
+    `prev_was_ref_keep_of_trailing_space_before_end_is_retained`, whose
+    comment justified retention on the grounds that "there is nothing in the
+    state machine that distinguishes 'adjacent to a reference, then more
+    content follows' from 'adjacent to a reference, then the block ends'".
+    That was true when written; `trim_block_trailing_ws` is precisely that
+    distinguisher. The test was renamed and re-asserted, with the superseded
+    reasoning recorded in place rather than deleted.
+
+  The trim deliberately stops short of one thing it could have done. It never
+  empties a block: a block whose entire content is whitespace is left exactly
+  as-is. A *literal* whitespace-only fragment never reaches the trim at all
+  (`pending_ws` drops it before any block is emitted), so the only way to
+  reach that state is a character reference — the case the `GeneralRef` arm
+  keeps on purpose. Letting the trim run there would have deleted
+  `<p>&#32;</p>` outright, which is a larger claim than "strip the layout at
+  the edges" and contradicts that rule; it was caught by
+  `whitespace_only_character_reference_survives` rather than by review.
 
 ## 2. The escaping position
 

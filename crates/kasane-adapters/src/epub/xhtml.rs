@@ -331,6 +331,95 @@ fn inlines_text(inls: &[Inline]) -> String {
     s
 }
 
+/// Applies HTML's `white-space: normal` collapsing to one text fragment: every
+/// run of whitespace becomes a single space.
+///
+/// `is_ascii_whitespace`, not `is_whitespace`. Rust's `char::is_whitespace`
+/// follows the Unicode `White_Space` property, which includes U+00A0 NO-BREAK
+/// SPACE — the character an author writes `&#160;` to get, and one HTML
+/// pointedly does *not* collapse. Collapsing it would delete authored content
+/// under the banner of stripping layout. HTML's whitespace processing operates
+/// on the ASCII set (space, tab, LF, CR, FF), which is exactly what
+/// `is_ascii_whitespace` matches.
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for c in s.chars() {
+        if c.is_ascii_whitespace() {
+            if !in_ws {
+                out.push(' ');
+                in_ws = true;
+            }
+        } else {
+            in_ws = false;
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether `inls` holds anything that is not ASCII whitespace.
+///
+/// `Inline::FootnoteRef` counts as content: it carries no text of its own here,
+/// but the writer renders it as a visible `[^n]`, so a block holding only a
+/// footnote reference is not an empty block.
+fn has_non_ws(inls: &[Inline]) -> bool {
+    inls.iter().any(|i| match i {
+        Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => {
+            t.chars().any(|c| !c.is_ascii_whitespace())
+        }
+        Inline::Emph(x) | Inline::Strong(x) => has_non_ws(x),
+        Inline::Link { inlines, .. } => has_non_ws(inlines),
+        Inline::FootnoteRef(_) => true,
+    })
+}
+
+/// Strips the whitespace HTML drops at the end of a block box.
+///
+/// The leading half of the rule lives in the `Event::Text` handler, where "is
+/// this the start of the block?" is answerable from the frame stack. The
+/// trailing half cannot be: whether a fragment is a block's *last* content is
+/// only known once the block closes. This therefore runs at the three sites
+/// that pop the depth-1 inline frame into a `Block` — the `h1..h6` and `p` End
+/// arms, and `close_implicit!`.
+///
+/// It recurses through a trailing `Emph`/`Strong`/`Link`, because the end of
+/// the block box is not the end of the block's own inline list:
+/// `<p>a <em>x </em></p>` renders "a x". It stops at `Code` and `Math`, whose
+/// content is a span of its own that the writer emits verbatim between
+/// delimiters — trimming there would delete document text rather than layout,
+/// which is the failure the whole whitespace rule exists to avoid.
+fn trim_block_trailing_ws(inls: &mut Vec<Inline>) {
+    // Nothing but whitespace here is left exactly as it is. A literal
+    // whitespace-only fragment never reaches this function -- the Event::Text
+    // handler routes it to `pending_ws` and drops it at the next tag boundary,
+    // so no block is emitted for it at all. The only way a block arrives here
+    // holding whitespace and nothing else is through a character reference,
+    // which the GeneralRef arm keeps on purpose ("a reference is always
+    // authored deliberately, so `&#160;` or `&#32;` is content"). Trimming it
+    // would empty the block and delete it, which is a larger claim than "strip
+    // the layout at the edges" and contradicts that rule. Applied at every
+    // recursion level, so `<p>a<em>&#32;</em></p>` keeps its emphasis too.
+    if !has_non_ws(inls) {
+        return;
+    }
+    match inls.last_mut() {
+        Some(Inline::Text(t)) => {
+            let keep = t.trim_end_matches(|c: char| c.is_ascii_whitespace()).len();
+            t.truncate(keep);
+            // A leaf the trim emptied is a wart this function would be
+            // creating itself; drop it and carry on into the inline before it.
+            if t.is_empty() {
+                inls.pop();
+                trim_block_trailing_ws(inls);
+            }
+        }
+        Some(Inline::Emph(x) | Inline::Strong(x)) => trim_block_trailing_ws(x),
+        Some(Inline::Link { inlines, .. }) => trim_block_trailing_ws(inlines),
+        _ => {}
+    }
+}
+
 /// Wraps `x` in `wrap`, unless doing so would push nesting past
 /// `MAX_INLINE_DEPTH` — in which case the content is contributed as flat text.
 ///
@@ -458,6 +547,16 @@ pub fn xhtml_to_blocks(
     // than pushed verbatim: XHTML collapses whitespace runs anyway, so a
     // pretty-printed `"\n  "` adjacent to a reference must render the same
     // as a literal `" "` would.
+    //
+    // That normalization is one half of a single model, not a special case
+    // for references. The other half is `collapse_ws`, which the non-empty
+    // branch applies to a fragment carrying real content, plus the block-edge
+    // rules: leading whitespace stripped in that branch when the fragment
+    // opens the depth-1 block frame, trailing whitespace stripped by
+    // `trim_block_trailing_ws` where that frame is popped into a `Block`. All
+    // three branches of the Event::Text handler therefore implement HTML's
+    // `white-space: normal`, and none of them can reach `<pre>`, whose events
+    // the verbatim interception at the top of the loop takes first.
     let mut pending_ws: Option<String> = None;
     let mut prev_was_ref = false;
     // Verbatim accumulation while inside <pre>: (language, accumulated text).
@@ -503,7 +602,8 @@ pub fn xhtml_to_blocks(
         () => {
             if implicit_para {
                 implicit_para = false;
-                let inls = inline_stack.pop().unwrap_or_default();
+                let mut inls = inline_stack.pop().unwrap_or_default();
+                trim_block_trailing_ws(&mut inls);
                 if !inls.is_empty() {
                     emit_block(
                         &mut frames,
@@ -902,7 +1002,26 @@ pub fn xhtml_to_blocks(
                         implicit_para = true;
                     }
                     if !inline_stack.is_empty() {
-                        push_text!(s);
+                        // Same block-vs-inline predicate as the GeneralRef
+                        // flush site below, for the same reason: depth 1 is
+                        // the block frame (`p`/`h1..h6` push it and nothing
+                        // else does), and HTML strips whitespace at the start
+                        // of a block box. A nested inline frame sits deeper,
+                        // and its leading whitespace is authored content --
+                        // `A<em>\n  B</em>` means `A`, a space, then
+                        // emphasized `B`.
+                        let at_block_start = inline_stack.len() == 1
+                            && inline_stack.last().is_some_and(|top| top.is_empty());
+                        let collapsed = collapse_ws(&s);
+                        // Collapsing already reduced any leading run to a
+                        // single space, and `s` holds a non-whitespace
+                        // character, so this can never empty the fragment.
+                        let kept = if at_block_start {
+                            collapsed.trim_start()
+                        } else {
+                            &collapsed
+                        };
+                        push_text!(kept.to_string());
                     }
                 }
                 prev_was_ref = false;
@@ -997,7 +1116,8 @@ pub fn xhtml_to_blocks(
                         }
                     }
                     b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
-                        let inls = inline_stack.pop().unwrap_or_default();
+                        let mut inls = inline_stack.pop().unwrap_or_default();
+                        trim_block_trailing_ws(&mut inls);
                         let level = cur_block.take().unwrap_or(1);
                         let id = BlockId(*next_id);
                         *next_id += 1;
@@ -1023,7 +1143,8 @@ pub fn xhtml_to_blocks(
                         }
                     }
                     b"p" => {
-                        let inls = inline_stack.pop().unwrap_or_default();
+                        let mut inls = inline_stack.pop().unwrap_or_default();
+                        trim_block_trailing_ws(&mut inls);
                         cur_block = None;
                         if !inls.is_empty() {
                             emit_block(
@@ -1643,16 +1764,28 @@ mod tests {
     // ---- Two additional transitions named in review, not covered above ----
 
     #[test]
-    fn prev_was_ref_keep_of_trailing_space_before_end_is_retained() {
+    fn prev_was_ref_keep_of_trailing_space_before_end_is_dropped_at_the_block_edge() {
         // prev_was_ref = true -> Text(" ") -> End: `<p>a &amp; </p>`.
-        // Pre-7d3163e this trailing space was dropped outright (the old
-        // guard discarded every whitespace-only fragment unconditionally).
-        // Under the reference-adjacency design, a Text(" ") immediately
-        // following a reference is, by the same rule that keeps a leading
-        // separator space, real content -- there is nothing in the state
-        // machine that distinguishes "adjacent to a reference, then more
-        // content follows" from "adjacent to a reference, then the block
-        // ends". Retaining it is the consistent choice; pin it.
+        //
+        // Renamed and re-asserted from
+        // `prev_was_ref_keep_of_trailing_space_before_end_is_retained`, which
+        // expected "a & ". That expectation rested on a premise this change
+        // retires. The old comment argued the space had to be kept because
+        // "there is nothing in the state machine that distinguishes 'adjacent
+        // to a reference, then more content follows' from 'adjacent to a
+        // reference, then the block ends'" -- true when it was written, and
+        // the reason retaining it was the *consistent* choice rather than the
+        // faithful one. `trim_block_trailing_ws` is exactly that
+        // distinguisher: it runs where the depth-1 frame is popped into a
+        // Block, which is the moment "the block ends" becomes knowable.
+        //
+        // With it, the reference-adjacency rule keeps its full force
+        // mid-block (the space in `<p>P &amp;\n  <em>Q</em></p>` still
+        // survives, pinned above) and gives way at the block edge, where HTML
+        // strips trailing whitespace regardless of how it was authored. Note
+        // this trims whitespace *around* the reference, never the reference's
+        // own character: `<p>&#32;</p>` still yields a paragraph holding a
+        // space, pinned by `whitespace_only_character_reference_survives`.
         let xml = "<p>a &amp; </p>";
         let blocks = parse_blocks(xml);
         let para = blocks
@@ -1664,8 +1797,8 @@ mod tests {
             .expect("a paragraph");
         assert_eq!(
             text_of(para),
-            "a & ",
-            "trailing reference-adjacent space is kept"
+            "a &",
+            "trailing whitespace goes at the block edge, reference-adjacent or not"
         );
     }
 
@@ -1705,21 +1838,15 @@ mod tests {
                 _ => None,
             })
             .expect("a paragraph");
-        // trim_end(), not a bare equality: the trailing "\n" between "X" and
-        // "</p>" arrives as part of the *non-whitespace* Text("X\n") event,
-        // which the plain `else` branch of the Text handler has always
-        // pushed verbatim -- a separate, pre-existing gap with no leading/
-        // trailing trim at all, present since before this fix series
-        // (verified against a20db75 and a31e854) and out of scope for the
-        // GeneralRef-flush-site fix this test pins. It is harmless in the
-        // rendered Markdown (the byte is absorbed as the paragraph's own
-        // line terminator, producing an extra blank line rather than
-        // corrupting the visible "&X" line -- confirmed against the CLI).
-        assert_eq!(
-            text_of(para).trim_end(),
-            "&X",
-            "no leading space at block start"
-        );
+        // A bare equality now. This assertion used to read
+        // `text_of(para).trim_end()`, working around the gap it documented:
+        // the trailing "\n" between "X" and "</p>" arrives as part of the
+        // *non-whitespace* Text("X\n") event, and the plain `else` branch of
+        // the Text handler pushed it verbatim, having no leading or trailing
+        // trim at all. That branch now collapses runs and the block-close
+        // trim strips the edge, so the workaround is retired along with the
+        // gap.
+        assert_eq!(text_of(para), "&X", "no leading space at block start");
         assert!(
             !text_of(para).starts_with(' '),
             "must not have a leading space, the regression under test"
@@ -1906,8 +2033,12 @@ mod tests {
                 _ => None,
             })
             .expect("a heading");
+        // Bare equality, same retired workaround as
+        // `pending_ws_suppressed_at_block_start_after_open_tag`: the heading's
+        // own trailing "\n" is stripped by `trim_block_trailing_ws` at the
+        // h1..h6 End arm.
         assert_eq!(
-            text_of(heading).trim_end(),
+            text_of(heading),
             "&T",
             "no leading space at block start of a heading"
         );
@@ -1923,6 +2054,230 @@ mod tests {
     // above -- by the time that whitespace flushes, `</strong>` has already
     // pushed `Inline::Strong` into the paragraph's top frame, so the frame is
     // non-empty and the space survives. Not duplicated here.
+
+    // ---- Intra-node whitespace: the non-empty Text branch ----
+    //
+    // The whitespace-only and reference-adjacent branches of the Event::Text
+    // handler have always normalized a kept run to exactly one space. The
+    // non-empty branch never did: any fragment with real content was pushed
+    // verbatim, so a hand-wrapped `<p>\n   text</p>` carried the source's
+    // line-wrapping and indentation into the IR as if it were document
+    // content. These pin the same HTML white-space: normal model across all
+    // three branches.
+
+    #[test]
+    fn a_whitespace_run_inside_a_text_fragment_collapses_to_one_space() {
+        // The shape the EPUB fixture actually reproduces: a hand-wrapped
+        // source line whose continuation is indented. The newline and the
+        // indentation are markup layout, not document text.
+        let blocks = parse_blocks("<body><p>Intro and a\n     footnote.</p></body>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "Intro and a footnote.");
+    }
+
+    #[test]
+    fn indentation_at_the_start_of_a_block_is_stripped() {
+        // The other hand-wrapped shape: indentation as the very first content
+        // of the `<p>`, rather than a mid-paragraph continuation. Collapsing
+        // the run alone would leave a single leading space here, which the
+        // writer would then have to protect with `&#32;`. HTML strips
+        // whitespace at the start of a block box outright.
+        let blocks = parse_blocks("<p>\n  text</p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "text");
+    }
+
+    #[test]
+    fn a_collapsed_run_at_the_start_of_a_nested_inline_is_not_stripped() {
+        // The block/inline distinction, now reached through the non-empty
+        // branch rather than the GeneralRef flush site: `<em>` opens a frame
+        // at depth 2, so its leading whitespace is authored content and
+        // survives collapsing to one space. Only the depth-1 block frame is
+        // stripped. Same rule as
+        // `pending_ws_flush_at_nested_inline_start_keeps_leading_space_per_frame`,
+        // which reaches it via a reference instead.
+        let blocks = parse_blocks("<p>A<em>\n  B</em></p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Text(\"A\") + Emph(\" B\")");
+        match &para[1] {
+            Inline::Emph(x) => assert_eq!(
+                text_of(x),
+                " B",
+                "leading whitespace inside an inline frame is content, not layout"
+            ),
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_whitespace_at_the_end_of_a_block_is_stripped() {
+        // The mirror of the leading rule. This one cannot be decided in the
+        // Text branch -- "is this the last content of the block?" is only
+        // answerable once the block closes -- so it is applied where the
+        // depth-1 frame is popped into a Block.
+        let blocks = parse_blocks("<p>text\n</p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "text");
+    }
+
+    #[test]
+    fn trailing_whitespace_is_stripped_through_a_closing_inline_wrapper() {
+        // HTML strips at the end of the block *box*, which is not necessarily
+        // the end of the block's own text: `<p>a <em>x </em></p>` renders
+        // "a x". The trim therefore recurses through a trailing
+        // Emph/Strong/Link rather than looking only at the last leaf.
+        let blocks = parse_blocks("<p>a <em>x\n  </em></p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(para.len(), 2, "expected Text(\"a \") + Emph(\"x\")");
+        match &para[1] {
+            Inline::Emph(x) => assert_eq!(text_of(x), "x", "trimmed inside the trailing wrapper"),
+            other => panic!("expected Emph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_whitespace_inside_a_closing_code_span_survives() {
+        // The recursion stops at Code (and Math): a code span's content is
+        // its own run, not the block's trailing layout, and the writer
+        // renders it between backticks where the space is visible output.
+        // Trimming here would delete document text, which is the failure the
+        // whole whitespace rule exists to avoid.
+        let blocks = parse_blocks("<p>a <code>x </code></p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        match para.last().expect("a trailing inline") {
+            Inline::Code(t) => assert_eq!(t, "x ", "a code span's own trailing space is content"),
+            other => panic!("expected Code, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_trailing_leaf_emptied_by_the_trim_is_removed_not_left_behind() {
+        // `&#32;` after `</em>` pushes its own Text(" ") leaf, which the trim
+        // empties outright. An `Inline::Text("")` left in the list is a wart
+        // the trim would be creating itself, so it pops and carries on into
+        // the inline before it.
+        let blocks = parse_blocks("<p>a<em>b</em>&#32;</p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(
+            para.len(),
+            2,
+            "expected Text(\"a\") + Emph(\"b\"), got {para:?}"
+        );
+    }
+
+    #[test]
+    fn a_no_break_space_is_not_collapsed() {
+        // `collapse_ws` matches is_ascii_whitespace, not is_whitespace: Rust's
+        // Unicode White_Space property includes U+00A0, which HTML pointedly
+        // does not collapse and an author writes `&#160;` to get. Collapsing
+        // it would delete authored content while claiming to strip layout.
+        let blocks = parse_blocks("<p>a\u{a0}\u{a0}b</p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "a\u{a0}\u{a0}b");
+    }
+
+    #[test]
+    fn tab_cr_and_form_feed_collapse_like_a_space() {
+        // The rest of HTML's whitespace set, which is the ASCII set: space,
+        // tab, LF, CR and FF. One run of mixed members is still one space.
+        let blocks = parse_blocks("<p>a \t\r\n\u{c}b</p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        assert_eq!(text_of(para), "a b");
+    }
+
+    #[test]
+    fn whitespace_inside_a_pre_block_is_untouched() {
+        // `<pre>` never reaches the Event::Text arm at all: the verbatim
+        // interception at the top of the event loop takes it first, so the
+        // collapse rule is structurally unable to reach code listings. Pinned
+        // rather than argued, since "that branch cannot be reached" is the
+        // kind of claim that quietly stops being true.
+        let blocks = parse_blocks("<pre><code>fn main() {\n    let x = 1;\n}</code></pre>");
+        let code = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::CodeBlock { text, .. } => Some(text),
+                _ => None,
+            })
+            .expect("a code block");
+        assert_eq!(code, "fn main() {\n    let x = 1;\n}");
+    }
+
+    #[test]
+    fn whitespace_inside_an_inline_code_span_does_collapse() {
+        // The counterpart, and a behavior change beyond the defect that
+        // prompted this rule: a bare `<code>` outside `<pre>` accumulates
+        // through the same push_text! path, so its runs now collapse. That is
+        // faithful -- HTML collapses inside `<code>`; only `<pre>` preserves
+        // -- but it is a change, so it gets a test of its own rather than
+        // arriving silently.
+        let blocks = parse_blocks("<p>a <code>x    y</code></p>");
+        let para = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Para(inls) => Some(inls),
+                _ => None,
+            })
+            .expect("a paragraph");
+        match para.last().expect("a trailing inline") {
+            Inline::Code(t) => assert_eq!(t, "x y"),
+            other => panic!("expected Code, got {other:?}"),
+        }
+    }
 
     // ---- Block-frame stack: nested lists ----
 
