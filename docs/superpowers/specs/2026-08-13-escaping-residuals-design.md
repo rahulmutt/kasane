@@ -242,16 +242,31 @@ which is the divergence `slug.rs` already documents as surviving on purpose
 (`## Notes[^1]` anchors `notes` here and `notes1` on GitHub). Closing it means
 approach (iii).
 
-### 4.2 `Inline::Math` changes delimiter in one-line contexts
+### 4.2 `Inline::Math` changes delimiter only across a boundary
 
 `math_span` degrades to a code span when its content holds a newline, because
-inline math can land in a GFM table cell where any newline ends the row. After
-the fold there is no newline left in a one-line context, so that degradation
-stops firing there and the equation renders as `$…$`.
+inline math can land in a GFM table cell where any newline ends the row. The
+fold interacts with that, but far more narrowly than it first appears, and the
+distinction is worth stating precisely because it is easy to get backwards.
 
-The rendered *text* is unchanged, so §5 of the escaping spec holds. The reason
-for the carve-out has simply evaporated in that context. Math inside a
-`Block::Para` still degrades exactly as it does today.
+The fold collapses newline *runs* and normalizes `\r` to `\n`. It never turns a
+newline into a space — that is `one_line`, which runs over the whole rendered
+string, long after `math_span` has already chosen its delimiter. So a newline
+sitting alone inside one `Inline::Math` leaf **survives the fold**, and
+`math_span` degrades for it exactly as it does today, in a heading as much as
+in a paragraph.
+
+What changes is only the cross-boundary case. In
+`[Text("A\r"), Math("\nB")]` the math leaf's leading newline is the second
+half of a run that began in the previous inline, so the fold drops it as the
+duplicate it is; the content becomes `B`, carries no newline, and renders
+`$B$` where it previously degraded to a code span. The rendered *text* is
+unchanged either way, so §5 of the escaping spec holds.
+
+An earlier revision of this section claimed the degradation stops firing in
+one-line contexts generally. It does not, and the difference is exactly the
+one the fold is built on: runs collapse across boundaries, individual newlines
+are left for `one_line`.
 
 ## 5. Testing
 
