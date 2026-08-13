@@ -293,6 +293,29 @@ pub(crate) fn label(s: &str) -> String {
     one_line(&text(s, Ctx::Flow, Pos::Mid))
 }
 
+/// Restore whitespace at a rendered cell's trailing edge (§3.3).
+///
+/// GFM trims a cell's content before parsing it, so a trailing space or tab
+/// is dropped outright — document text lost, the same defect the leading edge
+/// had. The leading edge is covered by `Pos::LineStart`, because
+/// `render_table` renders every cell at a line start; this edge is not a
+/// positional question and cannot be.
+///
+/// Only the last character needs the reference: everything before it is no
+/// longer at the trimmed edge. Symmetric with the leading rule, which likewise
+/// only converts the first character of the run.
+pub(crate) fn cell_edges(rendered: &str) -> String {
+    let mut out = rendered.to_string();
+    if out.ends_with(' ') {
+        out.truncate(out.len() - 1);
+        out.push_str("&#32;");
+    } else if out.ends_with('\t') {
+        out.truncate(out.len() - 1);
+        out.push_str("&#9;");
+    }
+    out
+}
+
 /// Wrap code content in a backtick run the content cannot contain (§3.4).
 ///
 /// No escape exists inside a code span *for the code grammar*, so the
@@ -924,6 +947,20 @@ mod tests {
                 "input {input:?}: the whitespace must render back: {md:?}"
             );
         }
+    }
+
+    /// GFM trims both ends of a cell. `Pos::LineStart` covers the leading
+    /// edge (§3.2); the trailing edge is not a positional question, so it is
+    /// fixed on the rendered cell. Only the last character needs the
+    /// reference — everything before it is no longer at the trimmed edge (§3.3).
+    #[test]
+    fn cell_edges_restores_trailing_whitespace() {
+        assert_eq!(cell_edges("x "), "x&#32;");
+        assert_eq!(cell_edges("x\t"), "x&#9;");
+        assert_eq!(cell_edges("x  "), "x &#32;");
+        // Nothing to restore.
+        assert_eq!(cell_edges("x"), "x");
+        assert_eq!(cell_edges(""), "");
     }
 
     #[test]

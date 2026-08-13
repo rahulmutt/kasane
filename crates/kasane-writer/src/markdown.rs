@@ -141,7 +141,7 @@ fn render_table(t: &Table, out: &mut String) {
     let cells = |row: &Vec<Vec<Inline>>| {
         let joined: Vec<String> = row
             .iter()
-            .map(|c| inlines_to_md(c, Ctx::Cell, Pos::LineStart))
+            .map(|c| escape::cell_edges(&inlines_to_md(c, Ctx::Cell, Pos::LineStart)))
             .collect();
         format!("| {} |", joined.join(" | "))
     };
@@ -732,6 +732,35 @@ mod tests {
         assert!(!md.contains("--> b"), "the note closed the comment: {md}");
         assert!(md.starts_with("<!-- "), "got: {md}");
         assert!(md.trim_end().ends_with("-->"), "got: {md}");
+    }
+
+    /// Both edges, through the real table renderer and a real parser.
+    #[test]
+    fn a_table_cell_keeps_the_whitespace_at_both_its_edges() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let cell = |s: &str| vec![Inline::Text(s.to_string())];
+        let blocks = vec![Block::Table(Table {
+            header: vec![cell("h")],
+            rows: vec![vec![cell("  x  ")]],
+            has_merged: false,
+        })];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_TABLES);
+        let mut in_cell = false;
+        let mut body = String::new();
+        let mut seen_header = false;
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::TableCell) => in_cell = true,
+                Event::End(pulldown_cmark::TagEnd::TableHead) => seen_header = true,
+                Event::Text(t) if in_cell && seen_header => body.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(body, "  x  ", "both edges must survive:\n{md}");
     }
 
     #[test]
