@@ -36,10 +36,20 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     // folds after. That only reaches the same heading line because
     // `escape::one_line` collapses newline runs -- see its doc comment, and
     // `slug::fold_newlines`, which has to predict whichever line this emits.
+    //
+    // `Pos::Mid`, not `Pos::LineStart`: the text lands after the `# ` this
+    // function already pushed, never at column 0, matching the body-heading
+    // path (`Block::Heading` in `markdown.rs`, which uses `Pos::Mid` for the
+    // same reason). Before the whitespace-at-line-start rule, claiming
+    // `LineStart` here was a harmless over-escape (a needless `\#`); after it,
+    // a leading space in the title became `&#32;`, which disarms the
+    // ATX-content strip `kasane-core::slug`'s `anchor_fold` assumes happens --
+    // see `the_title_heading_renders_to_exactly_the_trimmed_title` in this
+    // module's tests for the parser-verified consequence.
     out.push_str(&escape::text(
         &escape::one_line(&file.frontmatter.title),
         escape::Ctx::Flow,
-        true,
+        escape::Pos::Mid,
     ));
     out.push('\n');
     out.push('\n');
@@ -266,6 +276,73 @@ mod tests {
             blocks: vec![],
         };
         let md = file_to_markdown(&file, &AssetBag::default());
-        assert!(md.starts_with("# \\# Notes spilled\n"), "got: {md}");
+        // `Pos::Mid`, not `Pos::LineStart` (Finding 1, 2026-08-13 fix wave):
+        // the title lands after the `# ` this function already emitted, so a
+        // leading `#` in the title is not at column 0 and needs no backslash.
+        // Verified against the parser: `# ## x`, `# - item`, `# > quote`,
+        // `# | a |`, `# = x`, `# + x` and `# 1. one` all read their content as
+        // literal heading text with no construct opened.
+        assert!(md.starts_with("# # Notes spilled\n"), "got: {md}");
+    }
+
+    /// Finding 1 (2026-08-13 fix wave): `file_to_markdown` used to render the
+    /// title heading at `Pos::LineStart`, a lie — the text lands after `# `,
+    /// never at column 0. Before the whitespace-at-line-start rule the lie was
+    /// harmless (a needless `\#`); after it, a leading space in the title
+    /// became `&#32;`, which disarms the ATX-content strip a real parser would
+    /// otherwise apply. `anchor_fold` (in `kasane-core::slug`) assumes that
+    /// strip happens — its own doc comment says "a Markdown parser strips a
+    /// heading's surrounding whitespace before GitHub ever computes an id" —
+    /// so when it doesn't, the anchor kasane embeds (computed from
+    /// `title.trim()`) diverges from the id a real renderer assigns (computed
+    /// from the untrimmed rendered text).
+    ///
+    /// This is the test `properties.rs`'s P2/P9 structurally cannot be: both
+    /// sides of those comparisons go through `anchor_fold`/`anchors_for_headings`,
+    /// which trims on the way in, so a leading- or trailing-whitespace
+    /// divergence can never make them disagree (see Finding 2). This test
+    /// instead compares the *untrimmed* text a real parser recovers from the
+    /// rendered title heading directly against `title.trim()` — exactly the
+    /// renderer behaviour `anchor_fold` assumes — with no trim of its own on
+    /// either side to hide a mismatch.
+    #[test]
+    fn the_title_heading_renders_to_exactly_the_trimmed_title() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        for title in ["  Intro", "\tIntro", "Intro  "] {
+            let file = FileNode {
+                path: "index.md".into(),
+                frontmatter: Frontmatter {
+                    title: title.into(),
+                    breadcrumb: vec!["Book".into()],
+                    parent: None,
+                    prev: None,
+                    next: None,
+                    children: vec![],
+                    source_pages: None,
+                },
+                blocks: vec![],
+            };
+            let md = file_to_markdown(&file, &AssetBag::default());
+
+            let mut heading = String::new();
+            let mut depth = 0;
+            for ev in Parser::new_ext(&md, Options::empty()) {
+                match ev {
+                    Event::Start(Tag::Heading { .. }) => depth += 1,
+                    Event::End(TagEnd::Heading(_)) => depth -= 1,
+                    Event::Text(t) if depth > 0 => heading.push_str(&t),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                heading,
+                title.trim(),
+                "title {title:?}: a real parser must recover exactly the \
+                 trimmed title, or the anchor kasane embeds (computed from \
+                 title.trim()) diverges from the id a renderer assigns from \
+                 this line: {md:?}"
+            );
+        }
     }
 }

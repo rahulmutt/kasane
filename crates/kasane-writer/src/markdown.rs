@@ -1,4 +1,4 @@
-use crate::escape::{self, Ctx};
+use crate::escape::{self, Ctx, Pos};
 use kasane_ir::{AssetBag, Block, Inline, RefTarget, Table};
 
 pub fn blocks_to_markdown(blocks: &[Block], assets: &AssetBag) -> String {
@@ -30,11 +30,16 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 out.push('#');
             }
             out.push(' ');
-            out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow, false)));
+            let inlines = escape::fold_inline_newlines(inlines);
+            out.push_str(&escape::one_line(&inlines_to_md(
+                &inlines,
+                Ctx::Flow,
+                Pos::Mid,
+            )));
             out.push('\n');
         }
         Block::Para(inls) => {
-            out.push_str(&inlines_to_md(inls, Ctx::Flow, true));
+            out.push_str(&inlines_to_md(inls, Ctx::Flow, Pos::LineStart));
             out.push('\n');
         }
         Block::List { ordered, items } => {
@@ -71,7 +76,8 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .find(|a| a.key == image.key)
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
-            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow, false));
+            let caption = escape::fold_inline_newlines(caption);
+            let alt = escape::one_line(&inlines_to_md(&caption, Ctx::Flow, Pos::Mid));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
                 alt,
@@ -82,11 +88,11 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 // adapter sets `None` today: `blocks_to_markdown` is public
                 // API over a public IR, and "escape.rs is the only path from
                 // document text to an output buffer" is stated without
-                // qualification. `Ctx::Flow` with `at_line_start: false`,
-                // because the `*` before it is already on the line.
+                // qualification. `Ctx::Flow` with `Pos::Mid`, because the `*`
+                // before it is already on the line.
                 out.push_str(&format!(
                     "*Figure {}: {}*\n",
-                    escape::text(n, Ctx::Flow, false),
+                    escape::text(n, Ctx::Flow, Pos::Mid),
                     alt
                 ));
             }
@@ -137,7 +143,7 @@ fn render_table(t: &Table, out: &mut String) {
     let cells = |row: &Vec<Vec<Inline>>| {
         let joined: Vec<String> = row
             .iter()
-            .map(|c| inlines_to_md(c, Ctx::Cell, true))
+            .map(|c| escape::cell_edges(&inlines_to_md(c, Ctx::Cell, Pos::LineStart)))
             .collect();
         format!("| {} |", joined.join(" | "))
     };
@@ -164,7 +170,7 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
     let mut s = String::new();
     for i in inls {
         match i {
-            Inline::Text(t) => s.push_str(&escape::text(t, Ctx::Html, false)),
+            Inline::Text(t) => s.push_str(&escape::text(t, Ctx::Html, Pos::Mid)),
             Inline::Emph(x) => s.push_str(&format!("<em>{}</em>", inlines_to_html(x, depth + 1))),
             Inline::Strong(x) => s.push_str(&format!(
                 "<strong>{}</strong>",
@@ -172,15 +178,15 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
             )),
             Inline::Code(t) => s.push_str(&format!(
                 "<code>{}</code>",
-                escape::text(t, Ctx::Html, false)
+                escape::text(t, Ctx::Html, Pos::Mid)
             )),
-            Inline::Math(t) => s.push_str(&format!("${}$", escape::text(t, Ctx::Html, false))),
+            Inline::Math(t) => s.push_str(&format!("${}$", escape::text(t, Ctx::Html, Pos::Mid))),
             Inline::Link {
                 target: RefTarget::External(u),
                 inlines,
             } => s.push_str(&format!(
                 "<a href=\"{}\">{}</a>",
-                escape::text(&escape::dest_url(u), Ctx::Html, false),
+                escape::text(&escape::dest_url(u), Ctx::Html, Pos::Mid),
                 inlines_to_html(inlines, depth + 1)
             )),
             Inline::Link { inlines, .. } => s.push_str(&inlines_to_html(inlines, depth + 1)),
@@ -190,37 +196,39 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
     s
 }
 
-pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, at_line_start: bool) -> String {
-    inlines_to_md_at(inls, 0, ctx, at_line_start)
+pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
+    inlines_to_md_at(inls, 0, ctx, pos)
 }
 
-/// `at_line_start` is threaded, not inferred: `true` iff the next character
-/// emitted lands at the start of a line (design spec §2). It starts as
-/// whatever the caller passed and is then recomputed after every arm from
-/// whether the accumulated output ends with `\n` -- that single rule covers
-/// both a run that opens on a fresh line and one that re-arms after an
-/// interior newline (`[Text("a\n"), Text("- b")]`), with no per-arm special
-/// case, because none of the writer's own markup (`*`, `**`, backticks,
-/// `[`, `$`, `[^1]`) ever ends in a newline.
-fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool) -> String {
+/// `pos` is threaded, not inferred: it names where the next character emitted
+/// lands (design spec §2). It starts as whatever the caller passed and is
+/// then recomputed after every arm, by four rules: an arm that appended
+/// nothing leaves `pos` alone; output ending in `\n` re-arms `Pos::LineStart`
+/// (covering both a run that opens on a fresh line and one that re-arms after
+/// an interior newline, e.g. `[Text("a\n"), Text("- b")]`, since none of the
+/// writer's own markup -- `*`, `**`, backticks, `[`, `$`, `[^1]` -- ever ends
+/// in a newline); a `FootnoteRef` that fired at `Pos::LineStart` yields
+/// `Pos::AfterFootnoteRef`, so `escape::text` can tell a following `:` apart
+/// from an ordinary one (residuals spec §2); anything else yields `Pos::Mid`.
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
     }
     let mut s = String::new();
-    let mut line_start = at_line_start;
+    let mut pos = pos;
     for i in inls {
+        let before = pos;
+        let len_before = s.len();
         match i {
             // The only call to `escape::text` in the crate. Every other arm
             // below emits markup the writer chose, which must not be escaped.
-            Inline::Text(t) => s.push_str(&escape::text(t, ctx, line_start)),
-            Inline::Emph(x) => s.push_str(&emphasize(
-                &inlines_to_md_at(x, depth + 1, ctx, line_start),
-                "*",
-            )),
-            Inline::Strong(x) => s.push_str(&emphasize(
-                &inlines_to_md_at(x, depth + 1, ctx, line_start),
-                "**",
-            )),
+            Inline::Text(t) => s.push_str(&escape::text(t, ctx, pos)),
+            Inline::Emph(x) => {
+                s.push_str(&emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "*"))
+            }
+            Inline::Strong(x) => {
+                s.push_str(&emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "**"))
+            }
             Inline::Code(t) => s.push_str(&escape::code_span(t, ctx)),
             Inline::Math(t) => s.push_str(&escape::math_span(t, ctx)),
             Inline::Link {
@@ -228,16 +236,33 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx, line_start)),
+                escape::one_line(&inlines_to_md_at(
+                    &escape::fold_inline_newlines(inlines),
+                    depth + 1,
+                    ctx,
+                    pos
+                )),
                 escape::dest_url(u)
             )),
             // unresolved -> text
             Inline::Link { inlines, .. } => {
-                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, line_start))
+                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos))
             }
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
-        line_start = s.ends_with('\n');
+        // Four rules (§2). An arm that appended nothing leaves the position
+        // alone, so an empty text run between a reference and its colon does
+        // not reset it. `Inline::FootnoteRef` always appends, so rule 3 is
+        // never blocked by the length check.
+        if s.len() != len_before {
+            pos = if s.ends_with('\n') {
+                Pos::LineStart
+            } else if matches!(i, Inline::FootnoteRef(_)) && before == Pos::LineStart {
+                Pos::AfterFootnoteRef
+            } else {
+                Pos::Mid
+            };
+        }
     }
     s
 }
@@ -245,7 +270,7 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
 /// Wrap already-rendered inner content in an emphasis delimiter, with any
 /// whitespace at its edges moved *outside* the delimiters.
 ///
-/// Two problems, one fix. `at_line_start` guards `Inline::Text` but not the
+/// Two problems, one fix. `pos` guards `Inline::Text` but not the
 /// markup the writer itself emits at column 0, so `Block::Para([Emph([Text("
 /// x")])])` rendered `* x*` — which a GFM parser reads as a bullet list, not a
 /// paragraph, losing the paragraph outright. Reachable from `<p><em>
@@ -582,21 +607,49 @@ mod tests {
         }
     }
 
+    /// The anchor kasane embeds must equal the id GitHub computes from the
+    /// rendered heading line. Before the fold this shape rendered `A  B`
+    /// (two spaces — one from each run's independent fold) against an
+    /// embedded `a-b`.
+    #[test]
+    fn a_newline_run_split_by_a_code_span_yields_one_separator() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: vec![Inline::Text("A\r".into()), Inline::Code("\nB".into())],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let mut heading = String::new();
+        let mut depth = 0;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::Heading { .. }) => depth += 1,
+                Event::End(pulldown_cmark::TagEnd::Heading(_)) => depth -= 1,
+                Event::Text(t) | Event::Code(t) if depth > 0 => heading.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(heading, "A B", "one separator, not two:\n{md}");
+    }
+
     /// Emphasis whose content begins or ends with whitespace moves that
     /// whitespace outside the delimiters.
     ///
-    /// At column 0 the old output was `* x*`, which GFM reads as a bullet
-    /// list rather than a paragraph; the second half of the same bug is that
-    /// CommonMark's flanking rules mean `* x*` is not emphasis anywhere, so
-    /// the markup was silently lost mid-line too.
+    /// The column-0 case this test used to pin here -- `* x*` read by GFM as
+    /// a bullet list, dropping both the paragraph and the emphasis -- is
+    /// superseded by Task 3's line-start rule: `escape::text` now replaces
+    /// the leading space with a character reference before `emphasize` ever
+    /// runs, so there is no leading whitespace left for `trim` to move
+    /// outside the delimiters. See
+    /// `emphasis_at_column_zero_keeps_its_leading_space_inside` for that case
+    /// pinned end-to-end. What is left here is `emphasize`'s own behaviour
+    /// away from a line start, where CommonMark's flanking rules are still
+    /// the only thing standing between edge whitespace and dropped emphasis.
     #[test]
     fn emphasis_moves_edge_whitespace_outside_its_delimiters() {
-        let blocks = vec![Block::Para(vec![Inline::Emph(vec![Inline::Text(
-            " x".into(),
-        )])])];
-        let md = blocks_to_markdown(&blocks, &AssetBag::default());
-        assert!(md.starts_with(" *x*"), "a bullet list at column 0: {md}");
-
         // Mid-line, the emphasis must survive rather than be dropped by the
         // flanking rules.
         let blocks = vec![Block::Para(vec![
@@ -607,11 +660,17 @@ mod tests {
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("a **x** b"), "got: {md}");
 
-        // Nothing to emphasize: no delimiters at all, so `**` cannot sit at
-        // column 0 as markup for its own sake.
-        let blocks = vec![Block::Para(vec![Inline::Strong(vec![Inline::Text(
-            "  ".into(),
-        )])])];
+        // Nothing to emphasize, mid-line: no delimiters at all, so `**`
+        // cannot sit in the output as markup for its own sake. Kept off a
+        // line start deliberately -- at column 0 the line-start rule always
+        // converts the leading character, so whitespace-only content no
+        // longer trims to empty there; see
+        // `strong_of_pure_whitespace_at_column_zero_survives_as_a_real_paragraph`
+        // for that case pinned instead.
+        let blocks = vec![Block::Para(vec![
+            Inline::Text("a ".into()),
+            Inline::Strong(vec![Inline::Text("  ".into())]),
+        ])];
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(!md.contains('*'), "got: {md}");
     }
@@ -708,6 +767,72 @@ mod tests {
         assert!(!md.contains("--> b"), "the note closed the comment: {md}");
         assert!(md.starts_with("<!-- "), "got: {md}");
         assert!(md.trim_end().ends_with("-->"), "got: {md}");
+    }
+
+    /// Both edges, through the real table renderer and a real parser.
+    #[test]
+    fn a_table_cell_keeps_the_whitespace_at_both_its_edges() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let cell = |s: &str| vec![Inline::Text(s.to_string())];
+        let blocks = vec![Block::Table(Table {
+            header: vec![cell("h")],
+            rows: vec![vec![cell("  x  ")]],
+            has_merged: false,
+        })];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_TABLES);
+        let mut in_cell = false;
+        let mut body = String::new();
+        let mut seen_header = false;
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::TableCell) => in_cell = true,
+                Event::End(pulldown_cmark::TagEnd::TableHead) => seen_header = true,
+                Event::Text(t) if in_cell && seen_header => body.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(body, "  x  ", "both edges must survive:\n{md}");
+    }
+
+    /// A cell with no non-whitespace content at all: the leading rule
+    /// (`Pos::LineStart`) converts the first character and `cell_edges`
+    /// converts the last, so a two-space cell round-trips as two references
+    /// with nothing literal between them (`escape::cell_edges_restores_trailing_whitespace`
+    /// pins the string; this pins it through the real table renderer and a
+    /// real parser).
+    #[test]
+    fn an_all_whitespace_table_cell_round_trips() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let cell = |s: &str| vec![Inline::Text(s.to_string())];
+        let blocks = vec![Block::Table(Table {
+            header: vec![cell("h")],
+            rows: vec![vec![cell("  ")]],
+            has_merged: false,
+        })];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_TABLES);
+        let mut in_cell = false;
+        let mut body = String::new();
+        let mut seen_header = false;
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::TableCell) => in_cell = true,
+                Event::End(pulldown_cmark::TagEnd::TableHead) => seen_header = true,
+                Event::Text(t) if in_cell && seen_header => body.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            body, "  ",
+            "an all-whitespace cell must not collapse:\n{md}"
+        );
     }
 
     #[test]
@@ -819,6 +944,71 @@ mod tests {
         assert_eq!(lines[1], "   b", "got: {md}");
     }
 
+    /// The end-to-end shape §1's table calls A. A matching definition has to
+    /// be present or *no* footnote reference parses at all — without one,
+    /// `[^1]` decomposes into bare text and the test measures the fixture
+    /// rather than the fix.
+    #[test]
+    fn a_footnote_reference_at_column_zero_does_not_open_a_definition() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let blocks = vec![
+            Block::Para(vec![
+                Inline::FootnoteRef(NoteId(1)),
+                Inline::Text(": note".into()),
+            ]),
+            Block::Footnote {
+                id: NoteId(1),
+                blocks: vec![Block::Para(vec![Inline::Text("the definition".into())])],
+            },
+        ];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("[^1]\\: note"), "got:\n{md}");
+
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_FOOTNOTES);
+        let (mut refs, mut defs) = (0, 0);
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::FootnoteReference(_) => refs += 1,
+                Event::Start(pulldown_cmark::Tag::FootnoteDefinition(_)) => defs += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(refs, 1, "the reference must survive the escape:\n{md}");
+        assert_eq!(
+            defs, 1,
+            "only the real Block::Footnote is a definition:\n{md}"
+        );
+    }
+
+    /// An empty run between the reference and the colon must not reset the
+    /// position — the IR permits it and the colon is still a delimiter (§2,
+    /// rule 1).
+    #[test]
+    fn an_empty_run_does_not_reset_the_footnote_position() {
+        let blocks = vec![Block::Para(vec![
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Text(String::new()),
+            Inline::Text(": note".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("[^1]\\: note"), "got:\n{md}");
+    }
+
+    /// A wrapped reference renders `*[^1]*: x`, which begins with `*` and was
+    /// never a definition, so the `Emph` arm must yield `Pos::Mid` (§2, rule 3).
+    #[test]
+    fn a_wrapped_footnote_reference_leaves_the_colon_alone() {
+        let blocks = vec![Block::Para(vec![
+            Inline::Emph(vec![Inline::FootnoteRef(NoteId(1))]),
+            Inline::Text(": x".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("*[^1]*: x"), "got:\n{md}");
+        assert!(!md.contains("\\:"), "no escape is needed here:\n{md}");
+    }
+
     #[test]
     fn a_heading_leading_a_list_item_still_renders_on_the_marker_line() {
         // properties.rs's heading_anchors (parser-based, via parse_events)
@@ -833,5 +1023,91 @@ mod tests {
         }];
         let md = blocks_to_markdown(&blocks, &AssetBag::default());
         assert!(md.contains("- ## Notes"), "got: {md}");
+    }
+
+    /// §3.5. At column 0 this rendered `* x*`, which GFM reads as a bullet
+    /// list — the paragraph was lost, and the emphasis was silently dropped
+    /// too, because a `*` with adjacent whitespace is never a delimiter.
+    /// `emphasize` moves edge whitespace outside the delimiters, but at a line
+    /// start the reference has already replaced it, so `*&` is left-flanking
+    /// and the space stays *inside* the emphasis where the IR put it.
+    #[test]
+    fn emphasis_at_column_zero_keeps_its_leading_space_inside() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let blocks = vec![Block::Para(vec![Inline::Emph(vec![Inline::Text(
+            " x".into(),
+        )])])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.starts_with("*&#32;x*"), "got:\n{md}");
+
+        let mut in_em = false;
+        let mut emphasized = String::new();
+        let mut is_list = false;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::Emphasis) => in_em = true,
+                Event::End(pulldown_cmark::TagEnd::Emphasis) => in_em = false,
+                Event::Start(pulldown_cmark::Tag::List(_)) => is_list = true,
+                Event::Text(t) if in_em => emphasized.push_str(&t),
+                _ => {}
+            }
+        }
+        assert!(!is_list, "a paragraph became a bullet list:\n{md}");
+        assert_eq!(
+            emphasized, " x",
+            "the emphasis must apply and keep its space:\n{md}"
+        );
+    }
+
+    /// §3.5, whitespace-only content. Before Task 3, `escape::text("  ",
+    /// Flow, LineStart)` and `emphasize` both left the two spaces untouched,
+    /// and a line of two bare spaces is a *blank* line to GFM — the whole
+    /// paragraph, `Strong` and all, vanished from the rendered document
+    /// instead of rendering as anything. That is a harder form of the same
+    /// §5 violation `emphasis_at_column_zero_keeps_its_leading_space_inside`
+    /// pins: content silently dropped, not merely misrendered.
+    ///
+    /// The line-start rule now converts the leading space to a reference
+    /// before `emphasize` ever sees it, so the line is no longer blank: a
+    /// real paragraph survives, with a `<strong>` materializing around one
+    /// preserved space where before there was nothing at all. That is the
+    /// correct direction under §5 -- preserved content that renders as
+    /// (still-invisible) whitespace beats a block that disappears outright.
+    #[test]
+    fn strong_of_pure_whitespace_at_column_zero_survives_as_a_real_paragraph() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        let blocks = vec![Block::Para(vec![Inline::Strong(vec![Inline::Text(
+            "  ".into(),
+        )])])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.starts_with("**&#32;** "), "got:\n{md}");
+
+        let mut saw_paragraph = false;
+        let mut saw_strong = false;
+        let mut in_strong = false;
+        let mut strong_text = String::new();
+        let mut is_list = false;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(Tag::Paragraph) => saw_paragraph = true,
+                Event::Start(Tag::Strong) => {
+                    saw_strong = true;
+                    in_strong = true;
+                }
+                Event::End(TagEnd::Strong) => in_strong = false,
+                Event::Start(Tag::List(_)) => is_list = true,
+                Event::Text(t) if in_strong => strong_text.push_str(&t),
+                _ => {}
+            }
+        }
+        assert!(saw_paragraph, "the paragraph must not vanish:\n{md}");
+        assert!(saw_strong, "the strong element must not vanish:\n{md}");
+        assert!(!is_list, "a paragraph became a bullet list:\n{md}");
+        assert_eq!(
+            strong_text, " ",
+            "the preserved whitespace must round-trip:\n{md}"
+        );
     }
 }

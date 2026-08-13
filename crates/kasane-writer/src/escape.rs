@@ -6,6 +6,8 @@
 //! a code span, is inert inside an HTML block, and means something else again
 //! inside a YAML double-quoted scalar.
 
+use kasane_ir::Inline;
+
 /// Where a text run lands. The rules differ per context, so the renderers
 /// must state which one they are in — `inlines_to_md` takes this as a
 /// required argument for exactly that reason (§2).
@@ -28,20 +30,84 @@ const ALWAYS: &[char] = &['\\', '`', '*', '_', '[', ']', '<', '~', '$'];
 /// thematic breaks as well as bullets.
 const LINE_START: &[char] = &['#', '-', '+', '>', '=', '|'];
 
-pub(crate) fn text(s: &str, ctx: Ctx, at_line_start: bool) -> String {
+/// The numeric character reference for a space or a tab; `None` for anything
+/// else.
+///
+/// One function to carry the property both call sites below depend on: these
+/// two characters, and no others, are what GFM's block scanner (leading
+/// whitespace at a line start, §3) and its cell trimmer (a cell's own edges,
+/// §3.3) act on. Stated once here rather than duplicated in each site's own
+/// match, so a future third whitespace character GFM treats specially has one
+/// place to be added instead of two call sites a reviewer has to notice are
+/// supposed to agree.
+fn ws_reference(c: char) -> Option<&'static str> {
+    match c {
+        ' ' => Some("&#32;"),
+        '\t' => Some("&#9;"),
+        _ => None,
+    }
+}
+
+/// Where the next character emitted lands. The rules that depend on position
+/// need three states, not two: `escape::text` has to distinguish "at column 0"
+/// from "directly after a footnote reference that opened the line", because
+/// only the latter makes a following `:` a footnote *definition* delimiter
+/// (residuals spec §2).
+///
+/// `markdown.rs` computes this and passes it in; it never decides what to
+/// escape. That division is escaping spec §2 — `escape.rs` owns every rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pos {
+    /// The next character lands at the start of a line.
+    LineStart,
+    /// The next character lands directly after a `[^n]` that itself opened
+    /// the line.
+    AfterFootnoteRef,
+    /// Anywhere else.
+    Mid,
+}
+
+pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
     if ctx == Ctx::Html {
         return html_text(s);
     }
     let chars: Vec<char> = normalize_newlines(s).chars().collect();
     let mut out = String::with_capacity(chars.len() + 8);
-    let mut line_start = at_line_start;
+    let mut line_start = pos == Pos::LineStart;
     let mut i = 0;
+
+    // A `[^n]` that opened the line makes a leading `:` the delimiter of a
+    // footnote *definition*, which swallows the paragraph (§2). `\:` is a
+    // valid CommonMark escape — `:` is ASCII punctuation — and it leaves the
+    // reference itself intact.
+    //
+    // Gated to `Ctx::Flow`: `render_table` renders every cell at a line start
+    // so this position arises in a cell too, but a cell is inline context
+    // where `[^1]:` is never a definition.
+    if ctx == Ctx::Flow && pos == Pos::AfterFootnoteRef && chars.first() == Some(&':') {
+        out.push('\\');
+        out.push(':');
+        i = 1;
+    }
+
     while i < chars.len() {
         let c = chars[i];
 
         if c == '\n' {
             match ctx {
-                Ctx::Cell => out.push_str("<br>"),
+                Ctx::Cell => {
+                    out.push_str("<br>");
+                    // A `<br>` is inline markup inside the cell, not a fresh
+                    // line -- GFM only trims a cell's own outer edges, never
+                    // the run right after an internal `<br>`. Clearing this
+                    // keeps `line_start` honest: without it, `Text("\n  x")`
+                    // claimed the ` ` right after `<br>` was at column 0 and
+                    // spent a character reference on it for no reason. That
+                    // reference rendered as the space it names either way
+                    // (verified against the parser), so this is a position
+                    // fix, not a behaviour fix.
+                    line_start = false;
+                }
                 _ => {
                     out.push('\n');
                     line_start = true;
@@ -52,6 +118,23 @@ pub(crate) fn text(s: &str, ctx: Ctx, at_line_start: bool) -> String {
         }
 
         if line_start {
+            // GFM reinterprets or discards whitespace at a line start: up to
+            // three spaces still open a heading or a list, four open an
+            // indented code block, and a cell's leading run is trimmed away
+            // entirely. None of that is reachable by escaping a marker — the
+            // code-block form has no marker, and `   \# h` suppresses the
+            // heading only by losing the spaces.
+            //
+            // A character reference renders as the character it names but is
+            // not whitespace to the block scanner, so one at the head of the
+            // run disarms the whole run: everything after it is no longer at
+            // column 0 (§3).
+            if let Some(reference) = ws_reference(c) {
+                out.push_str(reference);
+                i += 1;
+                line_start = false;
+                continue;
+            }
             if let Some(after_digits) = ordered_marker_delimiter(&chars, i) {
                 for d in &chars[i..after_digits] {
                     out.push(*d);
@@ -111,13 +194,20 @@ fn normalize_newlines(s: &str) -> String {
 }
 
 /// `Some(index_of_delimiter)` when `chars[i..]` begins an ordered-list marker:
-/// one or more ASCII digits followed by `.` or `)`. `None` otherwise.
+/// 1–9 ASCII digits followed by `.` or `)`. `None` otherwise.
+///
+/// The 9-digit cap is CommonMark's own, not a defensive guess: verified
+/// against the parser, `123456789. x` (9 digits) opens a real ordered list
+/// and `1234567890. x` (10) does not, parsing as a plain paragraph. Without
+/// the cap a 10-or-more-digit run got a needless backslash on its delimiter
+/// — over-escaping, harmless to the rendered text, but not exact, and this
+/// function's own doc used to claim "one or more" with no upper bound.
 fn ordered_marker_delimiter(chars: &[char], i: usize) -> Option<usize> {
     if !chars.get(i)?.is_ascii_digit() {
         return None;
     }
     let mut j = i;
-    while chars.get(j).is_some_and(char::is_ascii_digit) {
+    while j - i < 9 && chars.get(j).is_some_and(char::is_ascii_digit) {
         j += 1;
     }
     match chars.get(j) {
@@ -223,6 +313,95 @@ pub(crate) fn one_line(s: &str) -> String {
     out
 }
 
+/// Collapse a newline run that spans an inline boundary, for the one-line
+/// contexts (§4).
+///
+/// `normalize_newlines` already collapses a run inside one `Inline::Text`, and
+/// `one_line` collapses one inside a single rendered string — but neither can
+/// see two runs that meet across a boundary, because each inline is rendered
+/// independently and `code_span` folds its own content to a space before the
+/// outer `one_line` ever runs. `anchor_fold` computes over the concatenated
+/// `inline_text`, where the two runs *are* adjacent, so it predicts one
+/// separator where the renderer emitted two, and the cross-reference it
+/// embeds is dead.
+///
+/// The fix lands here rather than in `kasane-core`'s mirror on purpose: the
+/// two folds are kept in step by hand (see `one_line`, and AGENTS.md), and
+/// teaching the anchor side about inline boundaries would add `code_span`'s
+/// padding rules to what that hand-kept correspondence has to track.
+///
+/// `Inline::FootnoteRef` is opaque: it renders as visible `[^1]` text, so a
+/// run must not collapse across it. The residual that leaves is the
+/// footnote-reference divergence `kasane-core::slug` already documents (§4.1).
+pub(crate) fn fold_inline_newlines(inls: &[Inline]) -> Vec<Inline> {
+    let mut pending = false;
+    fold_seq(inls, 0, &mut pending)
+}
+
+fn fold_seq(inls: &[Inline], depth: usize, pending: &mut bool) -> Vec<Inline> {
+    // This runs before `inlines_to_md_at`'s guard, so it carries its own:
+    // `blocks_to_markdown` is public API over a public IR, and a hand-built
+    // tree deeper than the bound would otherwise overflow the stack here
+    // rather than being truncated there.
+    //
+    // Returns empty rather than `inls.to_vec()`: `Inline`'s derived `Clone`
+    // is itself recursive, so cloning the remainder would only relabel the
+    // recursion this guard exists to stop, as deep as whatever is left below
+    // it. Empty is safe to return because it is unobservable — the only
+    // consumer, `inlines_to_md_at`, has its own `MAX_INLINE_DEPTH` guard on a
+    // fresh counter and discards everything past that depth before it is
+    // ever read, so nothing this deep survives to be rendered either way.
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return Vec::new();
+    }
+    inls.iter()
+        .map(|i| match i {
+            Inline::Text(t) => Inline::Text(fold_leaf(t, pending)),
+            Inline::Code(t) => Inline::Code(fold_leaf(t, pending)),
+            Inline::Math(t) => Inline::Math(fold_leaf(t, pending)),
+            Inline::Emph(x) => Inline::Emph(fold_seq(x, depth + 1, pending)),
+            Inline::Strong(x) => Inline::Strong(fold_seq(x, depth + 1, pending)),
+            Inline::Link { target, inlines } => Inline::Link {
+                target: target.clone(),
+                inlines: fold_seq(inlines, depth + 1, pending),
+            },
+            Inline::FootnoteRef(n) => {
+                *pending = false;
+                Inline::FootnoteRef(*n)
+            }
+        })
+        .collect()
+}
+
+/// Fold one leaf's content, carrying `pending` in and out so a run that ends
+/// this leaf and begins the next collapses to a single `\n` — which
+/// `one_line` then turns into the one space `anchor_fold` predicted.
+///
+/// A third newline-run collapse loop, deliberately not unified with its two
+/// siblings: `normalize_newlines` collapses a run *within* one string before
+/// any escaping happens, `one_line` collapses one within a single already-
+/// rendered string, and this one collapses one *across* an inline boundary,
+/// carrying state between calls via `pending` rather than being a pure
+/// function of one string. That statefulness is exactly what the other two
+/// cannot express and do not need — merging this into either would give a
+/// context-free loop a cross-call side channel, reintroducing the hazard
+/// `fold_inline_newlines` exists to fix in the first place.
+fn fold_leaf(s: &str, pending: &mut bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\n' || c == '\r' {
+            if !*pending {
+                out.push('\n');
+            }
+            *pending = true;
+        } else {
+            out.push(c);
+            *pending = false;
+        }
+    }
+    out
+}
+
 /// A link label or image alt text: flow rules, flattened to one line.
 ///
 /// Escaped, never substituted. `library.rs`'s superseded `link_text` replaced
@@ -230,7 +409,27 @@ pub(crate) fn one_line(s: &str) -> String {
 /// anchors are computed from unescaped IR text and must still match what the
 /// heading renders to.
 pub(crate) fn label(s: &str) -> String {
-    one_line(&text(s, Ctx::Flow, false))
+    one_line(&text(s, Ctx::Flow, Pos::Mid))
+}
+
+/// Restore whitespace at a rendered cell's trailing edge (§3.3).
+///
+/// GFM trims a cell's content before parsing it, so a trailing space or tab
+/// is dropped outright — document text lost, the same defect the leading edge
+/// had. The leading edge is covered by `Pos::LineStart`, because
+/// `render_table` renders every cell at a line start; this edge is not a
+/// positional question and cannot be.
+///
+/// Only the last character needs the reference: everything before it is no
+/// longer at the trimmed edge. Symmetric with the leading rule, which likewise
+/// only converts the first character of the run.
+pub(crate) fn cell_edges(rendered: &str) -> String {
+    let mut out = rendered.to_string();
+    if let Some(reference) = out.chars().next_back().and_then(ws_reference) {
+        out.truncate(out.len() - 1);
+        out.push_str(reference);
+    }
+    out
 }
 
 /// Wrap code content in a backtick run the content cannot contain (§3.4).
@@ -490,7 +689,7 @@ mod tests {
     fn flow_escapes_every_always_character() {
         for c in ['\\', '`', '*', '_', '[', ']', '<', '~', '$'] {
             let input = format!("a{c}b");
-            let got = text(&input, Ctx::Flow, false);
+            let got = text(&input, Ctx::Flow, Pos::Mid);
             assert_eq!(got, format!("a\\{c}b"), "input {input:?}");
         }
     }
@@ -499,18 +698,18 @@ mod tests {
     fn flow_leaves_bang_alone_because_bracket_is_escaped() {
         // `!` matters only before `[`, and `[` is always escaped, so `!\[`
         // can never form an image. Every "Wow!" in the corpus stays clean.
-        assert_eq!(text("Wow! [see]", Ctx::Flow, false), "Wow! \\[see\\]");
+        assert_eq!(text("Wow! [see]", Ctx::Flow, Pos::Mid), "Wow! \\[see\\]");
     }
 
     #[test]
     fn flow_escapes_ampersand_only_when_it_opens_an_entity() {
-        assert_eq!(text("Q&A", Ctx::Flow, false), "Q&A");
-        assert_eq!(text("Tom & Jerry", Ctx::Flow, false), "Tom & Jerry");
-        assert_eq!(text("a&amp;b", Ctx::Flow, false), "a\\&amp;b");
-        assert_eq!(text("a&#38;b", Ctx::Flow, false), "a\\&#38;b");
-        assert_eq!(text("a&#x26;b", Ctx::Flow, false), "a\\&#x26;b");
+        assert_eq!(text("Q&A", Ctx::Flow, Pos::Mid), "Q&A");
+        assert_eq!(text("Tom & Jerry", Ctx::Flow, Pos::Mid), "Tom & Jerry");
+        assert_eq!(text("a&amp;b", Ctx::Flow, Pos::Mid), "a\\&amp;b");
+        assert_eq!(text("a&#38;b", Ctx::Flow, Pos::Mid), "a\\&#38;b");
+        assert_eq!(text("a&#x26;b", Ctx::Flow, Pos::Mid), "a\\&#x26;b");
         // No terminating semicolon: not an entity, no escape.
-        assert_eq!(text("a&amp b", Ctx::Flow, false), "a&amp b");
+        assert_eq!(text("a&amp b", Ctx::Flow, Pos::Mid), "a&amp b");
     }
 
     #[test]
@@ -518,57 +717,127 @@ mod tests {
         for c in ['#', '-', '+', '>', '=', '|'] {
             let input = format!("{c}x");
             assert_eq!(
-                text(&input, Ctx::Flow, true),
+                text(&input, Ctx::Flow, Pos::LineStart),
                 format!("\\{c}x"),
                 "at line start: {input:?}"
             );
-            assert_eq!(text(&input, Ctx::Flow, false), input, "mid-line: {input:?}");
+            assert_eq!(
+                text(&input, Ctx::Flow, Pos::Mid),
+                input,
+                "mid-line: {input:?}"
+            );
         }
     }
 
     #[test]
     fn flow_escapes_an_ordered_list_marker_delimiter() {
-        assert_eq!(text("1. one", Ctx::Flow, true), "1\\. one");
-        assert_eq!(text("12) two", Ctx::Flow, true), "12\\) two");
+        assert_eq!(text("1. one", Ctx::Flow, Pos::LineStart), "1\\. one");
+        assert_eq!(text("12) two", Ctx::Flow, Pos::LineStart), "12\\) two");
         // Not a marker: no digits, or no delimiter, or not at a line start.
-        assert_eq!(text("1x. one", Ctx::Flow, true), "1x. one");
-        assert_eq!(text("1. one", Ctx::Flow, false), "1. one");
+        assert_eq!(text("1x. one", Ctx::Flow, Pos::LineStart), "1x. one");
+        assert_eq!(text("1. one", Ctx::Flow, Pos::Mid), "1. one");
+    }
+
+    /// CommonMark caps an ordered-list marker at 9 digits (verified against
+    /// the parser: `123456789.` opens a real list, `1234567890.` does not,
+    /// parsing as plain text). A 10th digit is therefore not part of any
+    /// marker a real parser would recognize, so it needs no escape.
+    #[test]
+    fn flow_does_not_escape_a_marker_past_the_nine_digit_cap() {
+        assert_eq!(
+            text("123456789. one", Ctx::Flow, Pos::LineStart),
+            "123456789\\. one"
+        );
+        assert_eq!(
+            text("1234567890. one", Ctx::Flow, Pos::LineStart),
+            "1234567890. one"
+        );
     }
 
     #[test]
     fn flow_re_arms_line_start_after_an_interior_newline() {
         // The second line of a text run can open a block just as the first can.
         assert_eq!(
-            text("intro\n# not a heading", Ctx::Flow, false),
+            text("intro\n# not a heading", Ctx::Flow, Pos::Mid),
             "intro\n\\# not a heading"
         );
     }
 
     #[test]
     fn flow_collapses_blank_lines_so_one_para_stays_one_para() {
-        assert_eq!(text("a\n\n\nb", Ctx::Flow, false), "a\nb");
-        assert_eq!(text("a\r\n\r\nb", Ctx::Flow, false), "a\nb");
+        assert_eq!(text("a\n\n\nb", Ctx::Flow, Pos::Mid), "a\nb");
+        assert_eq!(text("a\r\n\r\nb", Ctx::Flow, Pos::Mid), "a\nb");
     }
 
     #[test]
     fn cell_escapes_pipes_everywhere_and_carries_newlines_as_br() {
-        assert_eq!(text("a|b", Ctx::Cell, false), "a\\|b");
-        assert_eq!(text("one\ntwo", Ctx::Cell, false), "one<br>two");
+        assert_eq!(text("a|b", Ctx::Cell, Pos::Mid), "a\\|b");
+        assert_eq!(text("one\ntwo", Ctx::Cell, Pos::Mid), "one<br>two");
         // Flow's rules still apply inside a cell.
-        assert_eq!(text("a*b", Ctx::Cell, false), "a\\*b");
+        assert_eq!(text("a*b", Ctx::Cell, Pos::Mid), "a\\*b");
+    }
+
+    /// A `<br>` is inline markup inside the cell, not a fresh line: GFM's
+    /// cell-trim rule only ever looks at the cell's own outer edges, never at
+    /// what follows an interior `<br>`. `line_start` must not survive one, or
+    /// `Text("\n  x")` claims the space right after `<br>` is at column 0 and
+    /// spends a character reference on it for no reason.
+    #[test]
+    fn line_start_does_not_survive_a_br() {
+        assert_eq!(text("\n  x", Ctx::Cell, Pos::LineStart), "<br>  x");
+        assert_eq!(text("\n\tx", Ctx::Cell, Pos::LineStart), "<br>\tx");
+    }
+
+    /// The reference and the literal space it replaces must render
+    /// identically once a real GFM cell-trim rule is in play: only the last
+    /// character of the whole cell is at a trimmed edge, so the run right
+    /// after an interior `<br>` was never going to be trimmed either way.
+    #[test]
+    fn the_position_fix_after_a_br_does_not_change_what_renders() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        fn parse_cell_body(md: &str) -> String {
+            let mut opts = Options::empty();
+            opts.insert(Options::ENABLE_TABLES);
+            let (mut in_cell, mut seen_header_end, mut out) = (false, false, String::new());
+            for ev in Parser::new_ext(md, opts) {
+                match ev {
+                    Event::Start(Tag::TableCell) => in_cell = true,
+                    Event::End(TagEnd::TableHead) => seen_header_end = true,
+                    Event::Html(h) | Event::InlineHtml(h) if in_cell && seen_header_end => {
+                        if h.trim() == "<br>" {
+                            out.push('\n');
+                        }
+                    }
+                    Event::Text(t) if in_cell && seen_header_end => out.push_str(&t),
+                    _ => {}
+                }
+            }
+            out
+        }
+
+        for input in ["\n  x", "\n\tx", "a\n  b", "\n  "] {
+            let rendered = cell_edges(&text(input, Ctx::Cell, Pos::LineStart));
+            let md = format!("| h |\n| --- |\n| {rendered} |\n");
+            assert_eq!(
+                parse_cell_body(&md),
+                input,
+                "input {input:?}: got cell {rendered:?} from {md:?}"
+            );
+        }
     }
 
     #[test]
     fn html_escapes_entities_not_backslashes() {
         assert_eq!(
-            text("a & b < c > d \" e", Ctx::Html, false),
+            text("a & b < c > d \" e", Ctx::Html, Pos::Mid),
             "a &amp; b &lt; c &gt; d &quot; e"
         );
         // A backslash is a literal character inside an HTML block.
-        assert_eq!(text("a\\b", Ctx::Html, false), "a\\b");
+        assert_eq!(text("a\\b", Ctx::Html, Pos::Mid), "a\\b");
         // Every `&` is an entity opener here, unconditionally.
-        assert_eq!(text("Q&A", Ctx::Html, false), "Q&amp;A");
-        assert_eq!(text("one\ntwo", Ctx::Html, false), "one<br>two");
+        assert_eq!(text("Q&A", Ctx::Html, Pos::Mid), "Q&amp;A");
+        assert_eq!(text("one\ntwo", Ctx::Html, Pos::Mid), "one<br>two");
     }
 
     #[test]
@@ -768,6 +1037,286 @@ mod tests {
         // rather than dropping is what keeps two words from fusing.
         assert_eq!(yaml_scalar("a\u{7}b"), "\"a b\"");
         assert_eq!(yaml_scalar("cat\tnap"), "\"cat nap\"");
+    }
+
+    /// A footnote reference that opened the line makes a following `:` the
+    /// delimiter of a footnote *definition*, which swallows the paragraph.
+    /// The `:` belongs to the next inline, which is why the position has to
+    /// carry the fact across the boundary (§2).
+    #[test]
+    fn flow_escapes_a_colon_directly_after_a_footnote_reference() {
+        assert_eq!(text(": note", Ctx::Flow, Pos::AfterFootnoteRef), "\\: note");
+        // Only the *leading* colon: nothing later on the line can be a
+        // definition delimiter.
+        assert_eq!(text("x: y", Ctx::Flow, Pos::AfterFootnoteRef), "x: y");
+        // Not at that position, not escaped.
+        assert_eq!(text(": note", Ctx::Flow, Pos::LineStart), ": note");
+        assert_eq!(text(": note", Ctx::Flow, Pos::Mid), ": note");
+    }
+
+    /// A cell is inline context, where `[^1]:` is never a definition, so the
+    /// backslash would render as nothing and exist for no reason (§2).
+    #[test]
+    fn a_cell_does_not_escape_the_footnote_colon() {
+        assert_eq!(text(": note", Ctx::Cell, Pos::AfterFootnoteRef), ": note");
+    }
+
+    /// A character reference, not a backslash. `   \# h` does suppress the
+    /// heading, but the parser then strips the three leading spaces — the
+    /// text is gone, which is an escaping-spec §5 violation presenting as a
+    /// fix. A reference renders as the character and is not whitespace to the
+    /// block scanner, so one at the head of the run disarms all of it (§3).
+    #[test]
+    fn a_line_start_whitespace_run_becomes_a_character_reference() {
+        // The first character carries it; the rest of the run is literal,
+        // and the `#` needs no backslash because it is no longer at column 0.
+        assert_eq!(text("  # h", Ctx::Flow, Pos::LineStart), "&#32; # h");
+        // Four spaces would open an indented code block, which has no marker
+        // to escape.
+        assert_eq!(text("    x", Ctx::Flow, Pos::LineStart), "&#32;   x");
+        // A tab indents just as far.
+        assert_eq!(text("\tx", Ctx::Flow, Pos::LineStart), "&#9;x");
+        // A whitespace-only run with no trailing content: only the head
+        // converts, same as any other run.
+        assert_eq!(text("  ", Ctx::Flow, Pos::LineStart), "&#32; ");
+        // Mid-line whitespace is ordinary text.
+        assert_eq!(text("  x", Ctx::Flow, Pos::Mid), "  x");
+    }
+
+    #[test]
+    fn line_start_whitespace_re_arms_after_an_interior_newline() {
+        assert_eq!(
+            text("intro\n  # not a heading", Ctx::Flow, Pos::Mid),
+            "intro\n&#32; # not a heading"
+        );
+    }
+
+    /// GFM trims a cell before parsing it, so a leading run is dropped
+    /// outright — document text lost. `render_table` renders every cell at a
+    /// line start, so this rule reaches the leading edge with no new
+    /// plumbing (§3.2).
+    #[test]
+    fn a_cell_keeps_its_leading_whitespace() {
+        assert_eq!(text("  x", Ctx::Cell, Pos::LineStart), "&#32; x");
+        assert_eq!(text("\tx", Ctx::Cell, Pos::LineStart), "&#9;x");
+    }
+
+    /// The reference has to survive as one, which means the `&` must not pick
+    /// up a backslash from the entity rule on the way out. Both references
+    /// the rule can emit are checked, not just the space -- `&#9;` has to
+    /// decode back to a real tab, not to four literal spaces or nothing.
+    #[test]
+    fn the_emitted_reference_parses_back_to_the_whitespace() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        for input in ["    x", "\tx"] {
+            let md = format!("{}\n", text(input, Ctx::Flow, Pos::LineStart));
+            let mut got = String::new();
+            let mut is_code_block = false;
+            for ev in Parser::new_ext(&md, Options::empty()) {
+                match ev {
+                    Event::Text(t) => got.push_str(&t),
+                    Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => is_code_block = true,
+                    _ => {}
+                }
+            }
+            assert!(
+                !is_code_block,
+                "input {input:?} still opened a code block: {md:?}"
+            );
+            assert_eq!(
+                got, input,
+                "input {input:?}: the whitespace must render back: {md:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ws_reference_covers_exactly_space_and_tab() {
+        assert_eq!(ws_reference(' '), Some("&#32;"));
+        assert_eq!(ws_reference('\t'), Some("&#9;"));
+        // Not GFM's block-scanner alphabet: a non-breaking space, a newline,
+        // and an ordinary letter all pass through untouched.
+        for c in ['\u{a0}', '\n', 'x'] {
+            assert_eq!(ws_reference(c), None, "{c:?} must not get a reference");
+        }
+    }
+
+    /// GFM trims both ends of a cell. `Pos::LineStart` covers the leading
+    /// edge (§3.2); the trailing edge is not a positional question, so it is
+    /// fixed on the rendered cell. Only the last character needs the
+    /// reference — everything before it is no longer at the trimmed edge (§3.3).
+    #[test]
+    fn cell_edges_restores_trailing_whitespace() {
+        assert_eq!(cell_edges("x "), "x&#32;");
+        assert_eq!(cell_edges("x\t"), "x&#9;");
+        assert_eq!(cell_edges("x  "), "x &#32;");
+        // Nothing to restore.
+        assert_eq!(cell_edges("x"), "x");
+        assert_eq!(cell_edges(""), "");
+        // An all-whitespace cell: the leading rule (`Pos::LineStart`) converts
+        // the first character, `cell_edges` converts the last, and the two
+        // references meet with nothing literal between them for a two-space
+        // run. Pins that this still parses back as the two spaces it names,
+        // not as an empty or collapsed cell.
+        assert_eq!(
+            cell_edges(&text("  ", Ctx::Cell, Pos::LineStart)),
+            "&#32;&#32;"
+        );
+    }
+
+    /// A comparable view of a folded run: one `(kind, content)` pair per
+    /// inline. `Inline` has no `PartialEq`, and widening a public IR type's
+    /// derives for a writer test is not worth it — the leaf contents are the
+    /// whole of what the fold changes.
+    fn shape(inls: &[Inline]) -> Vec<(&'static str, String)> {
+        inls.iter()
+            .map(|i| match i {
+                Inline::Text(t) => ("text", t.clone()),
+                Inline::Code(t) => ("code", t.clone()),
+                Inline::Math(t) => ("math", t.clone()),
+                Inline::FootnoteRef(n) => ("ref", n.0.to_string()),
+                Inline::Emph(_) => ("emph", String::new()),
+                Inline::Strong(_) => ("strong", String::new()),
+                Inline::Link { .. } => ("link", String::new()),
+            })
+            .collect()
+    }
+
+    /// The residual §4 exists for. `normalize_newlines` collapses a run inside
+    /// one `Inline::Text` and `one_line` collapses one inside a single
+    /// rendered string, but neither sees two runs meeting across a boundary:
+    /// each inline renders independently, and `code_span` folds its own
+    /// content to a space before the outer `one_line` ever runs. `anchor_fold`
+    /// computes over the concatenated `inline_text`, where the two runs *are*
+    /// adjacent, so it predicted one separator and the renderer emitted two.
+    #[test]
+    fn a_newline_run_collapses_across_an_inline_boundary() {
+        let got = fold_inline_newlines(&[Inline::Text("A\r".into()), Inline::Code("\nB".into())]);
+        assert_eq!(
+            shape(&got),
+            vec![("text", "A\n".to_string()), ("code", "B".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_empty_run_does_not_break_the_collapse() {
+        let got = fold_inline_newlines(&[
+            Inline::Text("A\r".into()),
+            Inline::Text(String::new()),
+            Inline::Text("\nB".into()),
+        ]);
+        assert_eq!(
+            shape(&got),
+            vec![
+                ("text", "A\n".to_string()),
+                ("text", String::new()),
+                ("text", "B".to_string()),
+            ]
+        );
+    }
+
+    /// `Inline::FootnoteRef` renders as visible `[^1]` text, so a run must not
+    /// collapse across it — doing so would drop a space GitHub really renders.
+    /// The residual that leaves open is the already-documented one (§4.1).
+    #[test]
+    fn a_footnote_reference_is_opaque_to_the_fold() {
+        use kasane_ir::NoteId;
+
+        let got = fold_inline_newlines(&[
+            Inline::Text("a\n".into()),
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Text("\nb".into()),
+        ]);
+        assert_eq!(
+            shape(&got),
+            vec![
+                ("text", "a\n".to_string()),
+                ("ref", "1".to_string()),
+                ("text", "\nb".to_string()),
+            ]
+        );
+    }
+
+    /// §4.2, and the half of it that is easy to get backwards. The fold
+    /// collapses *runs* and normalizes `\r`; it never turns a newline into a
+    /// space, because that is `one_line`, which runs long after `math_span`
+    /// has picked its delimiter. So a lone newline inside one leaf survives
+    /// and math still degrades to a code span — only the cross-boundary
+    /// duplicate is dropped.
+    #[test]
+    fn a_lone_newline_inside_one_leaf_survives_the_fold() {
+        let got = fold_inline_newlines(&[Inline::Math("a\nb".into())]);
+        assert_eq!(shape(&got), vec![("math", "a\nb".to_string())]);
+
+        let across =
+            fold_inline_newlines(&[Inline::Text("A\r".into()), Inline::Math("\nB".into())]);
+        assert_eq!(
+            shape(&across),
+            vec![("text", "A\n".to_string()), ("math", "B".to_string())]
+        );
+    }
+
+    /// The fold runs *before* `inlines_to_md_at`'s depth guard, so it needs
+    /// its own — a hand-built inline tree deeper than the bound would
+    /// otherwise overflow the stack here instead of being truncated there.
+    ///
+    /// `10_000` matches the depth `tests/inline_depth.rs`'s
+    /// `deep_inline_nesting_does_not_abort` uses for the sibling depth guard
+    /// in `inlines_to_md_at`, not `MAX_INLINE_DEPTH` (256) plus a small
+    /// margin: the guard caps *actual* recursion at exactly
+    /// `MAX_INLINE_DEPTH` regardless of how deep the input nominally is, so a
+    /// nominal depth only slightly past the bound cannot tell "guard
+    /// present" apart from "guard absent, but that depth happens not to
+    /// overflow anyway" — it takes a depth in `inline_depth.rs`'s magnitude
+    /// to genuinely risk a stack-overflow abort if the guard were missing or
+    /// broken. No `RUST_MIN_STACK` override is needed here, matching that
+    /// sibling test's convention, because the guard returns rather than
+    /// cloning the remainder (see `fold_seq`).
+    #[test]
+    fn the_fold_stops_at_the_inline_depth_bound() {
+        let mut deep = vec![Inline::Text("x".into())];
+        for _ in 0..10_000 {
+            deep = vec![Inline::Emph(deep)];
+        }
+        // Must return rather than recurse to exhaustion / abort the process.
+        let got = fold_inline_newlines(&deep);
+        assert!(!got.is_empty(), "must return rather than abort");
+    }
+
+    /// The depth-bound test above only proves the guard fires; it makes no
+    /// claim about what comes back. Pin the other half, the way
+    /// `inline_depth.rs`'s `nesting_within_the_bound_is_preserved` does for
+    /// the sibling guard: at a depth far under the bound, nothing truncates,
+    /// so a newline run split across a boundary inside the nested `Emph`s
+    /// must still collapse to exactly the shape
+    /// `a_newline_run_collapses_across_an_inline_boundary` pins at depth
+    /// zero. This is the check that would fail if `fold_seq`/`fold_leaf`
+    /// dropped or corrupted content while threading `pending` through the
+    /// recursion — an empty or non-empty `Vec` alone cannot show that.
+    #[test]
+    fn folding_within_the_bound_still_collapses_correctly() {
+        const DEPTH: usize = 8;
+        let mut deep = vec![Inline::Text("A\r".into()), Inline::Code("\nB".into())];
+        for _ in 0..DEPTH {
+            deep = vec![Inline::Emph(deep)];
+        }
+
+        let got = fold_inline_newlines(&deep);
+
+        // Unwrap the DEPTH layers of Emph the fold must have preserved
+        // faithfully, down to the leaves the boundary case landed on.
+        let mut cur = got.as_slice();
+        for _ in 0..DEPTH {
+            cur = match cur {
+                [Inline::Emph(inner)] => inner.as_slice(),
+                other => panic!("expected a single Emph wrapper, got {other:?}"),
+            };
+        }
+        assert_eq!(
+            shape(cur),
+            vec![("text", "A\n".to_string()), ("code", "B".to_string())]
+        );
     }
 
     #[test]

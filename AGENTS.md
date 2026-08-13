@@ -87,6 +87,25 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   test seams, same convention as `est_tokens`.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing. Also emits the batch library index (`library.rs`).
   `file_to_markdown` opens every file with its frontmatter title as a heading.
+  `escape.rs`'s `Pos` is the writer's escaping-position vocabulary: `LineStart`,
+  `AfterFootnoteRef`, `Mid`. It has three states rather than two because a
+  `[^n]` that opened the line makes a following `:` a footnote *definition*
+  delimiter, and the `:` belongs to the *next* inline — `markdown.rs` computes
+  the position, `escape.rs` still owns every rule. Whitespace at `LineStart`
+  becomes `&#32;`/`&#9;`, not a backslash: the backslash form suppresses the
+  construct only by losing the whitespace, and it cannot reach the
+  four-spaces-is-an-indented-code-block case at all.
+  `fold_inline_newlines` collapses a newline run spanning an inline boundary
+  before the one-line contexts render, which is what keeps the rendered
+  heading line matching `kasane-core`'s `anchor_fold` without widening the
+  hand-kept mirror described below. Its recursion's depth guard returns an
+  empty `Vec` at the bound rather than cloning the remainder: `Inline`'s
+  derived `Clone` is itself recursive, so cloning would only relabel the
+  recursion the guard exists to stop — a hand-built tree 10,000 deep aborted
+  the process on the 2 MiB stack rayon's batch workers use. Empty is safe
+  because the only consumer, `inlines_to_md_at`, has its own
+  `MAX_INLINE_DEPTH` guard and discards anything that deep before it is ever
+  read.
   That is load-bearing, not cosmetic: `fold_sections` consumes a section's
   heading into `SectionNode.title` and never re-emits it, while `assign_paths`
   records the anchor as `path#anchor_slug(title)` — without the heading here, every

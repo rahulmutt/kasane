@@ -334,6 +334,20 @@ pub fn path_slug_of(inlines: &[Inline]) -> String {
     path_slug(inlines)
 }
 
+/// Test seam for the anchor rule over real inline structure, same rationale
+/// as `path_slug_of` and `anchors_for_headings`.
+///
+/// `anchors_for_headings` takes rendered heading *strings* and re-wraps each
+/// as a single `Inline::Text`, which is right for the parsed side of a
+/// comparison and wrong for the IR side: the residuals spec §5.2 property
+/// needs the engine's anchor for an inline run whose *structure* is the thing
+/// under test. No counter is threaded because a single heading has no
+/// duplicate to suffix.
+#[doc(hidden)]
+pub fn anchor_slug_of(inlines: &[Inline]) -> String {
+    AnchorCounter::new().next(inlines)
+}
+
 /// Anchors for one file's headings, in the order the file renders them.
 ///
 /// Test seam for the property tier, and the reason `slug_of` could not stay:

@@ -14,7 +14,7 @@
 //! The postconditions are the same kind of argument `kasane-core`'s `slug`
 //! target makes — untrusted text entering a closed output alphabet.
 
-use crate::escape::{self, Ctx};
+use crate::escape::{self, Ctx, Pos};
 
 pub fn escape(data: &[u8]) {
     let Ok(text) = std::str::from_utf8(data) else {
@@ -22,8 +22,8 @@ pub fn escape(data: &[u8]) {
     };
 
     for ctx in [Ctx::Flow, Ctx::Cell] {
-        for at_line_start in [true, false] {
-            let out = escape::text(text, ctx, at_line_start);
+        for pos in [Pos::LineStart, Pos::AfterFootnoteRef, Pos::Mid] {
+            let out = escape::text(text, ctx, pos);
             assert!(
                 !out.contains('\r'),
                 "escape::text kept a CR: {out:?} from {text:?}"
@@ -47,7 +47,7 @@ pub fn escape(data: &[u8]) {
     // §3.2: `html_text` renders a newline as `<br>`, unconditionally, the
     // same substitution `Ctx::Cell` makes with a backslash escape
     // everywhere else).
-    let html = escape::text(text, Ctx::Html, false);
+    let html = escape::text(text, Ctx::Html, Pos::Mid);
     assert_html_specials_are_closed(&html, text);
 
     // A code span's delimiter run must not appear inside its content.

@@ -14,8 +14,8 @@
 mod generator;
 
 use generator::{Case, Expect};
-use kasane_core::{anchors_for_headings, est_tokens, structure, FileNode};
-use kasane_ir::Block;
+use kasane_core::{anchor_slug_of, anchors_for_headings, est_tokens, structure, FileNode};
+use kasane_ir::{AssetBag, Block, BlockId, Inline, RefTarget};
 use proptest::prelude::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
@@ -559,6 +559,53 @@ proptest! {
                 path, parsed.table_cells, want_cells
             );
         }
+    }
+
+    /// P9 — the anchor/render agreement, on the shape the main tier cannot
+    /// reach (residuals spec §5.2).
+    ///
+    /// A newline run split across an inline boundary must produce exactly one
+    /// separator in the rendered heading line, so the id GitHub computes from
+    /// that line equals the anchor the engine embedded. The main tier can draw
+    /// this shape but lands it about one run in seven (§5.3), which is why it
+    /// gets a generator narrow enough to hit it every time.
+    #[test]
+    fn p9_boundary_newline_runs_anchor_the_same(
+        nl1 in prop_oneof![Just("\n"), Just("\r"), Just("\r\n")],
+        nl2 in prop_oneof![Just("\n"), Just("\r"), Just("\r\n")],
+        kind in 0usize..5,
+    ) {
+        let head = format!("{nl2}b");
+        let second = match kind {
+            0 => Inline::Code(head),
+            1 => Inline::Math(head),
+            2 => Inline::Emph(vec![Inline::Text(head)]),
+            3 => Inline::Strong(vec![Inline::Text(head)]),
+            _ => Inline::Link {
+                target: RefTarget::External("http://example.invalid/".into()),
+                inlines: vec![Inline::Text(head)],
+            },
+        };
+        let inlines = vec![Inline::Text(format!("a{nl1}")), second];
+
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: inlines.clone(),
+        }];
+        let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+
+        // The id a renderer computes from the line the writer emitted.
+        let rendered = anchors_for_headings(&parse_events(&md).headings);
+        // The anchor the engine embeds in every cross-reference to it.
+        let embedded = anchor_slug_of(&inlines);
+
+        prop_assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(embedded.as_str()),
+            "anchor/render divergence for kind {} nl1 {:?} nl2 {:?}:\n{}",
+            kind, nl1, nl2, md
+        );
     }
 }
 
