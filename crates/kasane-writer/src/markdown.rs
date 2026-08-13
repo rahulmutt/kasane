@@ -628,8 +628,10 @@ mod tests {
         // Nothing to emphasize, mid-line: no delimiters at all, so `**`
         // cannot sit in the output as markup for its own sake. Kept off a
         // line start deliberately -- at column 0 the line-start rule always
-        // converts the leading character, which the assertion above's
-        // sibling test now covers instead.
+        // converts the leading character, so whitespace-only content no
+        // longer trims to empty there; see
+        // `strong_of_pure_whitespace_at_column_zero_survives_as_a_real_paragraph`
+        // for that case pinned instead.
         let blocks = vec![Block::Para(vec![
             Inline::Text("a ".into()),
             Inline::Strong(vec![Inline::Text("  ".into())]),
@@ -954,6 +956,57 @@ mod tests {
         assert_eq!(
             emphasized, " x",
             "the emphasis must apply and keep its space:\n{md}"
+        );
+    }
+
+    /// §3.5, whitespace-only content. Before Task 3, `escape::text("  ",
+    /// Flow, LineStart)` and `emphasize` both left the two spaces untouched,
+    /// and a line of two bare spaces is a *blank* line to GFM — the whole
+    /// paragraph, `Strong` and all, vanished from the rendered document
+    /// instead of rendering as anything. That is a harder form of the same
+    /// §5 violation `emphasis_at_column_zero_keeps_its_leading_space_inside`
+    /// pins: content silently dropped, not merely misrendered.
+    ///
+    /// The line-start rule now converts the leading space to a reference
+    /// before `emphasize` ever sees it, so the line is no longer blank: a
+    /// real paragraph survives, with a `<strong>` materializing around one
+    /// preserved space where before there was nothing at all. That is the
+    /// correct direction under §5 -- preserved content that renders as
+    /// (still-invisible) whitespace beats a block that disappears outright.
+    #[test]
+    fn strong_of_pure_whitespace_at_column_zero_survives_as_a_real_paragraph() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        let blocks = vec![Block::Para(vec![Inline::Strong(vec![Inline::Text(
+            "  ".into(),
+        )])])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.starts_with("**&#32;** "), "got:\n{md}");
+
+        let mut saw_paragraph = false;
+        let mut saw_strong = false;
+        let mut in_strong = false;
+        let mut strong_text = String::new();
+        let mut is_list = false;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(Tag::Paragraph) => saw_paragraph = true,
+                Event::Start(Tag::Strong) => {
+                    saw_strong = true;
+                    in_strong = true;
+                }
+                Event::End(TagEnd::Strong) => in_strong = false,
+                Event::Start(Tag::List(_)) => is_list = true,
+                Event::Text(t) if in_strong => strong_text.push_str(&t),
+                _ => {}
+            }
+        }
+        assert!(saw_paragraph, "the paragraph must not vanish:\n{md}");
+        assert!(saw_strong, "the strong element must not vanish:\n{md}");
+        assert!(!is_list, "a paragraph became a bullet list:\n{md}");
+        assert_eq!(
+            strong_text, " ",
+            "the preserved whitespace must round-trip:\n{md}"
         );
     }
 }

@@ -97,11 +97,20 @@ pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
             // not whitespace to the block scanner, so one at the head of the
             // run disarms the whole run: everything after it is no longer at
             // column 0 (§3).
-            if c == ' ' || c == '\t' {
-                out.push_str(if c == ' ' { "&#32;" } else { "&#9;" });
-                i += 1;
-                line_start = false;
-                continue;
+            match c {
+                ' ' => {
+                    out.push_str("&#32;");
+                    i += 1;
+                    line_start = false;
+                    continue;
+                }
+                '\t' => {
+                    out.push_str("&#9;");
+                    i += 1;
+                    line_start = false;
+                    continue;
+                }
+                _ => {}
             }
             if let Some(after_digits) = ordered_marker_delimiter(&chars, i) {
                 for d in &chars[i..after_digits] {
@@ -862,6 +871,9 @@ mod tests {
         assert_eq!(text("    x", Ctx::Flow, Pos::LineStart), "&#32;   x");
         // A tab indents just as far.
         assert_eq!(text("\tx", Ctx::Flow, Pos::LineStart), "&#9;x");
+        // A whitespace-only run with no trailing content: only the head
+        // converts, same as any other run.
+        assert_eq!(text("  ", Ctx::Flow, Pos::LineStart), "&#32; ");
         // Mid-line whitespace is ordinary text.
         assert_eq!(text("  x", Ctx::Flow, Pos::Mid), "  x");
     }
@@ -885,26 +897,33 @@ mod tests {
     }
 
     /// The reference has to survive as one, which means the `&` must not pick
-    /// up a backslash from the entity rule on the way out.
+    /// up a backslash from the entity rule on the way out. Both references
+    /// the rule can emit are checked, not just the space -- `&#9;` has to
+    /// decode back to a real tab, not to four literal spaces or nothing.
     #[test]
     fn the_emitted_reference_parses_back_to_the_whitespace() {
         use pulldown_cmark::{Event, Options, Parser};
 
-        let md = format!("{}\n", text("    x", Ctx::Flow, Pos::LineStart));
-        let mut got = String::new();
-        let mut is_code_block = false;
-        for ev in Parser::new_ext(&md, Options::empty()) {
-            match ev {
-                Event::Text(t) => got.push_str(&t),
-                Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => is_code_block = true,
-                _ => {}
+        for input in ["    x", "\tx"] {
+            let md = format!("{}\n", text(input, Ctx::Flow, Pos::LineStart));
+            let mut got = String::new();
+            let mut is_code_block = false;
+            for ev in Parser::new_ext(&md, Options::empty()) {
+                match ev {
+                    Event::Text(t) => got.push_str(&t),
+                    Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => is_code_block = true,
+                    _ => {}
+                }
             }
+            assert!(
+                !is_code_block,
+                "input {input:?} still opened a code block: {md:?}"
+            );
+            assert_eq!(
+                got, input,
+                "input {input:?}: the whitespace must render back: {md:?}"
+            );
         }
-        assert!(
-            !is_code_block,
-            "four spaces still opened a code block: {md:?}"
-        );
-        assert_eq!(got, "    x", "the whitespace must render back: {md:?}");
     }
 
     #[test]
