@@ -55,6 +55,21 @@ pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
     let mut out = String::with_capacity(chars.len() + 8);
     let mut line_start = pos == Pos::LineStart;
     let mut i = 0;
+
+    // A `[^n]` that opened the line makes a leading `:` the delimiter of a
+    // footnote *definition*, which swallows the paragraph (§2). `\:` is a
+    // valid CommonMark escape — `:` is ASCII punctuation — and it leaves the
+    // reference itself intact.
+    //
+    // Gated to `Ctx::Flow`: `render_table` renders every cell at a line start
+    // so this position arises in a cell too, but a cell is inline context
+    // where `[^1]:` is never a definition.
+    if ctx == Ctx::Flow && pos == Pos::AfterFootnoteRef && chars.first() == Some(&':') {
+        out.push('\\');
+        out.push(':');
+        i = 1;
+    }
+
     while i < chars.len() {
         let c = chars[i];
 
@@ -791,6 +806,28 @@ mod tests {
         // rather than dropping is what keeps two words from fusing.
         assert_eq!(yaml_scalar("a\u{7}b"), "\"a b\"");
         assert_eq!(yaml_scalar("cat\tnap"), "\"cat nap\"");
+    }
+
+    /// A footnote reference that opened the line makes a following `:` the
+    /// delimiter of a footnote *definition*, which swallows the paragraph.
+    /// The `:` belongs to the next inline, which is why the position has to
+    /// carry the fact across the boundary (§2).
+    #[test]
+    fn flow_escapes_a_colon_directly_after_a_footnote_reference() {
+        assert_eq!(text(": note", Ctx::Flow, Pos::AfterFootnoteRef), "\\: note");
+        // Only the *leading* colon: nothing later on the line can be a
+        // definition delimiter.
+        assert_eq!(text("x: y", Ctx::Flow, Pos::AfterFootnoteRef), "x: y");
+        // Not at that position, not escaped.
+        assert_eq!(text(": note", Ctx::Flow, Pos::LineStart), ": note");
+        assert_eq!(text(": note", Ctx::Flow, Pos::Mid), ": note");
+    }
+
+    /// A cell is inline context, where `[^1]:` is never a definition, so the
+    /// backslash would render as nothing and exist for no reason (§2).
+    #[test]
+    fn a_cell_does_not_escape_the_footnote_colon() {
+        assert_eq!(text(": note", Ctx::Cell, Pos::AfterFootnoteRef), ": note");
     }
 
     #[test]

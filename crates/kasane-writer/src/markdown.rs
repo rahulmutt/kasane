@@ -200,11 +200,14 @@ pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
 /// lands (design spec §2). It starts as whatever the caller passed and is
-/// then recomputed after every arm from whether the accumulated output ends
-/// with `\n` -- that single rule covers both a run that opens on a fresh line
-/// and one that re-arms after an interior newline (`[Text("a\n"), Text("-
-/// b")]`), with no per-arm special case, because none of the writer's own
-/// markup (`*`, `**`, backticks, `[`, `$`, `[^1]`) ever ends in a newline.
+/// then recomputed after every arm, by four rules: an arm that appended
+/// nothing leaves `pos` alone; output ending in `\n` re-arms `Pos::LineStart`
+/// (covering both a run that opens on a fresh line and one that re-arms after
+/// an interior newline, e.g. `[Text("a\n"), Text("- b")]`, since none of the
+/// writer's own markup -- `*`, `**`, backticks, `[`, `$`, `[^1]` -- ever ends
+/// in a newline); a `FootnoteRef` that fired at `Pos::LineStart` yields
+/// `Pos::AfterFootnoteRef`, so `escape::text` can tell a following `:` apart
+/// from an ordinary one (residuals spec §2); anything else yields `Pos::Mid`.
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
@@ -212,6 +215,8 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
     let mut s = String::new();
     let mut pos = pos;
     for i in inls {
+        let before = pos;
+        let len_before = s.len();
         match i {
             // The only call to `escape::text` in the crate. Every other arm
             // below emits markup the writer chose, which must not be escaped.
@@ -238,11 +243,19 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
             }
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
-        pos = if s.ends_with('\n') {
-            Pos::LineStart
-        } else {
-            Pos::Mid
-        };
+        // Four rules (§2). An arm that appended nothing leaves the position
+        // alone, so an empty text run between a reference and its colon does
+        // not reset it. `Inline::FootnoteRef` always appends, so rule 3 is
+        // never blocked by the length check.
+        if s.len() != len_before {
+            pos = if s.ends_with('\n') {
+                Pos::LineStart
+            } else if matches!(i, Inline::FootnoteRef(_)) && before == Pos::LineStart {
+                Pos::AfterFootnoteRef
+            } else {
+                Pos::Mid
+            };
+        }
     }
     s
 }
@@ -822,6 +835,71 @@ mod tests {
         let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines[0], "1. a", "got: {md}");
         assert_eq!(lines[1], "   b", "got: {md}");
+    }
+
+    /// The end-to-end shape §1's table calls A. A matching definition has to
+    /// be present or *no* footnote reference parses at all — without one,
+    /// `[^1]` decomposes into bare text and the test measures the fixture
+    /// rather than the fix.
+    #[test]
+    fn a_footnote_reference_at_column_zero_does_not_open_a_definition() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let blocks = vec![
+            Block::Para(vec![
+                Inline::FootnoteRef(NoteId(1)),
+                Inline::Text(": note".into()),
+            ]),
+            Block::Footnote {
+                id: NoteId(1),
+                blocks: vec![Block::Para(vec![Inline::Text("the definition".into())])],
+            },
+        ];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("[^1]\\: note"), "got:\n{md}");
+
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_FOOTNOTES);
+        let (mut refs, mut defs) = (0, 0);
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::FootnoteReference(_) => refs += 1,
+                Event::Start(pulldown_cmark::Tag::FootnoteDefinition(_)) => defs += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(refs, 1, "the reference must survive the escape:\n{md}");
+        assert_eq!(
+            defs, 1,
+            "only the real Block::Footnote is a definition:\n{md}"
+        );
+    }
+
+    /// An empty run between the reference and the colon must not reset the
+    /// position — the IR permits it and the colon is still a delimiter (§2,
+    /// rule 1).
+    #[test]
+    fn an_empty_run_does_not_reset_the_footnote_position() {
+        let blocks = vec![Block::Para(vec![
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Text(String::new()),
+            Inline::Text(": note".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("[^1]\\: note"), "got:\n{md}");
+    }
+
+    /// A wrapped reference renders `*[^1]*: x`, which begins with `*` and was
+    /// never a definition, so the `Emph` arm must yield `Pos::Mid` (§2, rule 3).
+    #[test]
+    fn a_wrapped_footnote_reference_leaves_the_colon_alone() {
+        let blocks = vec![Block::Para(vec![
+            Inline::Emph(vec![Inline::FootnoteRef(NoteId(1))]),
+            Inline::Text(": x".into()),
+        ])];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+        assert!(md.contains("*[^1]*: x"), "got:\n{md}");
+        assert!(!md.contains("\\:"), "no escape is needed here:\n{md}");
     }
 
     #[test]
