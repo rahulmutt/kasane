@@ -30,6 +30,24 @@ const ALWAYS: &[char] = &['\\', '`', '*', '_', '[', ']', '<', '~', '$'];
 /// thematic breaks as well as bullets.
 const LINE_START: &[char] = &['#', '-', '+', '>', '=', '|'];
 
+/// The numeric character reference for a space or a tab; `None` for anything
+/// else.
+///
+/// One function to carry the property both call sites below depend on: these
+/// two characters, and no others, are what GFM's block scanner (leading
+/// whitespace at a line start, §3) and its cell trimmer (a cell's own edges,
+/// §3.3) act on. Stated once here rather than duplicated in each site's own
+/// match, so a future third whitespace character GFM treats specially has one
+/// place to be added instead of two call sites a reviewer has to notice are
+/// supposed to agree.
+fn ws_reference(c: char) -> Option<&'static str> {
+    match c {
+        ' ' => Some("&#32;"),
+        '\t' => Some("&#9;"),
+        _ => None,
+    }
+}
+
 /// Where the next character emitted lands. The rules that depend on position
 /// need three states, not two: `escape::text` has to distinguish "at column 0"
 /// from "directly after a footnote reference that opened the line", because
@@ -111,20 +129,11 @@ pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
             // not whitespace to the block scanner, so one at the head of the
             // run disarms the whole run: everything after it is no longer at
             // column 0 (§3).
-            match c {
-                ' ' => {
-                    out.push_str("&#32;");
-                    i += 1;
-                    line_start = false;
-                    continue;
-                }
-                '\t' => {
-                    out.push_str("&#9;");
-                    i += 1;
-                    line_start = false;
-                    continue;
-                }
-                _ => {}
+            if let Some(reference) = ws_reference(c) {
+                out.push_str(reference);
+                i += 1;
+                line_start = false;
+                continue;
             }
             if let Some(after_digits) = ordered_marker_delimiter(&chars, i) {
                 for d in &chars[i..after_digits] {
@@ -360,6 +369,16 @@ fn fold_seq(inls: &[Inline], depth: usize, pending: &mut bool) -> Vec<Inline> {
 /// Fold one leaf's content, carrying `pending` in and out so a run that ends
 /// this leaf and begins the next collapses to a single `\n` — which
 /// `one_line` then turns into the one space `anchor_fold` predicted.
+///
+/// A third newline-run collapse loop, deliberately not unified with its two
+/// siblings: `normalize_newlines` collapses a run *within* one string before
+/// any escaping happens, `one_line` collapses one within a single already-
+/// rendered string, and this one collapses one *across* an inline boundary,
+/// carrying state between calls via `pending` rather than being a pure
+/// function of one string. That statefulness is exactly what the other two
+/// cannot express and do not need — merging this into either would give a
+/// context-free loop a cross-call side channel, reintroducing the hazard
+/// `fold_inline_newlines` exists to fix in the first place.
 fn fold_leaf(s: &str, pending: &mut bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -399,12 +418,9 @@ pub(crate) fn label(s: &str) -> String {
 /// only converts the first character of the run.
 pub(crate) fn cell_edges(rendered: &str) -> String {
     let mut out = rendered.to_string();
-    if out.ends_with(' ') {
+    if let Some(reference) = out.chars().next_back().and_then(ws_reference) {
         out.truncate(out.len() - 1);
-        out.push_str("&#32;");
-    } else if out.ends_with('\t') {
-        out.truncate(out.len() - 1);
-        out.push_str("&#9;");
+        out.push_str(reference);
     }
     out
 }
@@ -1089,6 +1105,17 @@ mod tests {
                 got, input,
                 "input {input:?}: the whitespace must render back: {md:?}"
             );
+        }
+    }
+
+    #[test]
+    fn ws_reference_covers_exactly_space_and_tab() {
+        assert_eq!(ws_reference(' '), Some("&#32;"));
+        assert_eq!(ws_reference('\t'), Some("&#9;"));
+        // Not GFM's block-scanner alphabet: a non-breaking space, a newline,
+        // and an ordinary letter all pass through untouched.
+        for c in ['\u{a0}', '\n', 'x'] {
+            assert_eq!(ws_reference(c), None, "{c:?} must not get a reference");
         }
     }
 
