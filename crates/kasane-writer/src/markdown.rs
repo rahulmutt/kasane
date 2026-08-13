@@ -30,8 +30,9 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 out.push('#');
             }
             out.push(' ');
+            let inlines = escape::fold_inline_newlines(inlines);
             out.push_str(&escape::one_line(&inlines_to_md(
-                inlines,
+                &inlines,
                 Ctx::Flow,
                 Pos::Mid,
             )));
@@ -75,7 +76,8 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .find(|a| a.key == image.key)
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
-            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow, Pos::Mid));
+            let caption = escape::fold_inline_newlines(caption);
+            let alt = escape::one_line(&inlines_to_md(&caption, Ctx::Flow, Pos::Mid));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
                 alt,
@@ -234,7 +236,12 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx, pos)),
+                escape::one_line(&inlines_to_md_at(
+                    &escape::fold_inline_newlines(inlines),
+                    depth + 1,
+                    ctx,
+                    pos
+                )),
                 escape::dest_url(u)
             )),
             // unresolved -> text
@@ -598,6 +605,34 @@ mod tests {
             let md = blocks_to_markdown(&blocks, &AssetBag::default());
             assert!(md.contains(want), "input {input:?} got: {md}");
         }
+    }
+
+    /// The anchor kasane embeds must equal the id GitHub computes from the
+    /// rendered heading line. Before the fold this shape rendered `A  B`
+    /// (two spaces — one from each run's independent fold) against an
+    /// embedded `a-b`.
+    #[test]
+    fn a_newline_run_split_by_a_code_span_yields_one_separator() {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: vec![Inline::Text("A\r".into()), Inline::Code("\nB".into())],
+        }];
+        let md = blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let mut heading = String::new();
+        let mut depth = 0;
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(pulldown_cmark::Tag::Heading { .. }) => depth += 1,
+                Event::End(pulldown_cmark::TagEnd::Heading(_)) => depth -= 1,
+                Event::Text(t) | Event::Code(t) if depth > 0 => heading.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(heading, "A B", "one separator, not two:\n{md}");
     }
 
     /// Emphasis whose content begins or ends with whitespace moves that

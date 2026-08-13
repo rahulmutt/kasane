@@ -6,6 +6,8 @@
 //! a code span, is inert inside an HTML block, and means something else again
 //! inside a YAML double-quoted scalar.
 
+use kasane_ir::Inline;
+
 /// Where a text run lands. The rules differ per context, so the renderers
 /// must state which one they are in — `inlines_to_md` takes this as a
 /// required argument for exactly that reason (§2).
@@ -278,6 +280,77 @@ pub(crate) fn one_line(s: &str) -> String {
         } else {
             out.push(c);
             last_was_newline = false;
+        }
+    }
+    out
+}
+
+/// Collapse a newline run that spans an inline boundary, for the one-line
+/// contexts (§4).
+///
+/// `normalize_newlines` already collapses a run inside one `Inline::Text`, and
+/// `one_line` collapses one inside a single rendered string — but neither can
+/// see two runs that meet across a boundary, because each inline is rendered
+/// independently and `code_span` folds its own content to a space before the
+/// outer `one_line` ever runs. `anchor_fold` computes over the concatenated
+/// `inline_text`, where the two runs *are* adjacent, so it predicts one
+/// separator where the renderer emitted two, and the cross-reference it
+/// embeds is dead.
+///
+/// The fix lands here rather than in `kasane-core`'s mirror on purpose: the
+/// two folds are kept in step by hand (see `one_line`, and AGENTS.md), and
+/// teaching the anchor side about inline boundaries would add `code_span`'s
+/// padding rules to what that hand-kept correspondence has to track.
+///
+/// `Inline::FootnoteRef` is opaque: it renders as visible `[^1]` text, so a
+/// run must not collapse across it. The residual that leaves is the
+/// footnote-reference divergence `kasane-core::slug` already documents (§4.1).
+pub(crate) fn fold_inline_newlines(inls: &[Inline]) -> Vec<Inline> {
+    let mut pending = false;
+    fold_seq(inls, 0, &mut pending)
+}
+
+fn fold_seq(inls: &[Inline], depth: usize, pending: &mut bool) -> Vec<Inline> {
+    // This runs before `inlines_to_md_at`'s guard, so it carries its own:
+    // `blocks_to_markdown` is public API over a public IR, and a hand-built
+    // tree deeper than the bound would otherwise overflow the stack here
+    // rather than being truncated there.
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return inls.to_vec();
+    }
+    inls.iter()
+        .map(|i| match i {
+            Inline::Text(t) => Inline::Text(fold_leaf(t, pending)),
+            Inline::Code(t) => Inline::Code(fold_leaf(t, pending)),
+            Inline::Math(t) => Inline::Math(fold_leaf(t, pending)),
+            Inline::Emph(x) => Inline::Emph(fold_seq(x, depth + 1, pending)),
+            Inline::Strong(x) => Inline::Strong(fold_seq(x, depth + 1, pending)),
+            Inline::Link { target, inlines } => Inline::Link {
+                target: target.clone(),
+                inlines: fold_seq(inlines, depth + 1, pending),
+            },
+            Inline::FootnoteRef(n) => {
+                *pending = false;
+                Inline::FootnoteRef(*n)
+            }
+        })
+        .collect()
+}
+
+/// Fold one leaf's content, carrying `pending` in and out so a run that ends
+/// this leaf and begins the next collapses to a single `\n` — which
+/// `one_line` then turns into the one space `anchor_fold` predicted.
+fn fold_leaf(s: &str, pending: &mut bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\n' || c == '\r' {
+            if !*pending {
+                out.push('\n');
+            }
+            *pending = true;
+        } else {
+            out.push(c);
+            *pending = false;
         }
     }
     out
@@ -961,6 +1034,111 @@ mod tests {
         // Nothing to restore.
         assert_eq!(cell_edges("x"), "x");
         assert_eq!(cell_edges(""), "");
+    }
+
+    /// A comparable view of a folded run: one `(kind, content)` pair per
+    /// inline. `Inline` has no `PartialEq`, and widening a public IR type's
+    /// derives for a writer test is not worth it — the leaf contents are the
+    /// whole of what the fold changes.
+    fn shape(inls: &[Inline]) -> Vec<(&'static str, String)> {
+        inls.iter()
+            .map(|i| match i {
+                Inline::Text(t) => ("text", t.clone()),
+                Inline::Code(t) => ("code", t.clone()),
+                Inline::Math(t) => ("math", t.clone()),
+                Inline::FootnoteRef(n) => ("ref", n.0.to_string()),
+                Inline::Emph(_) => ("emph", String::new()),
+                Inline::Strong(_) => ("strong", String::new()),
+                Inline::Link { .. } => ("link", String::new()),
+            })
+            .collect()
+    }
+
+    /// The residual §4 exists for. `normalize_newlines` collapses a run inside
+    /// one `Inline::Text` and `one_line` collapses one inside a single
+    /// rendered string, but neither sees two runs meeting across a boundary:
+    /// each inline renders independently, and `code_span` folds its own
+    /// content to a space before the outer `one_line` ever runs. `anchor_fold`
+    /// computes over the concatenated `inline_text`, where the two runs *are*
+    /// adjacent, so it predicted one separator and the renderer emitted two.
+    #[test]
+    fn a_newline_run_collapses_across_an_inline_boundary() {
+        let got = fold_inline_newlines(&[Inline::Text("A\r".into()), Inline::Code("\nB".into())]);
+        assert_eq!(
+            shape(&got),
+            vec![("text", "A\n".to_string()), ("code", "B".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_empty_run_does_not_break_the_collapse() {
+        let got = fold_inline_newlines(&[
+            Inline::Text("A\r".into()),
+            Inline::Text(String::new()),
+            Inline::Text("\nB".into()),
+        ]);
+        assert_eq!(
+            shape(&got),
+            vec![
+                ("text", "A\n".to_string()),
+                ("text", String::new()),
+                ("text", "B".to_string()),
+            ]
+        );
+    }
+
+    /// `Inline::FootnoteRef` renders as visible `[^1]` text, so a run must not
+    /// collapse across it — doing so would drop a space GitHub really renders.
+    /// The residual that leaves open is the already-documented one (§4.1).
+    #[test]
+    fn a_footnote_reference_is_opaque_to_the_fold() {
+        use kasane_ir::NoteId;
+
+        let got = fold_inline_newlines(&[
+            Inline::Text("a\n".into()),
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Text("\nb".into()),
+        ]);
+        assert_eq!(
+            shape(&got),
+            vec![
+                ("text", "a\n".to_string()),
+                ("ref", "1".to_string()),
+                ("text", "\nb".to_string()),
+            ]
+        );
+    }
+
+    /// §4.2, and the half of it that is easy to get backwards. The fold
+    /// collapses *runs* and normalizes `\r`; it never turns a newline into a
+    /// space, because that is `one_line`, which runs long after `math_span`
+    /// has picked its delimiter. So a lone newline inside one leaf survives
+    /// and math still degrades to a code span — only the cross-boundary
+    /// duplicate is dropped.
+    #[test]
+    fn a_lone_newline_inside_one_leaf_survives_the_fold() {
+        let got = fold_inline_newlines(&[Inline::Math("a\nb".into())]);
+        assert_eq!(shape(&got), vec![("math", "a\nb".to_string())]);
+
+        let across =
+            fold_inline_newlines(&[Inline::Text("A\r".into()), Inline::Math("\nB".into())]);
+        assert_eq!(
+            shape(&across),
+            vec![("text", "A\n".to_string()), ("math", "B".to_string())]
+        );
+    }
+
+    /// The fold runs *before* `inlines_to_md_at`'s depth guard, so it needs
+    /// its own or a hand-built inline tree deeper than the bound overflows the
+    /// stack here instead of being truncated there.
+    #[test]
+    fn the_fold_stops_at_the_inline_depth_bound() {
+        let mut deep = vec![Inline::Text("x".into())];
+        for _ in 0..(kasane_ir::MAX_INLINE_DEPTH + 50) {
+            deep = vec![Inline::Emph(deep)];
+        }
+        // Must return rather than recurse to exhaustion.
+        let _ = fold_inline_newlines(&deep);
     }
 
     #[test]
