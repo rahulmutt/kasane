@@ -194,13 +194,20 @@ fn normalize_newlines(s: &str) -> String {
 }
 
 /// `Some(index_of_delimiter)` when `chars[i..]` begins an ordered-list marker:
-/// one or more ASCII digits followed by `.` or `)`. `None` otherwise.
+/// 1–9 ASCII digits followed by `.` or `)`. `None` otherwise.
+///
+/// The 9-digit cap is CommonMark's own, not a defensive guess: verified
+/// against the parser, `123456789. x` (9 digits) opens a real ordered list
+/// and `1234567890. x` (10) does not, parsing as a plain paragraph. Without
+/// the cap a 10-or-more-digit run got a needless backslash on its delimiter
+/// — over-escaping, harmless to the rendered text, but not exact, and this
+/// function's own doc used to claim "one or more" with no upper bound.
 fn ordered_marker_delimiter(chars: &[char], i: usize) -> Option<usize> {
     if !chars.get(i)?.is_ascii_digit() {
         return None;
     }
     let mut j = i;
-    while chars.get(j).is_some_and(char::is_ascii_digit) {
+    while j - i < 9 && chars.get(j).is_some_and(char::is_ascii_digit) {
         j += 1;
     }
     match chars.get(j) {
@@ -729,6 +736,22 @@ mod tests {
         // Not a marker: no digits, or no delimiter, or not at a line start.
         assert_eq!(text("1x. one", Ctx::Flow, Pos::LineStart), "1x. one");
         assert_eq!(text("1. one", Ctx::Flow, Pos::Mid), "1. one");
+    }
+
+    /// CommonMark caps an ordered-list marker at 9 digits (verified against
+    /// the parser: `123456789.` opens a real list, `1234567890.` does not,
+    /// parsing as plain text). A 10th digit is therefore not part of any
+    /// marker a real parser would recognize, so it needs no escape.
+    #[test]
+    fn flow_does_not_escape_a_marker_past_the_nine_digit_cap() {
+        assert_eq!(
+            text("123456789. one", Ctx::Flow, Pos::LineStart),
+            "123456789\\. one"
+        );
+        assert_eq!(
+            text("1234567890. one", Ctx::Flow, Pos::LineStart),
+            "1234567890. one"
+        );
     }
 
     #[test]
