@@ -81,20 +81,31 @@ of the escaping spec while appearing to succeed.
   branches (`:892` and `:933`), which already collapse a run to one space. Any
   fragment with real content is pushed verbatim, so a hand-wrapped
   `<p>\n   text</p>` carries the source's line-wrapping and indentation into
-  the IR as if it were document content the author intended. At merge-base
-  that misrendered as an indented *code block*; after §3's whitespace rule it
-  instead surfaces as a `&#32;` the writer is correctly protecting a real
-  (if unintended) leading space from being silently dropped. Converting
+  the IR as if it were document content the author intended. Converting
   `tests/fixtures/epub/rich.epub` has exactly one such hit today —
   `01-chapter-one.md`'s hand-wrapped footnote paragraph, from `<p>Intro with
   <em>emphasis</em>, <code>inline_code()</code>, and a\n     footnote<a
-  epub:type="noteref" …>1</a>.</p>` in the fixture generator — which is the
-  writer doing its job on genuine (if adapter-manufactured) leading
-  whitespace, not a rule over-firing. The fix belongs in `kasane-adapters`:
-  giving the non-empty branch the same intra-node whitespace collapse the
-  other two branches already have would fix the code-block misrendering and
-  the `&#32;` cosmetics at once, at the source, rather than asking the writer
-  to keep protecting a fidelity bug upstream of it. Out of scope for this item
+  epub:type="noteref" …>1</a>.</p>` in the fixture generator, which lands the
+  indentation as a mid-paragraph continuation line: `"...and a\n     footnote[^1]."`.
+  **Checked directly against the parser rather than assumed:** built the
+  pre-residuals-item merge-base (`b3745ee`) and converted the same fixture —
+  the raw output there is the same 5-space-indented continuation line,
+  unescaped, and a real `pulldown-cmark` parse of it opens no indented code
+  block (an indented code block cannot interrupt a paragraph; this line
+  simply continues the surrounding one). At both merge-base and after this
+  item's whitespace rule, the paragraph renders identically to a reader — the
+  indentation is invisible either way, literal or as `&#32;`. The gap is
+  therefore purely cosmetic for the case this repo actually reproduces: an
+  earlier pass at this write-up claimed merge-base rendered the line as an
+  indented code block, which does not hold up against the parser and is
+  corrected here rather than repeated. (A *different* hand-wrapped shape —
+  indentation as the very first content of a `<p>`, rather than a mid-
+  paragraph continuation — was not built or tested and is not claimed either
+  way.) The fix still belongs in `kasane-adapters`: giving the non-empty
+  branch the same intra-node whitespace collapse the other two branches
+  already have would remove the `&#32;` cosmetics at the source, rather than
+  asking the writer to keep protecting a fidelity gap upstream of it. Out of
+  scope for this item
   because it is an adapter fidelity fix, not an escaping rule, and this item
   does not touch `kasane-adapters`.
 
@@ -148,62 +159,72 @@ gate costs nothing.
 ### 2.1 What this does not change
 
 **Correction (2026-08-13, fix wave).** This subsection originally argued that
-a `Pos::LineStart` claim at a site that is not actually column 0 "errs in the
-safe direction — a needless backslash ..., never a missed escape," and used
-that argument to leave `Block::Footnote`'s body as it is. §3's whitespace rule
-makes that argument false in general: a false `LineStart` claim no longer
-costs a backslash, it costs a **rendering** decision. `&#32;`/`&#9;` is not a
-suppressible escape the way `\#` is — it changes what the source *is*, not
-just what a parser reads it as, and at a site where the claim is wrong that
-change is gratuitous rather than protective. One instance of exactly this —
-`file_to_markdown`'s title heading claiming `Pos::LineStart` — fed a real
-anchor computation and broke every cross-reference into the file; see the
-2026-08-13 fix wave's Finding 1. `Block::Footnote`'s body is not fixed by that
-same finding because nothing here feeds an anchor, so the wrong claim stays
-benign at this site specifically — but the general claim this subsection used
-to make is not true anymore, and is corrected below rather than repeated.
+`Block::Footnote`'s body claiming `Pos::LineStart` "errs in the safe
+direction — a needless backslash ..., never a missed escape." That framing is
+wrong, and not only after §3's whitespace rule: verified directly against the
+parser (`pulldown-cmark`, `Options::ENABLE_FOOTNOTES`), `[^1]: # heading`
+opens a real `Heading` inside the footnote definition, `[^1]: - item` a real
+`List`, `[^1]: > quote` a real `BlockQuote`, and `[^1]: 1. one` a real ordered
+`List` — the position right after `[^{n}]: ` is exactly as block-start-eligible
+as the top of a file, because a footnote definition's body parses under
+CommonMark's ordinary *block* grammar, the same as a top-level document or a
+list item's content. `Pos::LineStart` there was never over-cautious; it is,
+and always was, necessary — a backslash before the whitespace rule, and a
+character reference after it (`[^1]:   note body`, unescaped, was verified to
+parse back with its leading whitespace silently swallowed: `"note body"`,
+losing the same document text the whitespace rule exists to protect
+everywhere else).
 
-**The sites that claim `Pos::LineStart` for content that is not physically at
-column 0**, checked against the code as it stands after the fix wave:
+A first draft of this correction got this backwards: it read "the text lands
+after `[^{n}]: `, not at column 0" as meaning the `LineStart` claim was false
+— the same shape as `file_to_markdown`'s title-heading bug (Finding 1) — and
+listed footnote bodies alongside two sites that really do make that false
+claim. The physical column is irrelevant to what CommonMark's block grammar
+checks; the site being *inside a block container* is what matters, and a
+footnote definition is one. The two sites below are different in exactly that
+respect: each sits inside a construct (`[...]`, `*...*`, `**...**`) that
+CommonMark parses with *inline* grammar only, where no block construct can
+ever open regardless of position — so `Pos::LineStart` there really is a false
+claim, not merely a physically-inaccurate but block-correct one.
 
-- **Footnote bodies.** `Block::Footnote`'s first body block renders through
-  the same `Block::Para` arm as any top-level paragraph, which unconditionally
-  passes `Pos::LineStart` — true for a paragraph at the top of a file, false
-  here, where the block's own text lands right after the `[^{n}]: ` prefix
-  `render_block` already emitted. `Block::Footnote { blocks: [Para([Text("
-  note body")])] }` now emits `[^1]: &#32; note body` — a character reference
-  where the pre-whitespace-rule code emitted nothing wrong at all, since a
-  space needed no escaping either way. Benign here only because the string a
-  reader sees still reads as the same two leading spaces; nothing downstream
-  computes an anchor or a path from a footnote body.
+**The sites that make the false claim** — inline-grammar-only content that
+inherits `Pos::LineStart` from its enclosing context — checked against the
+code as it stands after the fix wave:
+
 - **A link label.** `inlines_to_md_at`'s `Inline::Link { target:
   RefTarget::External(u), .. }` arm renders the label's inlines at whatever
   `pos` it inherited from the surrounding context, then wraps the result in
   `[…](…)`. When the link opens its enclosing context — `Block::Para([Link {
   inlines: [Text("  label")], .. }])` — the inherited position is
   `Pos::LineStart`, even though the label's first character actually lands
-  right after the literal `[` the format string emits. Confirmed against the
-  renderer: that shape emits `[&#32; label](…)`, not `[  label](…)`.
+  right after the literal `[` the format string emits, and a link label is
+  inline content by grammar: nothing can open a block construct inside it.
+  Confirmed against the renderer: that shape emits `[&#32; label](…)`, not
+  `[  label](…)`.
 - **`Emph`/`Strong`'s inner content.** Same forwarding pattern: `s.push_str(&
   emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "*"))` renders the
   inner run at the inherited `pos` before `emphasize` wraps it in delimiters
-  after the fact. `Block::Para([Emph([Text("  x")])])` emits `*&#32; x*`. §3.5
-  already documents this one as correct on purpose — the reference is what
-  keeps a whitespace-only or whitespace-led emphasis from vanishing as a blank
-  line — and `emphasis_at_column_zero_keeps_its_leading_space_inside` /
+  after the fact, and `*...*`/`**...**` are likewise inline-only constructs.
+  `Block::Para([Emph([Text("  x")])])` emits `*&#32; x*`. §3.5 already
+  documents this one as correct on purpose — the reference is what keeps a
+  whitespace-only or whitespace-led emphasis from vanishing as a blank line —
+  and `emphasis_at_column_zero_keeps_its_leading_space_inside` /
   `strong_of_pure_whitespace_at_column_zero_survives_as_a_real_paragraph` pin
   that it renders correctly. It is listed here because it is the same false
-  claim as the other two, not because it needs a different fix; nothing here
-  feeds an anchor either.
+  claim as the link label, not because it needs a different fix.
 
-None of these three needs the title heading's fix: each is over-escaping
-*content*, and none of the three feeds a computation — like the embedded
-anchor — that a divergent render can break. Correcting them would move each
-call site from over-escaping to exactly-escaping with no defect to point at,
-which is not a change this item should make. The lesson §2.1 exists to record
-is narrower than it first looks: the danger is not the false `LineStart` claim
-by itself, it is a false claim landing on a site that something *else* reads
-back out of the render.
+Neither of these two needs the title heading's fix: each is over-escaping
+*content*, and neither feeds a computation — like the embedded anchor — that a
+divergent render can break. Correcting them would move each call site from
+over-escaping to exactly-escaping with no defect to point at, which is not a
+change this item should make. The lesson §2.1 exists to record is narrower
+than it first looks, and narrower than this subsection's own first correction
+made it: the danger is not "the text is not physically at column 0," it is a
+claim that is false *for CommonMark's block grammar* landing on a site that
+something else reads back out of the render. Footnote bodies fail neither
+test — the claim is true and nothing downstream reads the render back — which
+is exactly why leaving them alone was always the right call, if not always for
+the stated reason.
 
 ## 3. Whitespace at a line start
 
