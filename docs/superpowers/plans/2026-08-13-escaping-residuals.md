@@ -1268,10 +1268,9 @@ The emphasis fix in this section still has no property-tier coverage — see
 Append to §8 ("Approaches considered"):
 
 ```markdown
-### 8.2 A shared crate for the anchor rule
-
-Not taken, here or by the residuals item (2026-08-13), and recorded so the
-next anchor divergence finds the argument rather than re-deriving it.
+**D. A shared crate for the anchor rule.** Not taken, here or by the
+residuals item (2026-08-13), and recorded so the next anchor divergence
+finds the argument rather than re-deriving it.
 
 `anchor_slug` predicts the rendered heading line from IR inlines, and
 `escape::one_line` produces that line — two hand-kept mirrors in crates that
@@ -1377,7 +1376,17 @@ mise run convert tests/fixtures/epub/rich.epub -o /tmp/kasane-check
 grep -rn '&#32;\|&#9;\|\\:' /tmp/kasane-check || echo "none — expected"
 ```
 
-Expected: a normal tree, and the grep finding nothing. `rich.epub` is ordinary
-prose, and all three mechanisms here fire only on text that really has
-whitespace at a line start or a colon after a footnote reference. A hit means
-one of the rules is over-firing.
+Expected: a normal tree. **Correction (2026-08-13 fix wave, Finding 4): this
+does not grep clean, and that is not a regression.** There is exactly one hit
+— `01-chapter-one.md`'s hand-wrapped footnote paragraph carries a `&#32;`,
+because its source line-wraps mid-paragraph with leading indentation
+(`<p>...and a\n     footnote<a …>1</a>.</p>` in
+`tests/fixtures/epub/make_rich_epub.py`) and `epub/xhtml.rs` pushes that
+indentation into the IR verbatim rather than collapsing it the way it already
+collapses a whitespace-only or reference-adjacent fragment. The writer is
+correctly protecting that leading whitespace, not over-firing; the actual
+defect is upstream, in the adapter's intra-node whitespace handling, and is
+recorded as a follow-up in the design spec's Non-goals (§1) rather than fixed
+by this item, which does not touch `kasane-adapters`. A *different* hit —
+anywhere this fixture's ordinary prose, rather than its one hand-wrapped
+paragraph — would still mean a rule is over-firing.

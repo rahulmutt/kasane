@@ -73,6 +73,30 @@ of the escaping spec while appearing to succeed.
   at all (§3.4).
 - **The `insta` snapshot tier.** Still the last unbuilt tier from the original
   design spec §9.
+- **`epub/xhtml.rs`'s intra-node whitespace processing.** Recorded here as a
+  follow-up rather than fixed (2026-08-13 fix wave, Finding 4). `xhtml.rs`
+  never applies HTML's own whitespace-collapsing to a text fragment that
+  contains a non-space character (`Event::Text`'s non-empty branch, around
+  `xhtml.rs:905`) — unlike its own whitespace-only and reference-adjacent
+  branches (`:892` and `:933`), which already collapse a run to one space. Any
+  fragment with real content is pushed verbatim, so a hand-wrapped
+  `<p>\n   text</p>` carries the source's line-wrapping and indentation into
+  the IR as if it were document content the author intended. At merge-base
+  that misrendered as an indented *code block*; after §3's whitespace rule it
+  instead surfaces as a `&#32;` the writer is correctly protecting a real
+  (if unintended) leading space from being silently dropped. Converting
+  `tests/fixtures/epub/rich.epub` has exactly one such hit today —
+  `01-chapter-one.md`'s hand-wrapped footnote paragraph, from `<p>Intro with
+  <em>emphasis</em>, <code>inline_code()</code>, and a\n     footnote<a
+  epub:type="noteref" …>1</a>.</p>` in the fixture generator — which is the
+  writer doing its job on genuine (if adapter-manufactured) leading
+  whitespace, not a rule over-firing. The fix belongs in `kasane-adapters`:
+  giving the non-empty branch the same intra-node whitespace collapse the
+  other two branches already have would fix the code-block misrendering and
+  the `&#32;` cosmetics at once, at the source, rather than asking the writer
+  to keep protecting a fidelity bug upstream of it. Out of scope for this item
+  because it is an adapter fidelity fix, not an escaping rule, and this item
+  does not touch `kasane-adapters`.
 
 ## 2. The escaping position
 
@@ -123,12 +147,63 @@ gate costs nothing.
 
 ### 2.1 What this does not change
 
-`Block::Footnote` renders its body blocks with `at_line_start: true` even
-though they land after the `[^{n}]: ` prefix. That is a pre-existing
-inaccuracy, and it errs in the safe direction — a needless backslash on a body
-that happens to start with `#`, never a missed escape. It stays as it is.
-Correcting it would move a call site from over-escaping to exactly-escaping
-with no defect to point at, which is not a change this item should make.
+**Correction (2026-08-13, fix wave).** This subsection originally argued that
+a `Pos::LineStart` claim at a site that is not actually column 0 "errs in the
+safe direction — a needless backslash ..., never a missed escape," and used
+that argument to leave `Block::Footnote`'s body as it is. §3's whitespace rule
+makes that argument false in general: a false `LineStart` claim no longer
+costs a backslash, it costs a **rendering** decision. `&#32;`/`&#9;` is not a
+suppressible escape the way `\#` is — it changes what the source *is*, not
+just what a parser reads it as, and at a site where the claim is wrong that
+change is gratuitous rather than protective. One instance of exactly this —
+`file_to_markdown`'s title heading claiming `Pos::LineStart` — fed a real
+anchor computation and broke every cross-reference into the file; see the
+2026-08-13 fix wave's Finding 1. `Block::Footnote`'s body is not fixed by that
+same finding because nothing here feeds an anchor, so the wrong claim stays
+benign at this site specifically — but the general claim this subsection used
+to make is not true anymore, and is corrected below rather than repeated.
+
+**The sites that claim `Pos::LineStart` for content that is not physically at
+column 0**, checked against the code as it stands after the fix wave:
+
+- **Footnote bodies.** `Block::Footnote`'s first body block renders through
+  the same `Block::Para` arm as any top-level paragraph, which unconditionally
+  passes `Pos::LineStart` — true for a paragraph at the top of a file, false
+  here, where the block's own text lands right after the `[^{n}]: ` prefix
+  `render_block` already emitted. `Block::Footnote { blocks: [Para([Text("
+  note body")])] }` now emits `[^1]: &#32; note body` — a character reference
+  where the pre-whitespace-rule code emitted nothing wrong at all, since a
+  space needed no escaping either way. Benign here only because the string a
+  reader sees still reads as the same two leading spaces; nothing downstream
+  computes an anchor or a path from a footnote body.
+- **A link label.** `inlines_to_md_at`'s `Inline::Link { target:
+  RefTarget::External(u), .. }` arm renders the label's inlines at whatever
+  `pos` it inherited from the surrounding context, then wraps the result in
+  `[…](…)`. When the link opens its enclosing context — `Block::Para([Link {
+  inlines: [Text("  label")], .. }])` — the inherited position is
+  `Pos::LineStart`, even though the label's first character actually lands
+  right after the literal `[` the format string emits. Confirmed against the
+  renderer: that shape emits `[&#32; label](…)`, not `[  label](…)`.
+- **`Emph`/`Strong`'s inner content.** Same forwarding pattern: `s.push_str(&
+  emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "*"))` renders the
+  inner run at the inherited `pos` before `emphasize` wraps it in delimiters
+  after the fact. `Block::Para([Emph([Text("  x")])])` emits `*&#32; x*`. §3.5
+  already documents this one as correct on purpose — the reference is what
+  keeps a whitespace-only or whitespace-led emphasis from vanishing as a blank
+  line — and `emphasis_at_column_zero_keeps_its_leading_space_inside` /
+  `strong_of_pure_whitespace_at_column_zero_survives_as_a_real_paragraph` pin
+  that it renders correctly. It is listed here because it is the same false
+  claim as the other two, not because it needs a different fix; nothing here
+  feeds an anchor either.
+
+None of these three needs the title heading's fix: each is over-escaping
+*content*, and none of the three feeds a computation — like the embedded
+anchor — that a divergent render can break. Correcting them would move each
+call site from over-escaping to exactly-escaping with no defect to point at,
+which is not a change this item should make. The lesson §2.1 exists to record
+is narrower than it first looks: the danger is not the false `LineStart` claim
+by itself, it is a false claim landing on a site that something *else* reads
+back out of the render.
 
 ## 3. Whitespace at a line start
 

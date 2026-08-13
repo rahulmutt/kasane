@@ -746,11 +746,9 @@ string needs a backslash in flow text, an HTML entity in a cell of a merged
 table, a percent-encoding in a destination, and a YAML escape in the
 frontmatter, so no single pre-pass can be correct for all four.
 
-### 8.2 A shared crate for the anchor rule
-
-Not taken, here or — as approach (iii) — by the residuals item (2026-08-13),
-and recorded so the next anchor divergence finds the argument rather than
-re-deriving it.
+**D. A shared crate for the anchor rule.** Not taken, here or — as approach
+(iii) — by the residuals item (2026-08-13), and recorded so the next anchor
+divergence finds the argument rather than re-deriving it.
 
 `anchor_slug` predicts the rendered heading line from IR inlines, and
 `escape::one_line` produces that line — two hand-kept mirrors in crates that
