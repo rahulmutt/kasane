@@ -28,13 +28,32 @@ const ALWAYS: &[char] = &['\\', '`', '*', '_', '[', ']', '<', '~', '$'];
 /// thematic breaks as well as bullets.
 const LINE_START: &[char] = &['#', '-', '+', '>', '=', '|'];
 
-pub(crate) fn text(s: &str, ctx: Ctx, at_line_start: bool) -> String {
+/// Where the next character emitted lands. The rules that depend on position
+/// need three states, not two: `escape::text` has to distinguish "at column 0"
+/// from "directly after a footnote reference that opened the line", because
+/// only the latter makes a following `:` a footnote *definition* delimiter
+/// (residuals spec §2).
+///
+/// `markdown.rs` computes this and passes it in; it never decides what to
+/// escape. That division is escaping spec §2 — `escape.rs` owns every rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pos {
+    /// The next character lands at the start of a line.
+    LineStart,
+    /// The next character lands directly after a `[^n]` that itself opened
+    /// the line.
+    AfterFootnoteRef,
+    /// Anywhere else.
+    Mid,
+}
+
+pub(crate) fn text(s: &str, ctx: Ctx, pos: Pos) -> String {
     if ctx == Ctx::Html {
         return html_text(s);
     }
     let chars: Vec<char> = normalize_newlines(s).chars().collect();
     let mut out = String::with_capacity(chars.len() + 8);
-    let mut line_start = at_line_start;
+    let mut line_start = pos == Pos::LineStart;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -230,7 +249,7 @@ pub(crate) fn one_line(s: &str) -> String {
 /// anchors are computed from unescaped IR text and must still match what the
 /// heading renders to.
 pub(crate) fn label(s: &str) -> String {
-    one_line(&text(s, Ctx::Flow, false))
+    one_line(&text(s, Ctx::Flow, Pos::Mid))
 }
 
 /// Wrap code content in a backtick run the content cannot contain (§3.4).
@@ -490,7 +509,7 @@ mod tests {
     fn flow_escapes_every_always_character() {
         for c in ['\\', '`', '*', '_', '[', ']', '<', '~', '$'] {
             let input = format!("a{c}b");
-            let got = text(&input, Ctx::Flow, false);
+            let got = text(&input, Ctx::Flow, Pos::Mid);
             assert_eq!(got, format!("a\\{c}b"), "input {input:?}");
         }
     }
@@ -499,18 +518,18 @@ mod tests {
     fn flow_leaves_bang_alone_because_bracket_is_escaped() {
         // `!` matters only before `[`, and `[` is always escaped, so `!\[`
         // can never form an image. Every "Wow!" in the corpus stays clean.
-        assert_eq!(text("Wow! [see]", Ctx::Flow, false), "Wow! \\[see\\]");
+        assert_eq!(text("Wow! [see]", Ctx::Flow, Pos::Mid), "Wow! \\[see\\]");
     }
 
     #[test]
     fn flow_escapes_ampersand_only_when_it_opens_an_entity() {
-        assert_eq!(text("Q&A", Ctx::Flow, false), "Q&A");
-        assert_eq!(text("Tom & Jerry", Ctx::Flow, false), "Tom & Jerry");
-        assert_eq!(text("a&amp;b", Ctx::Flow, false), "a\\&amp;b");
-        assert_eq!(text("a&#38;b", Ctx::Flow, false), "a\\&#38;b");
-        assert_eq!(text("a&#x26;b", Ctx::Flow, false), "a\\&#x26;b");
+        assert_eq!(text("Q&A", Ctx::Flow, Pos::Mid), "Q&A");
+        assert_eq!(text("Tom & Jerry", Ctx::Flow, Pos::Mid), "Tom & Jerry");
+        assert_eq!(text("a&amp;b", Ctx::Flow, Pos::Mid), "a\\&amp;b");
+        assert_eq!(text("a&#38;b", Ctx::Flow, Pos::Mid), "a\\&#38;b");
+        assert_eq!(text("a&#x26;b", Ctx::Flow, Pos::Mid), "a\\&#x26;b");
         // No terminating semicolon: not an entity, no escape.
-        assert_eq!(text("a&amp b", Ctx::Flow, false), "a&amp b");
+        assert_eq!(text("a&amp b", Ctx::Flow, Pos::Mid), "a&amp b");
     }
 
     #[test]
@@ -518,57 +537,61 @@ mod tests {
         for c in ['#', '-', '+', '>', '=', '|'] {
             let input = format!("{c}x");
             assert_eq!(
-                text(&input, Ctx::Flow, true),
+                text(&input, Ctx::Flow, Pos::LineStart),
                 format!("\\{c}x"),
                 "at line start: {input:?}"
             );
-            assert_eq!(text(&input, Ctx::Flow, false), input, "mid-line: {input:?}");
+            assert_eq!(
+                text(&input, Ctx::Flow, Pos::Mid),
+                input,
+                "mid-line: {input:?}"
+            );
         }
     }
 
     #[test]
     fn flow_escapes_an_ordered_list_marker_delimiter() {
-        assert_eq!(text("1. one", Ctx::Flow, true), "1\\. one");
-        assert_eq!(text("12) two", Ctx::Flow, true), "12\\) two");
+        assert_eq!(text("1. one", Ctx::Flow, Pos::LineStart), "1\\. one");
+        assert_eq!(text("12) two", Ctx::Flow, Pos::LineStart), "12\\) two");
         // Not a marker: no digits, or no delimiter, or not at a line start.
-        assert_eq!(text("1x. one", Ctx::Flow, true), "1x. one");
-        assert_eq!(text("1. one", Ctx::Flow, false), "1. one");
+        assert_eq!(text("1x. one", Ctx::Flow, Pos::LineStart), "1x. one");
+        assert_eq!(text("1. one", Ctx::Flow, Pos::Mid), "1. one");
     }
 
     #[test]
     fn flow_re_arms_line_start_after_an_interior_newline() {
         // The second line of a text run can open a block just as the first can.
         assert_eq!(
-            text("intro\n# not a heading", Ctx::Flow, false),
+            text("intro\n# not a heading", Ctx::Flow, Pos::Mid),
             "intro\n\\# not a heading"
         );
     }
 
     #[test]
     fn flow_collapses_blank_lines_so_one_para_stays_one_para() {
-        assert_eq!(text("a\n\n\nb", Ctx::Flow, false), "a\nb");
-        assert_eq!(text("a\r\n\r\nb", Ctx::Flow, false), "a\nb");
+        assert_eq!(text("a\n\n\nb", Ctx::Flow, Pos::Mid), "a\nb");
+        assert_eq!(text("a\r\n\r\nb", Ctx::Flow, Pos::Mid), "a\nb");
     }
 
     #[test]
     fn cell_escapes_pipes_everywhere_and_carries_newlines_as_br() {
-        assert_eq!(text("a|b", Ctx::Cell, false), "a\\|b");
-        assert_eq!(text("one\ntwo", Ctx::Cell, false), "one<br>two");
+        assert_eq!(text("a|b", Ctx::Cell, Pos::Mid), "a\\|b");
+        assert_eq!(text("one\ntwo", Ctx::Cell, Pos::Mid), "one<br>two");
         // Flow's rules still apply inside a cell.
-        assert_eq!(text("a*b", Ctx::Cell, false), "a\\*b");
+        assert_eq!(text("a*b", Ctx::Cell, Pos::Mid), "a\\*b");
     }
 
     #[test]
     fn html_escapes_entities_not_backslashes() {
         assert_eq!(
-            text("a & b < c > d \" e", Ctx::Html, false),
+            text("a & b < c > d \" e", Ctx::Html, Pos::Mid),
             "a &amp; b &lt; c &gt; d &quot; e"
         );
         // A backslash is a literal character inside an HTML block.
-        assert_eq!(text("a\\b", Ctx::Html, false), "a\\b");
+        assert_eq!(text("a\\b", Ctx::Html, Pos::Mid), "a\\b");
         // Every `&` is an entity opener here, unconditionally.
-        assert_eq!(text("Q&A", Ctx::Html, false), "Q&amp;A");
-        assert_eq!(text("one\ntwo", Ctx::Html, false), "one<br>two");
+        assert_eq!(text("Q&A", Ctx::Html, Pos::Mid), "Q&amp;A");
+        assert_eq!(text("one\ntwo", Ctx::Html, Pos::Mid), "one<br>two");
     }
 
     #[test]

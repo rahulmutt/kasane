@@ -39,7 +39,7 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     out.push_str(&escape::text(
         &escape::one_line(&file.frontmatter.title),
         escape::Ctx::Flow,
-        true,
+        escape::Pos::LineStart,
     ));
     out.push('\n');
     out.push('\n');

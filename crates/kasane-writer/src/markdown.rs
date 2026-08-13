@@ -1,4 +1,4 @@
-use crate::escape::{self, Ctx};
+use crate::escape::{self, Ctx, Pos};
 use kasane_ir::{AssetBag, Block, Inline, RefTarget, Table};
 
 pub fn blocks_to_markdown(blocks: &[Block], assets: &AssetBag) -> String {
@@ -30,11 +30,15 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 out.push('#');
             }
             out.push(' ');
-            out.push_str(&escape::one_line(&inlines_to_md(inlines, Ctx::Flow, false)));
+            out.push_str(&escape::one_line(&inlines_to_md(
+                inlines,
+                Ctx::Flow,
+                Pos::Mid,
+            )));
             out.push('\n');
         }
         Block::Para(inls) => {
-            out.push_str(&inlines_to_md(inls, Ctx::Flow, true));
+            out.push_str(&inlines_to_md(inls, Ctx::Flow, Pos::LineStart));
             out.push('\n');
         }
         Block::List { ordered, items } => {
@@ -71,7 +75,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .find(|a| a.key == image.key)
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
-            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow, false));
+            let alt = escape::one_line(&inlines_to_md(caption, Ctx::Flow, Pos::Mid));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
                 alt,
@@ -82,11 +86,11 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 // adapter sets `None` today: `blocks_to_markdown` is public
                 // API over a public IR, and "escape.rs is the only path from
                 // document text to an output buffer" is stated without
-                // qualification. `Ctx::Flow` with `at_line_start: false`,
-                // because the `*` before it is already on the line.
+                // qualification. `Ctx::Flow` with `Pos::Mid`, because the `*`
+                // before it is already on the line.
                 out.push_str(&format!(
                     "*Figure {}: {}*\n",
-                    escape::text(n, Ctx::Flow, false),
+                    escape::text(n, Ctx::Flow, Pos::Mid),
                     alt
                 ));
             }
@@ -137,7 +141,7 @@ fn render_table(t: &Table, out: &mut String) {
     let cells = |row: &Vec<Vec<Inline>>| {
         let joined: Vec<String> = row
             .iter()
-            .map(|c| inlines_to_md(c, Ctx::Cell, true))
+            .map(|c| inlines_to_md(c, Ctx::Cell, Pos::LineStart))
             .collect();
         format!("| {} |", joined.join(" | "))
     };
@@ -164,7 +168,7 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
     let mut s = String::new();
     for i in inls {
         match i {
-            Inline::Text(t) => s.push_str(&escape::text(t, Ctx::Html, false)),
+            Inline::Text(t) => s.push_str(&escape::text(t, Ctx::Html, Pos::Mid)),
             Inline::Emph(x) => s.push_str(&format!("<em>{}</em>", inlines_to_html(x, depth + 1))),
             Inline::Strong(x) => s.push_str(&format!(
                 "<strong>{}</strong>",
@@ -172,15 +176,15 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
             )),
             Inline::Code(t) => s.push_str(&format!(
                 "<code>{}</code>",
-                escape::text(t, Ctx::Html, false)
+                escape::text(t, Ctx::Html, Pos::Mid)
             )),
-            Inline::Math(t) => s.push_str(&format!("${}$", escape::text(t, Ctx::Html, false))),
+            Inline::Math(t) => s.push_str(&format!("${}$", escape::text(t, Ctx::Html, Pos::Mid))),
             Inline::Link {
                 target: RefTarget::External(u),
                 inlines,
             } => s.push_str(&format!(
                 "<a href=\"{}\">{}</a>",
-                escape::text(&escape::dest_url(u), Ctx::Html, false),
+                escape::text(&escape::dest_url(u), Ctx::Html, Pos::Mid),
                 inlines_to_html(inlines, depth + 1)
             )),
             Inline::Link { inlines, .. } => s.push_str(&inlines_to_html(inlines, depth + 1)),
@@ -190,37 +194,34 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
     s
 }
 
-pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, at_line_start: bool) -> String {
-    inlines_to_md_at(inls, 0, ctx, at_line_start)
+pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
+    inlines_to_md_at(inls, 0, ctx, pos)
 }
 
-/// `at_line_start` is threaded, not inferred: `true` iff the next character
-/// emitted lands at the start of a line (design spec §2). It starts as
-/// whatever the caller passed and is then recomputed after every arm from
-/// whether the accumulated output ends with `\n` -- that single rule covers
-/// both a run that opens on a fresh line and one that re-arms after an
-/// interior newline (`[Text("a\n"), Text("- b")]`), with no per-arm special
-/// case, because none of the writer's own markup (`*`, `**`, backticks,
-/// `[`, `$`, `[^1]`) ever ends in a newline.
-fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool) -> String {
+/// `pos` is threaded, not inferred: it names where the next character emitted
+/// lands (design spec §2). It starts as whatever the caller passed and is
+/// then recomputed after every arm from whether the accumulated output ends
+/// with `\n` -- that single rule covers both a run that opens on a fresh line
+/// and one that re-arms after an interior newline (`[Text("a\n"), Text("-
+/// b")]`), with no per-arm special case, because none of the writer's own
+/// markup (`*`, `**`, backticks, `[`, `$`, `[^1]`) ever ends in a newline.
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
     }
     let mut s = String::new();
-    let mut line_start = at_line_start;
+    let mut pos = pos;
     for i in inls {
         match i {
             // The only call to `escape::text` in the crate. Every other arm
             // below emits markup the writer chose, which must not be escaped.
-            Inline::Text(t) => s.push_str(&escape::text(t, ctx, line_start)),
-            Inline::Emph(x) => s.push_str(&emphasize(
-                &inlines_to_md_at(x, depth + 1, ctx, line_start),
-                "*",
-            )),
-            Inline::Strong(x) => s.push_str(&emphasize(
-                &inlines_to_md_at(x, depth + 1, ctx, line_start),
-                "**",
-            )),
+            Inline::Text(t) => s.push_str(&escape::text(t, ctx, pos)),
+            Inline::Emph(x) => {
+                s.push_str(&emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "*"))
+            }
+            Inline::Strong(x) => {
+                s.push_str(&emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "**"))
+            }
             Inline::Code(t) => s.push_str(&escape::code_span(t, ctx)),
             Inline::Math(t) => s.push_str(&escape::math_span(t, ctx)),
             Inline::Link {
@@ -228,16 +229,20 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx, line_start)),
+                escape::one_line(&inlines_to_md_at(inlines, depth + 1, ctx, pos)),
                 escape::dest_url(u)
             )),
             // unresolved -> text
             Inline::Link { inlines, .. } => {
-                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, line_start))
+                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos))
             }
             Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
         }
-        line_start = s.ends_with('\n');
+        pos = if s.ends_with('\n') {
+            Pos::LineStart
+        } else {
+            Pos::Mid
+        };
     }
     s
 }
@@ -245,7 +250,7 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, at_line_start: bool
 /// Wrap already-rendered inner content in an emphasis delimiter, with any
 /// whitespace at its edges moved *outside* the delimiters.
 ///
-/// Two problems, one fix. `at_line_start` guards `Inline::Text` but not the
+/// Two problems, one fix. `pos` guards `Inline::Text` but not the
 /// markup the writer itself emits at column 0, so `Block::Para([Emph([Text("
 /// x")])])` rendered `* x*` — which a GFM parser reads as a bullet list, not a
 /// paragraph, losing the paragraph outright. Reachable from `<p><em>
