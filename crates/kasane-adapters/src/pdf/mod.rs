@@ -5,6 +5,7 @@ mod layout;
 mod outline;
 
 use crate::ocr::{self, OcrOutcome};
+use crate::outline_dup::title_line_mask;
 use crate::{Adapter, ParseError};
 use content::page_text_runs;
 use image::extract_page_images;
@@ -59,10 +60,12 @@ impl Adapter for PdfAdapter {
                 source_href: None,
             };
 
+            let mut titles: Vec<&str> = Vec::new();
             if let Some(hs) = outline.get(num) {
                 for h in hs {
                     let id = BlockId(next_id);
                     next_id += 1;
+                    titles.push(h.title.as_str());
                     nodes.push(Node {
                         block: Block::Heading {
                             level: h.level,
@@ -75,8 +78,12 @@ impl Adapter for PdfAdapter {
             }
 
             let effective_body = if has_outline { f32::MAX } else { body_size };
-            let text_blocks = page_blocks_no_headings(&page.lines, &mut next_id, effective_body);
-            let has_text = !text_blocks.is_empty();
+            let page_lines = strip_title_lines(&page.lines, &titles);
+            let text_blocks = page_blocks_no_headings(&page_lines, &mut next_id, effective_body);
+            // Whether the page *had* recovered text, judged before the dedup: a
+            // chapter-opener page whose only line is its own title must not
+            // become a "scanned page, no text layer" once that line is dropped.
+            let has_text = !page.lines.is_empty();
             for b in text_blocks {
                 nodes.push(Node {
                     block: b,
@@ -110,7 +117,16 @@ impl Adapter for PdfAdapter {
             match outcome {
                 Some((OcrOutcome::Text, lines)) => {
                     assets.items.truncate(asset_mark); // drop the page images
-                    let mapped: Vec<Line> = lines.iter().map(map_ocr_line).collect();
+
+                    // Same dedup on OCR-recovered text: this page reached OCR
+                    // *because* it had no extractable text, which is exactly the
+                    // case where its outline heading supplied the only heading.
+                    // Strip before sizing, so the title line cannot skew the
+                    // modal body size it is about to be measured against.
+                    let mapped = strip_title_lines(
+                        &lines.iter().map(map_ocr_line).collect::<Vec<Line>>(),
+                        &titles,
+                    );
                     let bs = modal_body_size(std::slice::from_ref(&mapped));
                     for b in page_blocks_no_headings(&mapped, &mut next_id, bs) {
                         nodes.push(Node {
@@ -229,6 +245,24 @@ fn pdf_authors(pdf: &lopdf::Document) -> Vec<String> {
     }
 }
 
+/// Drop the lines that merely reprint one of this page's outline titles, so a
+/// bookmarked chapter title does not appear both as the spliced heading and in
+/// the body below it. Paragraph breaks survive on their own: they come from the
+/// `y` gap between *kept* lines, which only widens across a dropped one.
+fn strip_title_lines(lines: &[Line], titles: &[&str]) -> Vec<Line> {
+    if titles.is_empty() {
+        return lines.to_vec();
+    }
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    let drop = title_line_mask(&texts, titles);
+    lines
+        .iter()
+        .zip(drop)
+        .filter(|(_, d)| !d)
+        .map(|(l, _)| l.clone())
+        .collect()
+}
+
 /// Read a UTF-8/PDFDocEncoded string from the trailer's /Info dictionary.
 fn info_string(pdf: &lopdf::Document, key: &[u8]) -> Option<String> {
     let info_ref = pdf.trailer.get(b"Info").ok()?.as_reference().ok()?;
@@ -287,6 +321,48 @@ mod tests {
             })
             .unwrap();
         assert_eq!(sec.prov.source_pages, Some((2, 2)));
+    }
+
+    fn paras(doc: &Document) -> Vec<String> {
+        doc.nodes
+            .iter()
+            .filter_map(|n| match &n.block {
+                Block::Para(p) => Some(text(p)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `minimal.pdf` both bookmarks "Chapter One" and prints it on page 1 at
+    /// body size. With the outline suppressing size inference, that line used to
+    /// fuse into the following paragraph -- "Chapter One First body line." --
+    /// so the title appeared twice in the output.
+    #[test]
+    fn a_printed_title_is_not_repeated_under_its_outline_heading() {
+        let doc = parse("minimal");
+        let paras = paras(&doc);
+        assert!(
+            paras.iter().all(|p| !p.contains("Chapter One")),
+            "paras: {paras:?}"
+        );
+        assert!(
+            paras.iter().all(|p| !p.contains("Section Two")),
+            "paras: {paras:?}"
+        );
+        // The body text either side of the dropped line survives intact.
+        assert!(
+            paras.iter().any(|p| p == "First body line."),
+            "paras: {paras:?}"
+        );
+        assert!(
+            paras.iter().any(|p| p == "Second body line."),
+            "paras: {paras:?}"
+        );
+        // Both headings still come from the outline.
+        assert_eq!(
+            headings(&doc),
+            vec![(1, "Chapter One".into()), (1, "Section Two".into())]
+        );
     }
 
     #[test]
@@ -373,6 +449,39 @@ mod tests {
             "the dropped image asset must be truncated"
         );
         assert!(doc.nodes.iter().any(|n| matches!(&n.block, Block::Para(_))));
+    }
+
+    /// The dedup on the OCR path. `scanned-outline.pdf` is an image-only page
+    /// bookmarked "Chapter One" — a page reaches OCR precisely when the outline
+    /// supplied its only heading — and the stub reads that printed title back
+    /// off the scan along with the body.
+    #[test]
+    fn an_ocr_recovered_title_is_not_repeated_under_its_outline_heading() {
+        let stub = StubExtractor::new(vec![
+            pdf_ocr_line("Chapter One", 12.0, 91.0),
+            pdf_ocr_line("recovered scanned paragraph text here", 12.0, 91.0),
+        ]);
+        let bytes = std::fs::read("../../tests/fixtures/pdf/scanned-outline.pdf").unwrap();
+        let opts = ParseOptions {
+            ocr: Some(&stub),
+            ocr_opts: crate::ocr::OcrOptions::default(),
+        };
+        let (doc, _) = PdfAdapter
+            .parse_with(&bytes, "scanned-outline.pdf", &opts)
+            .unwrap();
+
+        assert_eq!(headings(&doc), vec![(1, "Chapter One".into())]);
+        let paras = paras(&doc);
+        assert!(
+            paras.iter().all(|p| !p.contains("Chapter One")),
+            "paras: {paras:?}"
+        );
+        assert!(
+            paras
+                .iter()
+                .any(|p| p.contains("recovered scanned paragraph text here")),
+            "paras: {paras:?}"
+        );
     }
 
     #[test]

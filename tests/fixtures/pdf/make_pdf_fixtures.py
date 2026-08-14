@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hermetic PDF fixture generator (stdlib only). Regenerate with:
     python3 tests/fixtures/pdf/make_pdf_fixtures.py
-Emits minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf, cyclic-outline.pdf
-next to this file.
+Emits minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf, cyclic-outline.pdf,
+scanned-outline.pdf next to this file.
 """
 import os
 import zlib
@@ -118,6 +118,29 @@ def build_image(with_text: bool) -> bytes:
     return p.build(1)
 
 
+def build_scanned_outline() -> bytes:
+    """An image-only page (no text operators) whose /Outlines bookmarks it as
+    "Chapter One". A page like this reaches OCR precisely because the outline
+    supplied its only heading, so it is what drives the outline-title dedup on
+    the OCR-recovered text: a stub extractor that "reads" the printed title back
+    off the scan must not leave it in the body under its own heading."""
+    p = Pdf()
+    p.add(1, b"<< /Type /Catalog /Pages 2 0 R /Outlines 7 0 R >>")
+    p.add(2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    p.add(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+             b"/Resources << /Font << /F1 4 0 R >> /XObject << /Im0 6 0 R >> >> "
+             b"/Contents 5 0 R >>")
+    p.add(4, font_obj())
+    p.add(5, p.stream_obj(b"", b"q 100 0 0 100 20 20 cm /Im0 Do Q\n"))
+    img = rgb_image_stream(2, 2)
+    p.add(6, p.stream_obj(
+        b"/Type /XObject /Subtype /Image /Width 2 /Height 2 "
+        b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode", img))
+    p.add(7, b"<< /Type /Outlines /First 8 0 R /Last 8 0 R /Count 1 >>")
+    p.add(8, b"<< /Title (Chapter One) /Parent 7 0 R /Dest [3 0 R /Fit] >>")
+    return p.build(1)
+
+
 def build_cyclic_outline() -> bytes:
     """Same page and body text as no-outline.pdf, but with an /Outlines graph
     whose single item is its own /First. The outline guard rejects that graph
@@ -144,8 +167,9 @@ def main():
     open(os.path.join(HERE, "image.pdf"), "wb").write(build_image(with_text=True))
     open(os.path.join(HERE, "scanned.pdf"), "wb").write(build_image(with_text=False))
     open(os.path.join(HERE, "cyclic-outline.pdf"), "wb").write(build_cyclic_outline())
+    open(os.path.join(HERE, "scanned-outline.pdf"), "wb").write(build_scanned_outline())
     print("wrote minimal.pdf, no-outline.pdf, image.pdf, scanned.pdf, "
-          "cyclic-outline.pdf")
+          "cyclic-outline.pdf, scanned-outline.pdf")
 
 
 if __name__ == "__main__":

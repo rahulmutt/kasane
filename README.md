@@ -236,7 +236,10 @@ See AGENTS.md for the codebase map.
   bookmark lookup also reads, is cyclic, implausibly large, or malformed in a
   way the underlying PDF library would crash on. Either one is enough on its
   own: a document with pristine bookmarks and a damaged destination table
-  falls back too.
+  falls back too. When bookmarks do supply the headings, a page line that
+  merely reprints one of them is dropped from the body rather than repeating
+  the title under its own heading — see the DjVu entry below for the matching
+  rule, which both adapters share.
 - Scanned/image-only PDF pages: with an `-F ocr` build and `--ocr`, text is
   recovered by OCR (text-first; the page image is kept as a fallback when OCR is
   not confident). OCR runs only on pages whose image kasane already decodes
@@ -254,9 +257,17 @@ See AGENTS.md for the codebase map.
 - Headings come from the document's NAVM outline (bookmarks) at page
   granularity when one is present; with no outline, headings are inferred
   document-wide from line height instead. When an outline exists, its title is
-  spliced in as the heading *and* the matching text-layer line still appears in
-  the body text below it, so a chapter title can appear twice in the output —
-  a known cosmetic limitation shared with the PDF adapter's outline handling.
+  spliced in as the heading and the line that merely reprints that title on the
+  page is dropped from the body, so a chapter title no longer appears twice.
+  The match is on a whole line, comparing after case is folded and punctuation
+  is ignored (`CHAPTER 1 — THE BEGINNING` matches a `Chapter 1: The Beginning`
+  bookmark), and a title printed across two or three lines is matched as a run.
+  Each bookmark drops at most one line, and no partial match ever counts: a
+  page whose printed title differs from the bookmark by more than case and
+  punctuation — an abbreviated running head, say — keeps both copies, which is
+  the deliberate trade, since a looser rule would silently delete body text.
+  The same rule applies to PDF bookmarks and to text either adapter recovers by
+  OCR.
 - Text-less pages now emit the rendered page image: the bilevel JB2 mask as a
   compact 1-bit PNG, or a full IW44 render (RGB PNG) when the page has no mask.
   A rendered page carries a marker that its text is un-OCR'd — "page image only;
