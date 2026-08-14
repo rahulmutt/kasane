@@ -14,7 +14,7 @@ quick-xml = "0.41"
 roxmltree = "0.20"
 thiserror = "1"
 html5ever = "0.33"
-markup5ever_rcdom = "0.5.4-unofficial"
+markup5ever_rcdom = "0.39.0+unofficial"
 mobi = "0.8"
 lopdf = { version = "0.44", default-features = false }
 png = "0.17"
