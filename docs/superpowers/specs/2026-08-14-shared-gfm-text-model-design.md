@@ -380,7 +380,9 @@ purpose" section drops the footnote-reference and trailing-`#` entries and keeps
 `EMPTY_FALLBACK`; the four-axis table and the NFC argument survive verbatim.
 
 **README**'s "Heading anchors match GitHub's rule, with three exceptions"
-becomes one exception. The two removed bullets are not simply deleted — a reader
+becomes two exceptions, not one: implementation surfaced a second,
+pre-existing divergence this design did not know about (an empty inline code
+span in a heading), so `EMPTY_FALLBACK` does not end up alone. The two removed bullets are not simply deleted — a reader
 converting a tree that an older build produced needs to know those anchors
 changed, so each gets a sentence saying what it was and that it is now correct.
 The case-table path changes to `crates/kasane-gfm/src/…`, and the oracle line
