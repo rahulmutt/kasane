@@ -3,9 +3,15 @@
 **Date:** 2026-08-14
 **Status:** Implemented. The external oracle (§6) re-ran against a real
 github.com render on 2026-08-14: 13 of 14 ids identical, codepoints included;
-the one divergence is the pre-existing, intentional `EMPTY_FALLBACK` case
-(Non-goals, below), not a defect this item introduced. See §8.1/§8.3 of
-`2026-08-08-slug-widening-design.md` for the method and the table.
+the only divergence the probe's cases hit is the pre-existing, intentional
+`EMPTY_FALLBACK` case (Non-goals, below). A second, pre-existing divergence —
+a heading's empty inline code span rendering as a padding space that
+`rendered_text` does not model, so the embedded anchor is a dead
+cross-reference — was not among the probe's cases and survives too; unlike
+`EMPTY_FALLBACK` it is a real construction defect, not a choice (see
+`kasane_gfm::slug`'s module doc). Neither is a defect this item introduced.
+See §8.1/§8.3 of `2026-08-08-slug-widening-design.md` for the method and the
+table.
 **Repo:** kasane
 
 ## 1. Purpose & scope

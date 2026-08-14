@@ -84,14 +84,18 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   check the writer against that claim, by parsing its own rendered output.
   Being a mirror, the anchor rule carries drift risk against
   github.com, and the case table in `slug.rs`'s tests is where that mirror is
-  written down — the one divergence it still records as surviving on purpose
-  is the empty-id fallback, since `rendered_text` and `escape::atx_closing`
-  closed the other two — but that table pins kasane's *reading*
+  written down — two divergences still survive there on purpose: the empty-id
+  fallback, and a pre-existing case where a heading's empty inline code span
+  renders as a padding space (`escape::code_span`'s only way to express one)
+  that `rendered_text` does not model, so the anchor kasane embeds is a dead
+  cross-reference. `rendered_text` and `escape::atx_closing` closed the other
+  two the table used to record. That table pins kasane's *reading*
   of the algorithm, not the algorithm, so it cannot catch a misreading. The
   external check that can is recorded in design spec §8.1 (first run
   2026-08-09, 13/13 ids matching) and re-run at §8.3 on 2026-08-14 — 13 of 14
-  ids identical, codepoints included, the sole divergence being the empty-id
-  fallback named above; re-run it again when the table next changes. Duplicate anchors are suffixed per file
+  ids identical, codepoints included, the empty-id fallback being the only
+  divergence that run's probe cases hit (the probe carries no empty-code-span
+  case); re-run it again when the table next changes. Duplicate anchors are suffixed per file
   in render order, which is why `place` counts headings nested inside list
   items even though it deliberately gives them no anchor: GitHub assigns them
   ids, so they consume a suffix slot. `assign_paths` takes the document title
