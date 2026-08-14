@@ -8,6 +8,7 @@ mod text;
 
 use crate::guard::MAX_TOTAL_BYTES;
 use crate::ocr::{self, OcrOutcome};
+use crate::outline_dup::title_line_mask;
 use crate::{Adapter, ParseError};
 use kasane_ir::{AssetBag, Block, BlockId, DocMeta, Document, Inline, Node, Provenance};
 use outline::{outline_by_page, OutlineHeading};
@@ -193,7 +194,9 @@ fn page_nodes_from_lines(
         });
     }
 
-    let blocks = page_blocks(lines, next_id, body_height, infer_headings);
+    let titles: Vec<&str> = headings.iter().map(|h| h.title.as_str()).collect();
+    let lines = strip_title_lines(lines, &titles);
+    let blocks = page_blocks(&lines, next_id, body_height, infer_headings);
     let had_blocks = !blocks.is_empty();
     for b in blocks {
         out.push(Node {
@@ -235,6 +238,35 @@ fn page_nodes_from_lines(
                 });
             }
         }
+    }
+    out
+}
+
+/// Drop the lines that merely reprint one of this page's outline titles, so a
+/// bookmarked chapter title does not appear both as the spliced heading and in
+/// the body below it.
+///
+/// A dropped line's `para_start` is forwarded to the next kept line. Without
+/// that, the text following the title merges into the paragraph *preceding* it
+/// — a running header, typically — since `page_blocks` breaks paragraphs on
+/// that flag alone.
+fn strip_title_lines(lines: &[Line], titles: &[&str]) -> Vec<Line> {
+    if titles.is_empty() {
+        return lines.to_vec();
+    }
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    let drop = title_line_mask(&texts, titles);
+    let mut out = Vec::with_capacity(lines.len());
+    let mut carry = false;
+    for (l, d) in lines.iter().zip(drop) {
+        if d {
+            carry |= l.para_start;
+            continue;
+        }
+        let mut kept = l.clone();
+        kept.para_start |= carry;
+        carry = false;
+        out.push(kept);
     }
     out
 }
@@ -437,6 +469,73 @@ mod tests {
             .any(|n| matches!(&n.block, Block::Para(p) if text(p) == "Tall body")));
         // The outline heading is spliced ahead of the page's blocks.
         assert!(matches!(nodes[0].block, Block::Heading { .. }));
+    }
+
+    /// `sample.djvu` carries a NAVM bookmark "Chapter One" *and* prints that
+    /// line in its text layer. With the outline suppressing height inference,
+    /// the printed line used to fuse into the page's paragraph, so the title
+    /// appeared both as the heading and in the body below it.
+    #[test]
+    fn a_printed_title_is_not_repeated_under_its_outline_heading() {
+        let doc = sample();
+        let paras: Vec<String> = doc
+            .nodes
+            .iter()
+            .filter_map(|n| match &n.block {
+                Block::Para(p) => Some(text(p)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headings_of(&doc.nodes), vec!["Chapter One".to_string()]);
+        assert!(
+            paras.iter().all(|p| !p.contains("Chapter One")),
+            "paras: {paras:?}"
+        );
+        let all = paras.join(" ");
+        assert!(all.contains("First body line."), "paras: {paras:?}");
+        assert!(all.contains("Second body line."), "paras: {paras:?}");
+    }
+
+    /// A dropped line carries the paragraph boundary its `para_start` marked.
+    /// Without forwarding it to the next kept line, the text after the title
+    /// merges into the paragraph *before* it -- here, into the running header.
+    #[test]
+    fn dropping_a_title_line_forwards_its_paragraph_break() {
+        let lines = [
+            Line {
+                text: "14 · A Tale".into(),
+                height: 8.0,
+                para_start: true,
+            },
+            Line {
+                text: "Chapter One".into(),
+                height: 8.0,
+                para_start: true,
+            },
+            Line {
+                text: "First body line.".into(),
+                height: 8.0,
+                para_start: false,
+            },
+        ];
+        let headings = [OutlineHeading {
+            level: 1,
+            title: "Chapter One".into(),
+        }];
+        let mut id = 0u32;
+        let nodes = page_nodes_from_lines(1, &lines, &headings, &mut id, 8.0, false, true, None);
+        let paras: Vec<String> = nodes
+            .iter()
+            .filter_map(|n| match &n.block {
+                Block::Para(p) => Some(text(p)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            paras,
+            vec!["14 · A Tale".to_string(), "First body line.".to_string()],
+            "paras: {paras:?}"
+        );
     }
 
     #[test]

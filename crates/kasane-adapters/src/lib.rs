@@ -7,6 +7,7 @@ mod guard;
 mod math;
 mod mobi;
 pub mod ocr;
+mod outline_dup;
 mod pdf;
 mod pptx;
 mod xmltext;
