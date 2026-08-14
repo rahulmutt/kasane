@@ -4,7 +4,7 @@
 **Status:** Implemented. The external oracle (§6) re-ran against a real
 github.com render on 2026-08-14: 13 of 14 ids identical, codepoints included;
 the one divergence is the pre-existing, intentional `EMPTY_FALLBACK` case
-(Non-goals, above), not a defect this item introduced. See §8.1/§8.3 of
+(Non-goals, below), not a defect this item introduced. See §8.1/§8.3 of
 `2026-08-08-slug-widening-design.md` for the method and the table.
 **Repo:** kasane
 

@@ -466,15 +466,18 @@ One case remains open, narrower than what was closed:
   escaping: an HTML renderer collapses whitespace runs whether they arrived
   literally or as `&#32;`. One more cost of that path, alongside §3.3's.
 
-**A newline run split across an `Inline::FootnoteRef`** — closed, 2026-08-14,
-by the shared GFM text model item (`2026-08-14-shared-gfm-text-model-design.md`).
-Not by a fold change, which is what the bullet above predicted: `inline_text`
-(now `title_text`) still skips `Inline::FootnoteRef`, and the fold still
-cannot see across it. What closed the case is `rendered_text`, the projection
-that item introduced for the anchor's own input — it renders
-`Inline::FootnoteRef(n)` as `[^n]`, matching what the writer prints, so
-`## Notes[^1]` anchors `notes1` rather than `notes` and the residual this
-bullet named no longer exists.
+The other case recorded here as open, a newline run split across an
+`Inline::FootnoteRef`, closed 2026-08-14:
+
+- **A newline run split across an `Inline::FootnoteRef`.** Closed — not by a
+  fold change, which is what this bullet originally predicted, but by
+  `rendered_text`, the projection the shared GFM text model item
+  (`2026-08-14-shared-gfm-text-model-design.md`) introduced for the anchor's
+  own input: it renders `Inline::FootnoteRef(n)` as `[^n]`, matching what the
+  writer prints, so `## Notes[^1]` anchors `notes1` rather than `notes`.
+  `title_text` (formerly `inline_text`) still skips the reference and the
+  fold still cannot see across it — the case closed by changing what the
+  anchor reads, not by widening the fold.
 
 The emphasis fix in this section still has no property-tier coverage — see
 §6.4 for why the generator cannot reach it.

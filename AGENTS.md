@@ -85,8 +85,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   is the empty-id fallback, since `rendered_text` and `escape::atx_closing`
   closed the other two — but that table pins kasane's *reading*
   of the algorithm, not the algorithm, so it cannot catch a misreading. The
-  external check that can is recorded in design spec §8.1 (run 2026-08-09,
-  13/13 ids matching a real render); re-run it when the table changes. Duplicate anchors are suffixed per file
+  external check that can is recorded in design spec §8.1 (first run
+  2026-08-09, 13/13 ids matching) and re-run at §8.3 on 2026-08-14 — 13 of 14
+  ids identical, codepoints included, the sole divergence being the empty-id
+  fallback named above; re-run it again when the table next changes. Duplicate anchors are suffixed per file
   in render order, which is why `place` counts headings nested inside list
   items even though it deliberately gives them no anchor: GitHub assigns them
   ids, so they consume a suffix slot. `assign_paths` takes the document title
