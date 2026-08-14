@@ -143,7 +143,7 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Heading anchors match GitHub's rule, with one exception. Anchors are
+- Heading anchors match GitHub's rule, with two exceptions. Anchors are
   computed the way GitHub computes them — Unicode-aware, punctuation removed
   rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
@@ -160,12 +160,18 @@ See AGENTS.md for the codebase map.
   numerals like `Ⅷ` and circled letters like `Ⓐ` are in — and narrower than
   "looks like one": parenthesized letters like `⒜` are out, as are all
   non-decimal numerals, so `## Fig ½` anchors as `#fig-` and `## ①はじめに`
-  as `#はじめに`. The one exception:
+  as `#はじめに`. The two exceptions:
   - A heading with none of those characters at all (`## ***`, `## —`, `## ½`)
     gets an empty id from GitHub; kasane emits `#section`, because an empty
     anchor is a dead link. A heading that is *only* a zero-width non-joiner is
     not this case — it anchors to that invisible character, exactly as GitHub
     does.
+  - A heading containing an empty inline code span (an empty pair of
+    backticks between two words) gets a cross-reference that does not
+    resolve: GitHub renders the empty span as one space and computes its id
+    from that rendered line, while kasane's anchor is computed from the code
+    span's (empty) content and does not see the space. Pre-existing, and
+    open — see `kasane_gfm::slug`'s module doc.
 
   Two anchors that used to diverge no longer do, which matters for a tree an
   older build produced: a heading carrying a footnote reference now anchors

@@ -43,7 +43,7 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     // same reason). Before the whitespace-at-line-start rule, claiming
     // `LineStart` here was a harmless over-escape (a needless `\#`); after it,
     // a leading space in the title became `&#32;`, which disarms the
-    // ATX-content strip `kasane_gfm::slug`'s `anchor_slug` assumes happens --
+    // ATX-content strip `kasane_gfm::anchor_slug` assumes happens --
     // see `the_title_heading_renders_to_exactly_the_trimmed_title` in this
     // module's tests for the parser-verified consequence.
     out.push_str(&escape::atx_closing(&escape::text(
@@ -290,8 +290,9 @@ mod tests {
     /// never at column 0. Before the whitespace-at-line-start rule the lie was
     /// harmless (a needless `\#`); after it, a leading space in the title
     /// became `&#32;`, which disarms the ATX-content strip a real parser would
-    /// otherwise apply. `anchor_fold` (in `kasane_gfm::slug`) assumes that
-    /// strip happens — its own doc comment says "a Markdown parser strips a
+    /// otherwise apply. `anchor_fold` (a private helper inside `kasane-gfm`'s
+    /// `slug` module, reached through the public `kasane_gfm::anchor_slug`)
+    /// assumes that strip happens — its own doc comment says "a Markdown parser strips a
     /// heading's surrounding whitespace before GitHub ever computes an id" —
     /// so when it doesn't, the anchor kasane embeds (computed from
     /// `title.trim()`) diverges from the id a real renderer assigns (computed

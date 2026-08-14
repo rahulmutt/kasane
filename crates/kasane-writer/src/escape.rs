@@ -453,6 +453,11 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
     if content.is_empty() {
         // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
+        // Inside a heading this space is not a curiosity: `rendered_text` takes an
+        // `Inline::Code`'s content verbatim, so it does not see this padding space,
+        // and a heading built around an empty code span slugs to an anchor GitHub's
+        // real render does not compute -- a dead cross-reference. See
+        // `kasane_gfm::slug`'s module doc for the shape and why it stays open.
         format!("{ticks} {ticks}")
     } else if content.chars().all(|c| c == ' ') {
         // Rule 2: All-spaces content pads not at all; CommonMark's carve-out means the

@@ -460,11 +460,21 @@ and disarms the whole run, which made the "changes the line-start rules for
 every context at once" characterization an artifact of the mechanism rather
 than of the defect.
 
-One case remains open, narrower than what was closed:
+Two cases remain open, narrower than what was closed:
 
 - **Whitespace inside the merged-table HTML fallback.** Not reachable by
   escaping: an HTML renderer collapses whitespace runs whether they arrived
   literally or as `&#32;`. One more cost of that path, alongside §3.3's.
+- **An empty inline code span inside a heading.** Not fixable by escaping
+  either, and not new: `code_span`'s Rule 1 (§3.4) pads an empty span to a
+  single space because CommonMark has no other way to express one, and that
+  space is a real character in the rendered line — but the anchor rule
+  (`kasane_gfm::slug`) computes an anchor from the IR's inline text, which
+  for `Inline::Code("")` is empty, not a space. A heading built from the text
+  "a", an empty code span, and the text "b" therefore anchors as `ab` while
+  GitHub's real render computes `a-b`: a dead cross-reference. Recorded in
+  full, including why it stays open, in `kasane_gfm::slug`'s module doc and
+  in `escape::code_span`'s Rule 1 comment.
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14:
