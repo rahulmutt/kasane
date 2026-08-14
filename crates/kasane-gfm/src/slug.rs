@@ -257,7 +257,7 @@ pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
 /// non-root component carries an `NN-` ordinal prefix, which is already what
 /// makes sibling collisions impossible -- including the case-insensitive ones
 /// macOS and Windows would produce, and the NFC-vs-NFD ones macOS would.
-pub(crate) fn path_slug(inlines: &[Inline]) -> String {
+pub fn path_slug(inlines: &[Inline]) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
     for c in path_fold(inlines).chars() {
@@ -367,7 +367,7 @@ pub fn anchors_for_headings(headings: &[String]) -> Vec<String> {
 ///
 /// Moved here from `paths.rs`: it exists to feed the slug rules, and leaving
 /// it there would make `paths` and `slug` mutually dependent.
-pub(crate) fn inline_text(inlines: &[Inline]) -> String {
+pub fn inline_text(inlines: &[Inline]) -> String {
     let mut s = String::new();
     inline_text_at(inlines, 0, &mut s);
     s
@@ -394,12 +394,12 @@ fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
 /// gets `-1`, then `-2`. GitHub does not re-check whether the suffixed form
 /// itself collides with an existing id, and neither does this -- mirroring the
 /// quirk is the point.
-pub(crate) struct AnchorCounter {
+pub struct AnchorCounter {
     seen: std::collections::HashMap<String, usize>,
 }
 
 impl AnchorCounter {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             seen: std::collections::HashMap::new(),
         }
@@ -408,12 +408,18 @@ impl AnchorCounter {
     /// The anchor for the next heading in render order. Every heading the file
     /// renders must pass through here, including ones that get no anchor of
     /// their own -- they still consume a slot on the rendered page.
-    pub(crate) fn next(&mut self, inlines: &[Inline]) -> String {
+    pub fn next(&mut self, inlines: &[Inline]) -> String {
         let base = anchor_slug(inlines);
         let n = self.seen.entry(base.clone()).or_insert(0);
         let out = if *n == 0 { base } else { format!("{base}-{n}") };
         *n += 1;
         out
+    }
+}
+
+impl Default for AnchorCounter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

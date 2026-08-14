@@ -15,7 +15,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 kasane-adapters = { path = "../crates/kasane-adapters" }
-kasane-core = { path = "../crates/kasane-core" }
+kasane-gfm = { path = "../crates/kasane-gfm" }
 kasane-writer = { path = "../crates/kasane-writer" }
 
 # Fuzz targets must be built with debug assertions and overflow checks on, in

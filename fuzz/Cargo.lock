@@ -525,9 +525,8 @@ dependencies = [
 name = "kasane-core"
 version = "0.1.0"
 dependencies = [
+ "kasane-gfm",
  "kasane-ir",
- "unicode-normalization",
- "unicode-properties",
 ]
 
 [[package]]
@@ -535,9 +534,18 @@ name = "kasane-fuzz"
 version = "0.0.0"
 dependencies = [
  "kasane-adapters",
- "kasane-core",
+ "kasane-gfm",
  "kasane-writer",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "kasane-gfm"
+version = "0.1.0"
+dependencies = [
+ "kasane-ir",
+ "unicode-normalization",
+ "unicode-properties",
 ]
 
 [[package]]

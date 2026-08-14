@@ -14,7 +14,8 @@
 mod generator;
 
 use generator::{Case, Expect};
-use kasane_core::{anchor_slug_of, anchors_for_headings, est_tokens, structure, FileNode};
+use kasane_core::{est_tokens, structure, FileNode};
+use kasane_gfm::{anchor_slug_of, anchors_for_headings};
 use kasane_ir::{AssetBag, Block, BlockId, Inline, RefTarget};
 use proptest::prelude::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};

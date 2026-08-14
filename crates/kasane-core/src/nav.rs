@@ -3,8 +3,8 @@ use crate::paths::{assign_paths, Placed};
 use crate::refs::resolve_refs;
 use crate::section::fold_sections;
 use crate::sitetree::{FileNode, Frontmatter, SiteTree};
-use crate::slug::inline_text;
 use crate::Options;
+use kasane_gfm::inline_text;
 use kasane_ir::{Block, Document, Inline, RefTarget};
 
 pub fn structure(doc: Document, opts: &Options) -> SiteTree {

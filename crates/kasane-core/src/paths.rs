@@ -1,5 +1,5 @@
 use crate::section::{SectionNode, SectionTree};
-use crate::slug::{path_slug, AnchorCounter};
+use kasane_gfm::{path_slug, AnchorCounter};
 use kasane_ir::{Block, BlockId, Inline};
 use std::collections::HashMap;
 

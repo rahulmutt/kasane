@@ -431,7 +431,7 @@ mod tests {
     /// combining mark -- `हिन्दी`, for instance -- does NOT belong in this
     /// array: it would fail this test spuriously even though the engine's
     /// rule is correct for it (see `path_slug_is_a_filename_not_an_anchor`
-    /// in `kasane-core`'s `slug.rs` for that coverage instead).
+    /// in `kasane-gfm`'s `slug.rs` for that coverage instead).
     #[test]
     fn path_slugs_contain_nothing_that_breaks_a_bare_destination() {
         for title in [
@@ -442,7 +442,7 @@ mod tests {
             "a/b\\c",
             "v1.2 Final.",
         ] {
-            let slug = kasane_core::path_slug_of(&[Inline::Text(title.into())]);
+            let slug = kasane_gfm::path_slug_of(&[Inline::Text(title.into())]);
             for c in slug.chars() {
                 assert!(
                     c == '-' || (c.is_alphanumeric() || c == '_'),
@@ -488,7 +488,7 @@ mod tests {
             "می\u{200C}رود",
             "Ⓐ Notes",
         ] {
-            let anchor = kasane_core::anchors_for_headings(&[title.to_string()])
+            let anchor = kasane_gfm::anchors_for_headings(&[title.to_string()])
                 .pop()
                 .expect("one title in, one anchor out");
             for c in anchor.chars() {
