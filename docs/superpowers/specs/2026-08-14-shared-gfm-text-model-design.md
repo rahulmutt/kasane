@@ -257,26 +257,37 @@ more reason §6's external check is the real oracle.
 
 ### 5.2 The existing property covers both shapes
 
-The residuals spec's §5.2 property already renders a `Block::Heading` and
-asserts `anchor_slug_of(inlines)` equals the id computed from parsing the
-emitted line. Its `kind` enumeration gains two arms:
+The residuals spec's §5.2 property — P9 — already renders a `Block::Heading`
+and asserts `anchor_slug_of(inlines)` equals the id computed from parsing the
+emitted line. That comparison is the check this item turns on, and it gains two
+siblings built the same way:
 
-- an `Inline::FootnoteRef` between the two text runs, which covers **A** and the
-  newline run that cannot collapse across it in one shape
-- a title ending `Intro ###`, and one that is only `###`, which cover **B**
+- **P10**, an `Inline::FootnoteRef` between two text runs, drawn both with its
+  definition in the same file and without it, covering **A** and the newline run
+  that cannot collapse across a reference
+- **P11**, a heading ending in a `#` run, asserting first that the rendered line
+  still carries the run and then that the ids agree, covering **B**
 
-Extending that property rather than adding a parallel one is deliberate: it is
-the single place where the engine's prediction and the writer's output are
-compared through a real parser, and it is what replaces AGENTS.md's hand-kept
-mirror warning with a machine check.
+Siblings rather than arms of P9: its shape is a newline run split across an
+inline boundary, `[Text("a\n"), second("\nb")]`, and neither new case is a
+`second` — one is an opaque inline carrying no text, the other is a property of
+the line's tail. What matters is that all three make the same comparison, and
+that comparison is what replaces AGENTS.md's hand-kept mirror warning with a
+machine check.
 
 ### 5.3 Generator and the wider tier
 
-`generator/mod.rs` gains matching fragments so P1, P2 and P7 see headings
-carrying references and trailing `#` runs. `is_comment`'s doc comment says
-`HOSTILE` has 25 fragments; the count is corrected in the same change that makes
-it wrong again, since the claim it supports — that only `-->` triggers
-`comment_note`'s transformation — stays true and stays worth checking.
+`generator/mod.rs`'s `HOSTILE` gains one fragment, `"tail ###"`, so P1, P2 and
+P7 draw the closing-sequence shape into every block kind rather than only the
+heading P11 builds. `is_comment`'s doc comment says `HOSTILE` has 25 fragments;
+the count is corrected in the same change that makes it wrong again, since the
+claim it supports — that only `-->` triggers `comment_note`'s transformation —
+stays true of the new fragment and stays worth checking.
+
+The footnote shape is deliberately *not* added to the generator. Reaching it
+means giving the generator `Inline::FootnoteRef` decorations, which changes
+what P1's sentinel accounting has to model, and it would buy a shape P10
+already hits on every run.
 
 ### 5.4 Unit level
 
