@@ -544,7 +544,8 @@ the trailing-`#` case both fall to it, and both are currently documented as
 surviving on purpose. It was not chosen here because it touches `assign_paths`,
 which needs the anchor at structuring time and therefore before anything is
 rendered, and because an architecture change of that size would swallow A and
-B. It deserves its own item.
+B. It deserves its own item — that item is
+`2026-08-14-shared-gfm-text-model-design.md`, dated 2026-08-14.
 
 ## 8. Verification and risk
 

@@ -148,7 +148,7 @@ fn parse_events(md: &str) -> Parsed {
             // strips `[`, `^` and `]`, so both spellings contribute the same
             // digits to a heading's id. Modelling the reference here is what
             // lets this tier see a divergence it used to share: the parsed
-            // side skipped the reference exactly as `inline_text` did.
+            // side skipped the reference exactly as the title projection did.
             //
             // Heading text only. `p.text` feeds P1's sentinel accounting,
             // where a footnote label is not a payload.

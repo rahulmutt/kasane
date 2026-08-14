@@ -460,16 +460,21 @@ and disarms the whole run, which made the "changes the line-start rules for
 every context at once" characterization an artifact of the mechanism rather
 than of the defect.
 
-Two cases remain open, both narrower than what was closed:
+One case remains open, narrower than what was closed:
 
-- **A newline run split across an `Inline::FootnoteRef`.** The reference
-  renders as visible `[^1]` text that `inline_text` skips, so the fold cannot
-  collapse across it without dropping a space GitHub renders. Same root cause
-  as the `## Notes[^1]` divergence `kasane-core::slug` documents as surviving
-  on purpose; it needs §8's approach (iii), not a fold change.
 - **Whitespace inside the merged-table HTML fallback.** Not reachable by
   escaping: an HTML renderer collapses whitespace runs whether they arrived
   literally or as `&#32;`. One more cost of that path, alongside §3.3's.
+
+**A newline run split across an `Inline::FootnoteRef`** — closed, 2026-08-14,
+by the shared GFM text model item (`2026-08-14-shared-gfm-text-model-design.md`).
+Not by a fold change, which is what the bullet above predicted: `inline_text`
+(now `title_text`) still skips `Inline::FootnoteRef`, and the fold still
+cannot see across it. What closed the case is `rendered_text`, the projection
+that item introduced for the anchor's own input — it renders
+`Inline::FootnoteRef(n)` as `[^n]`, matching what the writer prints, so
+`## Notes[^1]` anchors `notes1` rather than `notes` and the residual this
+bullet named no longer exists.
 
 The emphasis fix in this section still has no property-tier coverage — see
 §6.4 for why the generator cannot reach it.
@@ -746,23 +751,25 @@ string needs a backslash in flow text, an HTML entity in a cell of a merged
 table, a percent-encoding in a destination, and a YAML escape in the
 frontmatter, so no single pre-pass can be correct for all four.
 
-**D. A shared crate for the anchor rule.** Not taken, here or — as approach
-(iii) — by the residuals item (2026-08-13), and recorded so the next anchor
-divergence finds the argument rather than re-deriving it.
+**D. A shared crate for the anchor rule.** Not taken here or — as approach
+(iii) — by the residuals item (2026-08-13); **taken 2026-08-14** by
+`2026-08-14-shared-gfm-text-model-design.md`, its own item as this section
+predicted. Recorded here so the next reader finds the argument rather than
+re-deriving it.
 
-`anchor_slug` predicts the rendered heading line from IR inlines, and
-`escape::one_line` produces that line — two hand-kept mirrors in crates that
-cannot depend on each other. Moving both onto a shared crate would end the
-mirror and close the whole divergence class at once, including the
-footnote-reference case (§4.5) and the trailing-`#` case, both of which are
-currently documented as surviving on purpose.
+`anchor_slug` predicted the rendered heading line from IR inlines, and
+`escape::one_line` produced that line — two hand-kept mirrors in crates that
+could not depend on each other. Moving both onto a shared crate, `kasane-gfm`,
+ended the mirror and closed the whole divergence class at once: the
+footnote-reference case (§4.5) and the trailing-`#` case, both formerly
+documented as surviving on purpose, are closed.
 
-It was not taken because `assign_paths` needs the anchor at structuring time,
-before anything is rendered, so the shared model has to be a *prediction* of
-the rendered line either way — the crate boundary moves, the prediction
-remains. That makes it an architecture change with a real ripple and a
-smaller payoff than it first appears, and it deserves its own item rather
-than riding along with a fix.
+It was not taken here because `assign_paths` needs the anchor at structuring
+time, before anything is rendered, so the shared model has to be a
+*prediction* of the rendered line either way — the crate boundary moves, the
+prediction remains. That is exactly what `kasane-gfm`'s `rendered_text` is:
+a prediction, computed at structuring time from IR inlines, of the line the
+writer will later print — not a read of the writer's actual output.
 
 ## 9. Verification and risk
 

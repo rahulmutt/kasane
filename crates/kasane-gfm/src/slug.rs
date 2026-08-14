@@ -25,7 +25,7 @@
 //!
 //! That third one is the one a future reader will want to "fix". Do not.
 //! kasane writes a file's heading line from the *unnormalized* title text
-//! (`nav::walk`'s `inline_text` → `Frontmatter::title` →
+//! (`nav::walk`'s `title_text` → `Frontmatter::title` →
 //! `file_to_markdown`), and no renderer — GitHub included — normalizes before
 //! computing a heading id. Folding NFC in here therefore produced a fragment
 //! that matched no heading kasane itself had emitted: a link broken against
@@ -47,23 +47,19 @@
 //! matched, codepoints included — and design spec §8.1 records the method and
 //! the cases. Re-run it when this table is next edited.
 //!
-//! # Known divergences that survive on purpose
+//! # The one known divergence that survives on purpose
 //!
-//! The anchor is computed from the IR's inline text, not from what a Markdown
-//! parser gets back out of the line the writer emits. Two cases follow from
-//! that and are documented rather than fixed: closing either means changing
-//! `inline_text`, whose other callers (`nav`, `refs`, `balance`) want exactly
-//! its current behaviour, and that ripple is not a pre-merge change.
+//! The anchor is computed from `rendered_text`, the projection of what the
+//! writer actually emits for a heading's line — not from the IR's inline text
+//! directly. That closed the two divergences this section used to document:
+//! a footnote reference now contributes its digits (`rendered_text` renders
+//! `Inline::FootnoteRef(n)` as `[^n]`, the way GitHub sees it), and a title
+//! ending in a run of `#` now anchors correctly once `kasane-writer`'s
+//! `escape::atx_closing` escapes that run before it ever reaches this rule,
+//! so the printed line still says `Intro ###` in full rather than the `Intro`
+//! a real parser would strip a bare closing sequence down to.
 //!
-//! - **Footnote references.** `inline_text` skips `Inline::FootnoteRef`, but
-//!   the writer renders it as `[^1]`. `## Notes[^1]` therefore anchors `notes`
-//!   here and `notes1` on GitHub.
-//! - **A title ending in a run of `#`.** `## Intro ###` re-parses as an ATX
-//!   heading with a *closing* sequence, so GitHub sees the text `Intro` and
-//!   computes `intro`; kasane slugs the IR text `Intro ###` and computes
-//!   `intro-`.
-//!
-//! One more divergence is by choice rather than by construction:
+//! One divergence is left, and it is by choice rather than by construction:
 //!
 //! - **The empty id.** A title with no character in the class at all gets
 //!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty
@@ -383,19 +379,19 @@ mod tests {
         assert_eq!(anchor_slug("  Intro  "), "intro");
         // An embedded newline is not itself in `\p{Word}`/`-`/space, but by
         // the time GitHub computes an id the renderer has already folded it
-        // to a literal space (`escape::one_line`), so the anchor must match
+        // to a literal space (`kasane_gfm::fold_newlines`), so the anchor must match
         // that rendered line -- one hyphen, not a silently dropped character.
         // NOT covered by the 2026-08-09 github.com parity check (design spec
         // §8.2): that run predates this fold.
         assert_eq!(anchor_slug("line\nbreak"), "line-break");
-        // `\r\n` is two bytes but ONE line ending. `escape::one_line` folds
+        // `\r\n` is two bytes but ONE line ending. `kasane_gfm::fold_newlines` folds
         // the pair to a single space before it ever considers a lone `\r` or
         // `\n`, so this must anchor identically to the lone-`\n` row above --
         // one hyphen, not two. Also not covered by the 2026-08-09 check.
         assert_eq!(anchor_slug("line\r\nbreak"), "line-break");
         // A blank line inside a heading's text is still ONE separator on the
         // rendered line: `escape::text` collapses the run so one paragraph
-        // stays one block, and `escape::one_line` folds what is left to a
+        // stays one block, and `kasane_gfm::fold_newlines` folds what is left to a
         // single space. Asserting two hyphens here (as this table did) was
         // asserting an anchor against a heading line kasane does not emit.
         // Not covered by the 2026-08-09 github.com parity check either.

@@ -13,7 +13,7 @@ repository = "https://github.com/rahulmutt/kasane"
 # Internal crates are declared once, with both a path (for local builds) and a
 # version (which is what cargo records in the published manifest). Declaring
 # them here rather than per-crate means a release bumps SIX lines total, not
-# five package versions plus every path dependency that names them: the
+# six package versions plus every path dependency that names them: the
 # workspace.package version above, plus each of the five entries below.
 # [workspace.dependencies] cannot inherit workspace.package.version, so those
 # five carry a literal. Bump all six together -- cargo will silently accept

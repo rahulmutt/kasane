@@ -474,7 +474,7 @@ This does not make the mirror self-maintaining: it is a measurement taken on
 one date against a service that can change. Re-run it when the table is next
 edited.
 
-### 8.2 Newline rows added 2026-08-10 — pending re-check
+### 8.2 Newline rows added 2026-08-10 — closed 2026-08-14, see §8.3
 
 The markdown-escaping branch (`2026-08-09-markdown-escaping`) added
 `anchor_slug`'s newline fold and, with it, two rows to the case table: a
@@ -486,6 +486,48 @@ it; this is a plain record of the gap, not a claim that it is closed.
 The two rows are pinned against the case table's own reading of the
 algorithm — the same reading `anchor_fold`'s newline handling was written to
 match — and against the mechanism (GitHub computes an id from the *rendered*
-line, which `kasane-writer`'s `escape::one_line` has already folded by then).
-They have not been checked against an actual github.com render. Re-run §8.1's
-method for these two cases specifically before treating them as verified.
+line, which `kasane_gfm::fold_newlines` has already folded by then — called
+directly by the writer now, not mirrored by a second copy of the fold). They
+were not checked against an actual github.com render until §8.3, below, which
+closes this gap.
+
+### 8.3 Parity re-check against github.com — performed 2026-08-14
+
+The shared-GFM-text-model branch (`2026-08-14-shared-gfm-text-model-design.md`)
+re-ran §8.1's method, both to close §8.2's gap and to check the two anchor
+divergences that branch closed in code (a footnote reference's digits, and a
+trailing `#` run once `kasane-writer::escape::atx_closing` escapes it). Since
+Task 2 of that item, `anchor_slug` takes the *printed* line rather than raw IR
+text, so `anchor_fold` has already turned both the `\n` and `\r\n` spellings
+of §8.2's two rows into the one rendered line `line break` before either
+kasane or GitHub ever sees them — there is one line to check, not two, and
+checking it once checks both spellings by construction.
+
+**Method.** A file of 14 `##` headings, one footnote definition, and nothing
+else (§8.1's eight rows expanded to nine headings for the duplicate-`Notes`
+case, §8.2's two newline rows collapsed into the one printed-line heading
+`line break`, and four new cases: `Notes[^1]` resolved, `Notes[^2]`
+unresolved, `Intro ###` and `###` both written through `escape::atx_closing`)
+was committed to a throwaway branch, pushed, rendered by github.com, and its
+heading ids read positionally off the rendered anchors. The same 14 heading
+texts were run through `kasane_gfm::anchors_for_headings` and the two lists
+diffed mechanically, codepoint by codepoint.
+
+**Result: 13 of 14 ids identical, including codepoints** (notably the NFD
+`café` row carried over from §8.1, which stays NFD on both sides, and the ZWNJ
+`می‌رود` row). The newline row and the two closed divergences:
+
+| Heading | github.com id | Pins |
+|---|---|---|
+| `## line break` (§8.2's `\n` and `\r\n` rows, folded to one printed line) | `line-break` | both newline spellings fold to the same one separator, confirmed against a real render for the first time |
+| `## Notes[^1]` (resolved reference) | `notes1` | `rendered_text` renders the reference as `[^1]`; GitHub's id filter strips `[`, `^`, `]` |
+| `## Notes[^2]` (unresolved reference) | `notes2` | same digits contributed regardless of resolution |
+| `## Intro \###` (written escaped, as `atx_closing` emits it) | `intro-` | the escaped run survives into the rendered line, so GitHub reads `Intro ###` in full |
+
+The one divergence is `## \###` (rendered line `###`): GitHub assigns it no id
+at all; kasane assigns `EMPTY_FALLBACK = "section"`. This is the pre-existing,
+intentional divergence recorded in §3.3 and in `slug.rs`'s module doc — not a
+new one, and not one this item introduced.
+
+No corrections to this crate's reading of GitHub's algorithm were needed.
+Re-run this method again when the case table next changes, per §8.1.

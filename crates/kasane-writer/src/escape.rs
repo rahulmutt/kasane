@@ -315,22 +315,22 @@ pub(crate) fn atx_closing(escaped: &str) -> String {
 /// contexts (§4).
 ///
 /// `normalize_newlines` already collapses a run inside one `Inline::Text`, and
-/// `one_line` collapses one inside a single rendered string — but neither can
-/// see two runs that meet across a boundary, because each inline is rendered
-/// independently and `code_span` folds its own content to a space before the
-/// outer `one_line` ever runs. `anchor_fold` computes over the concatenated
-/// `inline_text`, where the two runs *are* adjacent, so it predicts one
-/// separator where the renderer emitted two, and the cross-reference it
-/// embeds is dead.
+/// `kasane_gfm::fold_newlines` collapses one inside a single rendered string
+/// — but neither can see two runs that meet across a boundary, because each
+/// inline is rendered independently and `code_span` folds its own content to
+/// a space before the outer fold ever runs. `anchor_fold` computes over the
+/// concatenated `rendered_text`, where the two runs *are* adjacent, so it
+/// predicts one separator where the renderer emitted two, and the
+/// cross-reference it embeds is dead.
 ///
-/// The fix lands here rather than in `kasane-core`'s mirror on purpose: the
-/// two folds are kept in step by hand (see `one_line`, and AGENTS.md), and
-/// teaching the anchor side about inline boundaries would add `code_span`'s
-/// padding rules to what that hand-kept correspondence has to track.
+/// The fix lands here rather than in `kasane-gfm`'s fold on purpose: the
+/// writer already has the inline-boundary information for free as it walks
+/// the tree, where teaching the anchor side about it would mean handing
+/// `code_span`'s padding rules to a function that only ever sees `&[Inline]`.
 ///
-/// `Inline::FootnoteRef` is opaque: it renders as visible `[^1]` text, so a
-/// run must not collapse across it. The residual that leaves is the
-/// footnote-reference divergence `kasane-core::slug` already documents (§4.1).
+/// `Inline::FootnoteRef` is opaque here and that is correct — the reference is
+/// visible text between two real separators, and `rendered_text` now agrees
+/// with the fold about that.
 pub(crate) fn fold_inline_newlines(inls: &[Inline]) -> Vec<Inline> {
     let mut pending = false;
     fold_seq(inls, 0, &mut pending)
@@ -373,17 +373,18 @@ fn fold_seq(inls: &[Inline], depth: usize, pending: &mut bool) -> Vec<Inline> {
 
 /// Fold one leaf's content, carrying `pending` in and out so a run that ends
 /// this leaf and begins the next collapses to a single `\n` — which
-/// `one_line` then turns into the one space `anchor_fold` predicted.
+/// `kasane_gfm::fold_newlines` then turns into the one space `anchor_fold`
+/// predicted.
 ///
 /// A third newline-run collapse loop, deliberately not unified with its two
 /// siblings: `normalize_newlines` collapses a run *within* one string before
-/// any escaping happens, `one_line` collapses one within a single already-
-/// rendered string, and this one collapses one *across* an inline boundary,
-/// carrying state between calls via `pending` rather than being a pure
-/// function of one string. That statefulness is exactly what the other two
-/// cannot express and do not need — merging this into either would give a
-/// context-free loop a cross-call side channel, reintroducing the hazard
-/// `fold_inline_newlines` exists to fix in the first place.
+/// any escaping happens, `kasane_gfm::fold_newlines` collapses one within a
+/// single already-rendered string, and this one collapses one *across* an
+/// inline boundary, carrying state between calls via `pending` rather than
+/// being a pure function of one string. That statefulness is exactly what
+/// the other two cannot express and do not need — merging this into either
+/// would give a context-free loop a cross-call side channel, reintroducing
+/// the hazard `fold_inline_newlines` exists to fix in the first place.
 fn fold_leaf(s: &str, pending: &mut bool) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -604,9 +605,9 @@ pub(crate) fn dest_url(s: &str) -> String {
 /// something other than a string. The cost is two bytes per line.
 ///
 /// A double-quoted scalar cannot carry a raw control character (§4.1), so each
-/// one folds to a space — the same treatment `one_line` already gives a
-/// newline, and for the same reason: folding, not dropping, is what keeps two
-/// words from silently fusing into one.
+/// one folds to a space — the same treatment `kasane_gfm::fold_newlines`
+/// already gives a newline, and for the same reason: folding, not dropping,
+/// is what keeps two words from silently fusing into one.
 pub(crate) fn yaml_scalar(s: &str) -> String {
     let flat = kasane_gfm::fold_newlines(s);
     let mut out = String::with_capacity(flat.len() + 2);
@@ -863,9 +864,10 @@ mod tests {
 
     #[test]
     fn code_span_folds_a_newline_run_the_same_way_a_heading_does() {
-        // `inline_text` feeds `Inline::Code`'s text to `anchor_slug` like any
-        // other text, so a code span in a heading has to fold newlines the way
-        // `anchor_fold` does or the emitted fragment misses by a hyphen. P2
+        // `rendered_text` feeds `Inline::Code`'s text into the line `anchor_slug`
+        // slugs like any other text, so a code span in a heading has to fold
+        // newlines the way `anchor_fold` does or the emitted fragment misses
+        // by a hyphen. P2
         // found this the first time the generator drew a newline run.
         assert_eq!(code_span("a\n\nb", Ctx::Flow), "`a b`");
     }
@@ -1182,12 +1184,13 @@ mod tests {
     }
 
     /// The residual §4 exists for. `normalize_newlines` collapses a run inside
-    /// one `Inline::Text` and `one_line` collapses one inside a single
-    /// rendered string, but neither sees two runs meeting across a boundary:
-    /// each inline renders independently, and `code_span` folds its own
-    /// content to a space before the outer `one_line` ever runs. `anchor_fold`
-    /// computes over the concatenated `inline_text`, where the two runs *are*
-    /// adjacent, so it predicted one separator and the renderer emitted two.
+    /// one `Inline::Text` and `kasane_gfm::fold_newlines` collapses one inside
+    /// a single rendered string, but neither sees two runs meeting across a
+    /// boundary: each inline renders independently, and `code_span` folds its
+    /// own content to a space before the outer fold ever runs. `anchor_fold`
+    /// computes over the concatenated `rendered_text`, where the two runs
+    /// *are* adjacent, so it predicted one separator and the renderer emitted
+    /// two.
     #[test]
     fn a_newline_run_collapses_across_an_inline_boundary() {
         let got = fold_inline_newlines(&[Inline::Text("A\r".into()), Inline::Code("\nB".into())]);
@@ -1216,7 +1219,8 @@ mod tests {
 
     /// `Inline::FootnoteRef` renders as visible `[^1]` text, so a run must not
     /// collapse across it — doing so would drop a space GitHub really renders.
-    /// The residual that leaves open is the already-documented one (§4.1).
+    /// This is not a residual any more: `rendered_text` renders the reference
+    /// the same way, so the anchor and the fold agree about it.
     #[test]
     fn a_footnote_reference_is_opaque_to_the_fold() {
         use kasane_ir::NoteId;
@@ -1238,9 +1242,9 @@ mod tests {
 
     /// §4.2, and the half of it that is easy to get backwards. The fold
     /// collapses *runs* and normalizes `\r`; it never turns a newline into a
-    /// space, because that is `one_line`, which runs long after `math_span`
-    /// has picked its delimiter. So a lone newline inside one leaf survives
-    /// and math still degrades to a code span — only the cross-boundary
+    /// space, because that is `kasane_gfm::fold_newlines`, which runs long
+    /// after `math_span` has picked its delimiter. So a lone newline inside
+    /// one leaf survives and math still degrades to a code span — only the cross-boundary
     /// duplicate is dropped.
     #[test]
     fn a_lone_newline_inside_one_leaf_survives_the_fold() {

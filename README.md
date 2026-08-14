@@ -86,7 +86,7 @@ which is now a deliberate mirror of GitHub's — the generator draws non-Latin
 and punctuation-bearing titles, so the invariant exercises that rule rather
 than an ASCII subset of it. What it still cannot say is whether github.com
 computes the same anchor: nothing in CI can ask it. The mirror is written down
-as a case table in `crates/kasane-core/src/slug.rs`. Deep list/footnote
+as a case table in `crates/kasane-gfm/src/slug.rs`. Deep list/footnote
 nesting remains under Known limitations.
 
 When a property fails it writes `crates/kasane-writer/tests/properties.proptest-regressions`.
@@ -143,34 +143,35 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Heading anchors match GitHub's rule, with three exceptions. Anchors are
+- Heading anchors match GitHub's rule, with one exception. Anchors are
   computed the way GitHub computes them — Unicode-aware, punctuation removed
   rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
   `#第二章`, both of which resolve on GitHub. The rule was checked against a
-  real GitHub render on 2026-08-09 and every case matched; it is still a
-  mirror, so it can drift if GitHub's changes. Note that exact parity means
-  some anchors look wrong and are not. `## Background & Notes` anchors as
-  `#background--notes`, because GFM removes the `&` and turns each surviving
-  space into a hyphen. And the character set is Ruby's `\p{Word}`, the set
-  GitHub's own filter keeps: alphabetic characters, combining marks, decimal
-  digits, `_`, and the zero-width joiner and non-joiner. "Alphabetic" is
-  Unicode's property of that name, so it is wider than "a letter" — Roman
+  real GitHub render on 2026-08-14: 13 of 14 ids came back identical,
+  codepoints included, the one divergence being the empty-id case below; it
+  is still a mirror, so it can drift if GitHub's changes. Note that exact
+  parity means some anchors look wrong and are not. `## Background & Notes`
+  anchors as `#background--notes`, because GFM removes the `&` and turns each
+  surviving space into a hyphen. And the character set is Ruby's `\p{Word}`,
+  the set GitHub's own filter keeps: alphabetic characters, combining marks,
+  decimal digits, `_`, and the zero-width joiner and non-joiner. "Alphabetic"
+  is Unicode's property of that name, so it is wider than "a letter" — Roman
   numerals like `Ⅷ` and circled letters like `Ⓐ` are in — and narrower than
   "looks like one": parenthesized letters like `⒜` are out, as are all
   non-decimal numerals, so `## Fig ½` anchors as `#fig-` and `## ①はじめに`
-  as `#はじめに`. The three exceptions:
+  as `#はじめに`. The one exception:
   - A heading with none of those characters at all (`## ***`, `## —`, `## ½`)
     gets an empty id from GitHub; kasane emits `#section`, because an empty
     anchor is a dead link. A heading that is *only* a zero-width non-joiner is
     not this case — it anchors to that invisible character, exactly as GitHub
     does.
-  - A heading ending in a footnote reference, `## Notes[^1]`, anchors
-    `#notes` here and `#notes1` on GitHub: kasane slugs the heading's text
-    without the rendered `[^1]` marker.
-  - A heading whose title ends in a run of `#`, rendered `## Intro ###`,
-    anchors `#intro-` here and `#intro` on GitHub, which reads that run as an
-    ATX closing sequence.
+
+  Two anchors that used to diverge no longer do, which matters for a tree an
+  older build produced: a heading carrying a footnote reference now anchors
+  the way GitHub ids it (`#notes1`, not `#notes`), and a heading ending in a
+  `#` run now renders the run, which is what makes its existing anchor
+  correct.
 
   Filenames carry the title in any script, capped at 64 bytes of title per
   component; they drop the zero-width joiners an anchor keeps, since a

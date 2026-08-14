@@ -3,6 +3,24 @@
 Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> Markdown tree.
 
 - `crates/kasane-ir`      Intermediate representation types. Depends on nothing.
+- `crates/kasane-gfm`     Leaf crate depending on `kasane-ir` alone: what GFM does to a
+  heading's text, and the two slug rules that follow from it (design spec
+  `2026-08-14-shared-gfm-text-model-design.md` §1-§2). Owns `fold_newlines` — the
+  newline-run fold `kasane-core` and `kasane-writer` used to keep in step by
+  hand as two separate functions in two crates that could not depend on each
+  other — the two heading-text projections (`title_text`, which keeps
+  `nav::walk`'s existing skip of `Inline::FootnoteRef`, feeding `nav`/`refs`/
+  `balance`/a file's title; and `rendered_text`, the same walk except a
+  `FootnoteRef(n)` contributes `[^n]`, matching what the writer actually
+  prints), and both slug rules, `anchor_slug`/`path_slug`, over the shared
+  `is_word` character class. `kasane-core` depends on it for `paths`/`nav`/
+  `refs`/`balance` and does not re-export the slug seams; `kasane-writer`
+  depends on it directly for the fold. Of the three anchor divergences
+  `slug.rs`'s module doc used to record as surviving on purpose, two are now
+  closed — a footnote reference's digits via `rendered_text`, a trailing `#`
+  run via `kasane-writer::escape::atx_closing` escaping it before GitHub ever
+  sees it — leaving only the empty-id fallback (`EMPTY_FALLBACK`), a
+  deliberate choice rather than a construction defect.
 - `crates/kasane-adapters` Format detection + parsers (EPUB, PPTX, MOBI/AZW3, PDF, DjVu). Untrusted-input boundary; see `guard.rs` and `ziputil.rs` (every guarded zip read goes through it). The MOBI/AZW3 adapter (`mobi/`) normalizes HTML via html5ever and reuses the EPUB XHTML parser; fixtures are hand-built by `tests/fixtures/{mobi,azw3}/make_*.py`. The PDF adapter (`pdf/`) builds on `lopdf`: `content.rs` interprets content-stream text operators into positioned runs, `layout.rs` groups them into lines/paragraphs and infers headings by font size, `outline.rs` maps the `/Outlines` TOC to per-page headings behind a pre-flight over both graphs `get_toc` reads — the outline graph and the destination name tree (`catalog/Dests`, or `catalog/Names` then `Dests`). `outline_is_traversable` and `named_destinations_are_traversable` share one bounded-walk helper, `is_bounded_and_acyclic` (visited-set on `ObjectId`, plus depth and node caps), and each supplies its own per-node contents check. Topology is bounded because `lopdf`'s own walk follows the outline's `/First` recursively, `/Next` iteratively, and the destination tree's `/Kids`, all unbounded, so a cyclic or oversized graph would abort the process or hang. Contents are checked because `lopdf` then indexes and `unwrap`s those nodes unvalidated: an outline destination array shorter than two elements (`outlines.rs:100-101`), a name-tree entry with no `/D`, a short `/D`, or a non-string key (`destinations.rs:56-66`) each panic. Both checks mirror `lopdf` exactly, down to `/A`'s `/D` shadowing `/Dest` and the error paths `lopdf` takes before it indexes anything — validating more than `lopdf` touches would drop legitimate outlines. A rejected graph degrades to font-size inference; `outline_dup::title_line_mask` (crate root, shared with the DjVu adapter) then drops the page lines that merely reprint a spliced outline title, since an outline also suppresses size inference and the printed title would otherwise land in the body under its own heading — the line is a paragraph of its own or fused into the next depending on the page's leading, which is why the filter runs on lines rather than blocks. `has_text` is therefore read off the *unfiltered* lines: a chapter-opener page whose only line is its own title must not become a scanned page once that line goes. `get_toc` itself is additionally wrapped in `catch_unwind` as production-only defence in depth (it cannot help the fuzzer, whose panic hook aborts before unwinding), `image.rs` extracts embedded images; fixtures are hand-built by `tests/fixtures/pdf/make_pdf_fixtures.py`. The DjVu adapter (`djvu/`) builds on `djvu-rs`: `doc.rs` is the sole seam over the crate (container, hidden text layer, NAVM outline) with panic/bomb guards; `text.rs` turns the text-layer zone hierarchy into reading-order lines (multi-column safe, since it follows the zone tree's own order) and infers headings by line height when no outline is present; `outline.rs` maps NAVM bookmarks to per-page headings, deduplicated against the page's own text by the shared `outline_dup` filter described under the PDF adapter; DjVu's half of that filter also forwards a dropped line's `para_start` to the next kept line, or the text after the title merges into the paragraph before it. `image.rs` renders text-less pages to a page image — the JB2 mask as a 1-bit PNG, falling back to a full IW44 render — bounded by a decoded-pixel budget in `doc.rs` (`MAX_RENDER_PIXELS`); text-bearing pages remain text-only. The committed fixtures `tests/fixtures/djvu/{sample,scanned}.djvu` are generated by a committed pure-Rust generator, `cargo run -p kasane-adapters --example make_djvu_fixture` (not DjVuLibre, which is unavailable in this environment); see `tests/fixtures/djvu/README.md`. The OCR seam (`ocr/`) sits behind the PDF and DjVu adapters: the `TextExtractor` trait and its data types (`OcrLine`, `OcrOptions`) compile on every build, while `TesseractExtractor` (`tesseract.rs`) is gated behind the opt-in `-F ocr` feature and is the sole C dependency (Tesseract + Leptonica). `Adapter::parse` is the no-OCR convenience; `parse_with(.., &ParseOptions)` carries the optional extractor. Text-less pages are OCR'd text-first with the page image as a fallback; PDF OCR covers only decodable-raster pages (CCITT/JBIG2/JPX are not decoded). Build/lint the feature with `mise run test-ocr` / `mise run lint-ocr`. The math seam (`math/`) converts MathML (EPUB) and OMML (PPTX) equations to LaTeX behind two front-ends (`mathml.rs`, `omml.rs`) over a shared `MathNode` model (`ast.rs`) and one emitter (`latex.rs` with symbol lookups delegated to `symbols.rs`); adapters isolate a math island from their streaming parse via `capture_island` and parse it with `roxmltree`. Islands are re-parsed under a synthetic root binding the MathML default namespace, the `mml:` prefix, and the OMML `m:` prefix, with front-ends matching by local name; both prefixed and default-namespaced islands thus work. Islands are untrusted: `capture_island` bounds captured bytes and raw element nesting *while streaming* (roxmltree recurses per element level and has no nesting guard, so an over-deep island would abort the process on a stack overflow) and returns `Result<String, CaptureError>`; on any abnormal outcome it rewinds the reader to just past the island's start tag, so the markup it spanned is re-read as ordinary content instead of vanishing, and both adapters pair the degraded equation with a `Block::Raw` note naming the reason. Every other guard degrades to `\mathord{?}` placeholders rather than panicking. `Inline::Math`/`Block::MathBlock` are the only IR touchpoints.
   `fuzz_entry.rs` is a test seam, not API: one `fn(&[u8])` per fuzz target,
   living inside this crate so it can reach `pub(crate)` internals
@@ -11,11 +29,12 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   Each function either returns or panics — a
   panic is the finding. `tests/fuzz_corpus.rs` replays `fuzz/seeds/**` and
   `fuzz/artifacts/**` through those same functions on stable, so fuzz coverage
-  reaches PR CI without a nightly toolchain. `kasane-core` has its own
+  reaches PR CI without a nightly toolchain. `kasane-gfm` has its own
   `fuzz_entry.rs` for the same reason, reaching `slug::path_slug` and
   `slug::anchor_slug`; the stable replay for both lives in
-  `kasane-adapters/tests/fuzz_corpus.rs`, which takes `kasane-core` as a
-  dev-dependency so one harness covers every target.
+  `kasane-adapters/tests/fuzz_corpus.rs`, which takes both `kasane-core` (for
+  this crate's own end-to-end pipeline test) and `kasane-gfm` (for the `slug`
+  seam) as dev-dependencies, so one harness covers every target.
 - `crates/kasane-core`    Pure structuring engine: fold -> balance -> paths -> refs -> nav. No I/O.
   `balance`'s SPLIT fires on any node whose own body is over `max_tokens`, not
   only on leaves: a container's body is the run of blocks between its heading
@@ -53,29 +72,18 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   the path alphabet staying closed. They also diverge on normalization, and
   that one is load-bearing: `path_slug` NFC-folds and **`anchor_slug` must
   not**, because `nav::walk` sets a file's title from unnormalized
-  `inline_text` and `file_to_markdown` writes it verbatim as the heading line,
+  `title_text` and `file_to_markdown` writes it verbatim as the heading line,
   so an NFC fragment against an NFD heading is a link kasane breaks against
-  its own output. They diverge one further way, added alongside
-  `kasane-writer`'s escaping policy: `anchor_slug` now folds every newline
-  spelling in the heading's inline text to a single space before slugging —
-  any run of newline characters, in any spelling, to exactly one separator,
-  tabs left alone, literal spaces left uncollapsed — mirroring
-  `kasane-writer::escape::one_line` exactly,
-  because GitHub computes an id from the *rendered* heading line, where the
-  writer has already applied that fold. `escape::one_line` collapsing runs is
-  what lets the writer have ONE such fold: `Block::Heading` escapes then folds,
-  `file_to_markdown`'s title heading folds then escapes, and `escape::code_span`
-  folds unescaped content, so without the collapse the three disagreed on a
-  blank line (`## A B` against `# A  B`) and the emitted anchor was right for
-  one path and dead for the others.
-  `path_slug` does not fold newlines and
-  is unchanged. The two folds live in different crates with no shared
-  function between them (`kasane-core` cannot depend on `kasane-writer`), so
-  they must be kept in step by hand — a future change to one fold that is not
-  mirrored in the other reopens exactly the anchor mismatch this pairing
-  closed. Being a mirror, the anchor rule carries drift risk against
+  its own output. The fold and both slug rules live in `kasane-gfm` (above);
+  a heading's anchor is computed from the text its line actually prints —
+  `rendered_text` for a body heading, the printed title for a file's title
+  heading — and P9/P10/P11 in `kasane-writer/tests/properties.rs` are what
+  check the writer against that claim, by parsing its own rendered output.
+  Being a mirror, the anchor rule carries drift risk against
   github.com, and the case table in `slug.rs`'s tests is where that mirror is
-  written down, divergences included — but that table pins kasane's *reading*
+  written down — the one divergence it still records as surviving on purpose
+  is the empty-id fallback, since `rendered_text` and `escape::atx_closing`
+  closed the other two — but that table pins kasane's *reading*
   of the algorithm, not the algorithm, so it cannot catch a misreading. The
   external check that can is recorded in design spec §8.1 (run 2026-08-09,
   13/13 ids matching a real render); re-run it when the table changes. Duplicate anchors are suffixed per file
@@ -95,10 +103,25 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   becomes `&#32;`/`&#9;`, not a backslash: the backslash form suppresses the
   construct only by losing the whitespace, and it cannot reach the
   four-spaces-is-an-indented-code-block case at all.
+  Every one-line context — `Block::Heading`, the title heading, `code_span`,
+  `label`, `yaml_scalar` — folds newlines through `kasane_gfm::fold_newlines`,
+  the one function both `kasane-core` and `kasane-writer` call, replacing what
+  used to be two hand-kept copies of the same fold in two crates that could
+  not depend on each other.
+  `escape::atx_closing` is the other writer-side fix the shared model needed:
+  a heading whose printed line ends in a run of `#` re-parses as an ATX
+  heading with a *closing* sequence, so a real parser (and GitHub) reads less
+  text than the IR holds. `Block::Heading` and `file_to_markdown` both apply it
+  last, after escaping, so the run survives into the rendered line as `\###`
+  and `kasane-gfm`'s anchor is computed from that same printed line rather
+  than from IR text a parser would trim. It is a writer fix rather than an
+  anchor-rule fix on purpose: teaching `anchor_slug` about closing sequences
+  would buy parity by agreeing that the rendered heading may drop text the
+  document had, conceding the escaping invariant (§5) rather than upholding it.
   `fold_inline_newlines` collapses a newline run spanning an inline boundary
   before the one-line contexts render, which is what keeps the rendered
-  heading line matching `kasane-core`'s `anchor_fold` without widening the
-  hand-kept mirror described below. Its recursion's depth guard returns an
+  heading line matching `kasane-gfm`'s `anchor_fold` without widening what
+  `fold_newlines` has to track. Its recursion's depth guard returns an
   empty `Vec` at the bound rather than cloning the remainder: `Inline`'s
   derived `Clone` is itself recursive, so cloning would only relabel the
   recursion the guard exists to stop — a hand-built tree 10,000 deep aborted

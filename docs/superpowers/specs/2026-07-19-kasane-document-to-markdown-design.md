@@ -199,6 +199,7 @@ kasane/
   Cargo.toml            # workspace
   crates/
     kasane-ir/          # IR types (no deps on adapters)
+    kasane-gfm/         # shared GFM text model: newline fold, projections, slug rules
     kasane-adapters/    # six adapters + detection + TextExtractor
     kasane-core/        # structuring engine (pure)
     kasane-writer/      # markdown tree writer
@@ -215,4 +216,13 @@ kasane/
 
 ## 11. Crate dependency direction
 
-`kasane-ir` depends on nothing internal. `kasane-adapters`, `kasane-core`, `kasane-writer` all depend on `kasane-ir` and nothing on each other (except writer/core sharing IR types). `kasane-cli` wires them together. This enforces the hexagonal boundaries at the compiler level: the domain core cannot reach into an adapter.
+`kasane-ir` depends on nothing internal. The claim that `kasane-core` and
+`kasane-writer` depend on `kasane-ir` "and nothing on each other" has been
+untrue since the writer began taking `FileNode` and `SiteTree` from the core
+— corrected here rather than left for a reader to trip over. The real graph,
+as of `kasane-gfm` (`2026-08-14-shared-gfm-text-model-design.md`), is a
+straight line: `kasane-ir` ← `kasane-gfm` ← `kasane-core` ← `kasane-writer` ←
+`kasane-cli`, with `kasane-adapters` depending on `kasane-ir` alone and
+sitting outside that line entirely. The point this section exists to make
+still holds: the domain core cannot reach into an adapter, in either shape of
+the graph.
