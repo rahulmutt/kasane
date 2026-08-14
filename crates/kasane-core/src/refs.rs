@@ -113,7 +113,7 @@ trait ReplaceWithText {
 }
 impl ReplaceWithText for Inline {
     fn replace_with_text(self, inlines: Vec<Inline>) -> Inline {
-        Inline::Text(kasane_gfm::inline_text(&inlines))
+        Inline::Text(kasane_gfm::title_text(&inlines))
     }
 }
 

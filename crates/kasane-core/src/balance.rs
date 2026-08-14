@@ -248,7 +248,7 @@ mod tests {
             .root
             .children
             .iter()
-            .map(|c| kasane_gfm::inline_text(&c.title))
+            .map(|c| kasane_gfm::title_text(&c.title))
             .collect();
         // Parts precede the real chapter: pre-order flattening is reading order.
         assert_eq!(titles, vec!["Part 1", "Part 2", "Real Chapter"]);

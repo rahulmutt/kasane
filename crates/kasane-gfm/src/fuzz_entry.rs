@@ -1,4 +1,4 @@
-//! Fuzz seams for `kasane-core`.
+//! Fuzz seams for `kasane-gfm`.
 //!
 //! A test seam, not API — the same convention and the same rationale as
 //! `kasane-adapters`'s module of this name: it lives inside the crate so it
@@ -11,6 +11,7 @@
 //! every libFuzzer wrapper identical.
 
 use crate::slug::{anchor_slug, path_slug, MAX_PATH_SLUG_BYTES};
+use crate::text::rendered_text;
 use kasane_ir::Inline;
 
 /// `path_slug`'s postconditions, which are security-critical because this is
@@ -55,7 +56,7 @@ pub fn slug(data: &[u8]) {
     );
 
     // Anchors are uncapped by design, but an empty one is a dead link.
-    let anchor = anchor_slug(&inlines);
+    let anchor = anchor_slug(&rendered_text(&inlines));
     assert!(
         !anchor.is_empty(),
         "anchor_slug emitted an empty anchor from {text:?}"

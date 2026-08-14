@@ -12,7 +12,9 @@
 #[doc(hidden)]
 pub mod fuzz_entry;
 mod slug;
+mod text;
 
 pub use slug::{
-    anchor_slug_of, anchors_for_headings, inline_text, path_slug, path_slug_of, AnchorCounter,
+    anchor_slug, anchor_slug_of, anchors_for_headings, path_slug, path_slug_of, AnchorCounter,
 };
+pub use text::{fold_newlines, rendered_text, title_text};
