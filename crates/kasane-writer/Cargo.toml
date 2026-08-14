@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 kasane-ir.workspace = true
 kasane-core.workspace = true
+kasane-gfm.workspace = true
 anyhow = "1"
 
 [dev-dependencies]

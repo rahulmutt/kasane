@@ -21,11 +21,11 @@
 //! 3. **NFC.** `path_slug` normalizes; `anchor_slug` deliberately does not.
 //! 4. **Newline folding.** `anchor_slug` first folds every newline spelling in
 //!    the inline text to a single space, collapsing runs; `path_slug` does
-//!    not. See [`fold_newlines`] for why.
+//!    not. See [`crate::text::fold_newlines`] for why.
 //!
 //! That third one is the one a future reader will want to "fix". Do not.
 //! kasane writes a file's heading line from the *unnormalized* title text
-//! (`nav::walk`'s `inline_text` → `Frontmatter::title` →
+//! (`nav::walk`'s `title_text` → `Frontmatter::title` →
 //! `file_to_markdown`), and no renderer — GitHub included — normalizes before
 //! computing a heading id. Folding NFC in here therefore produced a fragment
 //! that matched no heading kasane itself had emitted: a link broken against
@@ -47,28 +47,42 @@
 //! matched, codepoints included — and design spec §8.1 records the method and
 //! the cases. Re-run it when this table is next edited.
 //!
-//! # Known divergences that survive on purpose
+//! # The two known divergences that survive on purpose
 //!
-//! The anchor is computed from the IR's inline text, not from what a Markdown
-//! parser gets back out of the line the writer emits. Two cases follow from
-//! that and are documented rather than fixed: closing either means changing
-//! `inline_text`, whose other callers (`nav`, `refs`, `balance`) want exactly
-//! its current behaviour, and that ripple is not a pre-merge change.
+//! The anchor is computed from `rendered_text`, the projection of what the
+//! writer actually emits for a heading's line — not from the IR's inline text
+//! directly. That closed the two divergences this section used to document:
+//! a footnote reference now contributes its digits (`rendered_text` renders
+//! `Inline::FootnoteRef(n)` as `[^n]`, the way GitHub sees it), and a title
+//! ending in a run of `#` now anchors correctly once `kasane-writer`'s
+//! `escape::atx_closing` escapes that run before it ever reaches this rule,
+//! so the printed line still says `Intro ###` in full rather than the `Intro`
+//! a real parser would strip a bare closing sequence down to.
 //!
-//! - **Footnote references.** `inline_text` skips `Inline::FootnoteRef`, but
-//!   the writer renders it as `[^1]`. `## Notes[^1]` therefore anchors `notes`
-//!   here and `notes1` on GitHub.
-//! - **A title ending in a run of `#`.** `## Intro ###` re-parses as an ATX
-//!   heading with a *closing* sequence, so GitHub sees the text `Intro` and
-//!   computes `intro`; kasane slugs the IR text `Intro ###` and computes
-//!   `intro-`.
-//!
-//! One more divergence is by choice rather than by construction:
+//! Two divergences are left:
 //!
 //! - **The empty id.** A title with no character in the class at all gets
 //!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty
-//!   fragment is a dead link.
+//!   fragment is a dead link. This one is a choice rather than a construction
+//!   defect: kasane could match GitHub exactly by emitting no id, and
+//!   deliberately doesn't.
+//! - **An empty inline code span inside a heading.** Given
+//!   `[Inline::Text("a"), Inline::Code(""), Inline::Text("b")]` in a
+//!   `Block::Heading`, `kasane-writer::escape::code_span` renders the empty
+//!   span as `` ` ` `` — a single padding space, CommonMark's only way to
+//!   express an empty code span — so the printed line is `` a` `b `` and a
+//!   real parser reads its text as `a b`, with GitHub computing the id
+//!   `a-b`. `rendered_text` does not model that padding space (it takes an
+//!   `Inline::Code`'s content verbatim), so this rule computes `ab` and
+//!   `anchor_slug` embeds `ab` — a dead cross-reference against GitHub's
+//!   own render. This is a real construction defect, not a choice, and it
+//!   pre-dates this crate: the old `inline_text` produced the same `ab`.
+//!   It is documented rather than fixed here because the only fix is a
+//!   change to `code_span`'s output, which has its own callers and its own
+//!   fuzz postconditions and belongs to its own item, not this one. See
+//!   `escape::code_span`'s Rule 1 comment for the writer side.
 
+use crate::text::{fold_newlines, rendered_text, title_text};
 use kasane_ir::Inline;
 use unicode_normalization::UnicodeNormalization;
 use unicode_properties::{GeneralCategory, GeneralCategoryGroup, UnicodeGeneralCategory};
@@ -139,65 +153,10 @@ fn is_join_control(c: char) -> bool {
     matches!(c, '\u{200C}' | '\u{200D}')
 }
 
-/// Mirrors `escape::one_line` in `kasane-writer`: fold every newline
-/// spelling in a heading's text to a single space, the same fold the renderer
-/// applies before GitHub ever computes an id from the rendered line.
-///
-/// `kasane-core` must not depend on `kasane-writer` (the dependency runs the
-/// other way), so this is a deliberate duplicate of `escape::one_line`,
-/// not a shared call — the two must be kept in step by hand, and a change to
-/// either's newline handling needs the identical change made to the other.
-///
-/// **Runs collapse.** Any run of newline characters, in any spelling, becomes
-/// exactly one separator: `\r\n` is one, `\n\n` is one, `\r\n\r\n` is one.
-/// That is not a simplification of GitHub's rule, which collapses nothing — it
-/// is what the *renderer* does before GitHub sees anything, and the renderer
-/// is what this function has to predict. `escape::text` collapses a blank line
-/// inside a text run so one `Block::Para` stays one block, and
-/// `escape::one_line` then folds what is left, so `"A\n\nB"` reaches
-/// GitHub as the single line `A B`. Not collapsing here (as this did) made
-/// `anchor_slug` compute `a--b` against a heading rendering `A B`, whose
-/// GitHub id is `a-b`: a cross-reference kasane broke against its own output.
-///
-/// Literal spaces are a different mechanism and are *not* collapsed, here or
-/// in the renderer — `Background & Notes` still anchors `background--notes`.
-/// Tabs are deliberately untouched too: `one_line` does not touch them,
-/// so a tab survives into the rendered heading line exactly as it does today,
-/// where the filter in [`anchor_slug`] drops it (a tab is not in `\p{Word}`,
-/// `-`, or space). "Fixing" that here would newly diverge from a tab's
-/// current, correct treatment.
-fn fold_newlines(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_was_newline = false;
-    for c in s.chars() {
-        if c == '\n' || c == '\r' {
-            if !last_was_newline {
-                out.push(' ');
-            }
-            last_was_newline = true;
-        } else {
-            out.push(c);
-            last_was_newline = false;
-        }
-    }
-    out
-}
-
-/// The anchor's fold: the inline text, newlines folded to spaces, outer
+/// The anchor's fold: the printed line, newlines folded to spaces, outer
 /// whitespace trimmed, Unicode-lowercased, and **not normalized**.
-///
-/// The newline fold runs first because it mirrors what the *renderer* does
-/// to the text before GitHub ever sees it — trimming and lowercasing are
-/// steps GitHub's own filter performs on top of that already-folded line.
-///
-/// The trim mirrors the renderer rather than the filter: a Markdown parser
-/// strips a heading's surrounding whitespace before GitHub ever computes an
-/// id, so `##   Intro  ` and `## Intro` anchor identically. Interior runs are
-/// left alone, which is what produces the double hyphens.
-///
-/// The absence of NFC is the load-bearing part; the module doc says why.
-fn anchor_fold(inlines: &[Inline]) -> String {
-    fold_newlines(&inline_text(inlines))
+fn anchor_fold(line: &str) -> String {
+    fold_newlines(line)
         .trim()
         .chars()
         .flat_map(char::to_lowercase)
@@ -211,7 +170,7 @@ fn anchor_fold(inlines: &[Inline]) -> String {
 /// realistic — and costs nothing, because the `NN-` ordinal prefix already
 /// makes sibling collisions impossible.
 fn path_fold(inlines: &[Inline]) -> String {
-    inline_text(inlines)
+    title_text(inlines)
         .trim()
         .nfc()
         .flat_map(char::to_lowercase)
@@ -229,8 +188,8 @@ fn path_fold(inlines: &[Inline]) -> String {
 /// Exact parity therefore means deliberately emitting anchors that look wrong:
 /// `Background & Notes` anchors as `background--notes`, since the `&` is
 /// removed and each of the two surviving spaces becomes a hyphen.
-pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
-    let out: String = anchor_fold(inlines)
+pub fn anchor_slug(line: &str) -> String {
+    let out: String = anchor_fold(line)
         .chars()
         .filter(|c| is_word(*c) || is_join_control(*c) || *c == '-' || *c == ' ')
         .map(|c| if c == ' ' { '-' } else { c })
@@ -257,7 +216,7 @@ pub(crate) fn anchor_slug(inlines: &[Inline]) -> String {
 /// non-root component carries an `NN-` ordinal prefix, which is already what
 /// makes sibling collisions impossible -- including the case-insensitive ones
 /// macOS and Windows would produce, and the NFC-vs-NFD ones macOS would.
-pub(crate) fn path_slug(inlines: &[Inline]) -> String {
+pub fn path_slug(inlines: &[Inline]) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
     for c in path_fold(inlines).chars() {
@@ -334,57 +293,21 @@ pub fn path_slug_of(inlines: &[Inline]) -> String {
     path_slug(inlines)
 }
 
-/// Test seam for the anchor rule over real inline structure, same rationale
-/// as `path_slug_of` and `anchors_for_headings`.
-///
-/// `anchors_for_headings` takes rendered heading *strings* and re-wraps each
-/// as a single `Inline::Text`, which is right for the parsed side of a
-/// comparison and wrong for the IR side: the residuals spec §5.2 property
-/// needs the engine's anchor for an inline run whose *structure* is the thing
-/// under test. No counter is threaded because a single heading has no
-/// duplicate to suffix.
+/// Test seam for the anchor rule over real inline structure, same rationale as
+/// `path_slug_of` and `anchors_for_headings`. Composes the projection with the
+/// rule, which is what a body heading does. No counter is threaded because a
+/// single heading has no duplicate to suffix.
 #[doc(hidden)]
 pub fn anchor_slug_of(inlines: &[Inline]) -> String {
-    AnchorCounter::new().next(inlines)
+    AnchorCounter::new().next(&rendered_text(inlines))
 }
 
-/// Anchors for one file's headings, in the order the file renders them.
-///
-/// Test seam for the property tier, and the reason `slug_of` could not stay:
-/// with duplicate suffixing an anchor depends on what preceded it on the page,
-/// so a per-heading function cannot express the rule. The tier asserts against
-/// the engine's own counter rather than a copy of it that can drift.
+/// Anchors for one file's headings, in the order the file renders them, from
+/// the text those lines print.
 #[doc(hidden)]
 pub fn anchors_for_headings(headings: &[String]) -> Vec<String> {
     let mut counter = AnchorCounter::new();
-    headings
-        .iter()
-        .map(|t| counter.next(&[Inline::Text(t.clone())]))
-        .collect()
-}
-
-/// The visible text of an inline run, bounded by `MAX_INLINE_DEPTH`.
-///
-/// Moved here from `paths.rs`: it exists to feed the slug rules, and leaving
-/// it there would make `paths` and `slug` mutually dependent.
-pub(crate) fn inline_text(inlines: &[Inline]) -> String {
-    let mut s = String::new();
-    inline_text_at(inlines, 0, &mut s);
-    s
-}
-
-fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
-    if depth >= kasane_ir::MAX_INLINE_DEPTH {
-        return;
-    }
-    for i in inlines {
-        match i {
-            Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => s.push_str(t),
-            Inline::Emph(x) | Inline::Strong(x) => inline_text_at(x, depth + 1, s),
-            Inline::Link { inlines, .. } => inline_text_at(inlines, depth + 1, s),
-            Inline::FootnoteRef(_) => {}
-        }
-    }
+    headings.iter().map(|t| counter.next(t)).collect()
 }
 
 /// Assigns anchors to one file's headings in render order, uniquifying
@@ -394,22 +317,30 @@ fn inline_text_at(inlines: &[Inline], depth: usize, s: &mut String) {
 /// gets `-1`, then `-2`. GitHub does not re-check whether the suffixed form
 /// itself collides with an existing id, and neither does this -- mirroring the
 /// quirk is the point.
-pub(crate) struct AnchorCounter {
+pub struct AnchorCounter {
     seen: std::collections::HashMap<String, usize>,
 }
 
 impl AnchorCounter {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             seen: std::collections::HashMap::new(),
         }
     }
 
-    /// The anchor for the next heading in render order. Every heading the file
-    /// renders must pass through here, including ones that get no anchor of
-    /// their own -- they still consume a slot on the rendered page.
-    pub(crate) fn next(&mut self, inlines: &[Inline]) -> String {
-        let base = anchor_slug(inlines);
+    /// The anchor for the next heading in render order, computed from the text
+    /// that heading's line prints. Every heading the file renders must pass
+    /// through here, including ones that get no anchor of their own — they
+    /// still consume a slot on the rendered page.
+    ///
+    /// Taking `&str` rather than `&[Inline]` is the enforcement, not a
+    /// convenience: a caller cannot hand it an inline run and receive an
+    /// anchor for a line it is not going to print. The two heading paths print
+    /// different things — a body heading prints the writer's rendering of its
+    /// inlines, a file's title heading prints `Frontmatter::title` verbatim —
+    /// and each projects accordingly.
+    pub fn next(&mut self, line: &str) -> String {
+        let base = anchor_slug(line);
         let n = self.seen.entry(base.clone()).or_insert(0);
         let out = if *n == 0 { base } else { format!("{base}-{n}") };
         *n += 1;
@@ -417,10 +348,16 @@ impl AnchorCounter {
     }
 }
 
+impl Default for AnchorCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kasane_ir::Inline;
+    use kasane_ir::{Inline, NoteId};
 
     fn t(s: &str) -> Vec<Inline> {
         vec![Inline::Text(s.to_string())]
@@ -438,84 +375,104 @@ mod tests {
     fn anchor_matches_github() {
         // punctuation is REMOVED, not replaced -- the old rule made this
         // `don-t-panic`, which resolved nowhere on GitHub.
-        assert_eq!(anchor_slug(&t("Don't Panic")), "dont-panic");
+        assert_eq!(anchor_slug("Don't Panic"), "dont-panic");
         // `&` is removed and BOTH surviving spaces become hyphens. The double
         // hyphen is correct GFM output, not a bug.
-        assert_eq!(anchor_slug(&t("Background & Notes")), "background--notes");
+        assert_eq!(anchor_slug("Background & Notes"), "background--notes");
         // `_` is Connector_Punctuation, which is inside `\p{Word}`.
-        assert_eq!(anchor_slug(&t("foo_bar")), "foo_bar");
+        assert_eq!(anchor_slug("foo_bar"), "foo_bar");
         // CJK passes through untouched; there is nothing to downcase.
-        assert_eq!(anchor_slug(&t("第二章")), "第二章");
+        assert_eq!(anchor_slug("第二章"), "第二章");
         // Devanagari matras and the virama are Marks, also inside `\p{Word}`.
-        assert_eq!(anchor_slug(&t("हिन्दी")), "हिन्दी");
+        assert_eq!(anchor_slug("हिन्दी"), "हिन्दी");
         // Symbols are outside `\p{Word}`; the two spaces around the emoji
         // survive as two hyphens.
-        assert_eq!(anchor_slug(&t("Hello 🎉 World")), "hello--world");
+        assert_eq!(anchor_slug("Hello 🎉 World"), "hello--world");
         // Unicode-aware downcasing.
-        assert_eq!(anchor_slug(&t("CHAPTER One")), "chapter-one");
+        assert_eq!(anchor_slug("CHAPTER One"), "chapter-one");
         // Outer whitespace is trimmed because a Markdown renderer strips it
         // from the heading's text before computing the id. Interior runs are
         // not trimmed, per the row above.
-        assert_eq!(anchor_slug(&t("  Intro  ")), "intro");
+        assert_eq!(anchor_slug("  Intro  "), "intro");
         // An embedded newline is not itself in `\p{Word}`/`-`/space, but by
         // the time GitHub computes an id the renderer has already folded it
-        // to a literal space (`escape::one_line`), so the anchor must match
+        // to a literal space (`kasane_gfm::fold_newlines`), so the anchor must match
         // that rendered line -- one hyphen, not a silently dropped character.
         // NOT covered by the 2026-08-09 github.com parity check (design spec
         // §8.2): that run predates this fold.
-        assert_eq!(anchor_slug(&t("line\nbreak")), "line-break");
-        // `\r\n` is two bytes but ONE line ending. `escape::one_line` folds
+        assert_eq!(anchor_slug("line\nbreak"), "line-break");
+        // `\r\n` is two bytes but ONE line ending. `kasane_gfm::fold_newlines` folds
         // the pair to a single space before it ever considers a lone `\r` or
         // `\n`, so this must anchor identically to the lone-`\n` row above --
         // one hyphen, not two. Also not covered by the 2026-08-09 check.
-        assert_eq!(anchor_slug(&t("line\r\nbreak")), "line-break");
+        assert_eq!(anchor_slug("line\r\nbreak"), "line-break");
         // A blank line inside a heading's text is still ONE separator on the
         // rendered line: `escape::text` collapses the run so one paragraph
-        // stays one block, and `escape::one_line` folds what is left to a
+        // stays one block, and `kasane_gfm::fold_newlines` folds what is left to a
         // single space. Asserting two hyphens here (as this table did) was
         // asserting an anchor against a heading line kasane does not emit.
         // Not covered by the 2026-08-09 github.com parity check either.
-        assert_eq!(anchor_slug(&t("a\n\nb")), "a-b");
-        assert_eq!(anchor_slug(&t("a\r\n\r\nb")), "a-b");
+        assert_eq!(anchor_slug("a\n\nb"), "a-b");
+        assert_eq!(anchor_slug("a\r\n\r\nb"), "a-b");
         // Literal spaces are a DIFFERENT mechanism and are still not
         // collapsed -- the `Background & Notes` row above is what that looks
         // like, and this change must not touch it.
-        assert_eq!(anchor_slug(&t("a  b")), "a--b");
+        assert_eq!(anchor_slug("a  b"), "a--b");
         // No character in the class at all: GitHub emits an empty id, which
         // would be a dead link here. The documented divergence.
-        assert_eq!(anchor_slug(&t("***")), "section");
+        assert_eq!(anchor_slug("***"), "section");
         // `Other_Number` is OUTSIDE Ruby's `\p{Word}`, which has
         // `Decimal_Number` rather than the whole `Number` group. The vulgar
         // fraction is removed like any other symbol; the space before it
         // survives as a trailing hyphen, since the anchor rule never trims.
-        assert_eq!(anchor_slug(&t("Fig ½")), "fig-");
+        assert_eq!(anchor_slug("Fig ½"), "fig-");
         // A circled numeral is `Other_Number` too, and it is common in
         // Japanese and Chinese headings. GitHub drops it.
-        assert_eq!(anchor_slug(&t("①はじめに")), "はじめに");
+        assert_eq!(anchor_slug("①はじめに"), "はじめに");
         // `Letter_Number` IS inside the set -- it arrives via `Alphabetic`,
         // not via `Number` -- and downcases like any other letter.
-        assert_eq!(anchor_slug(&t("Part Ⅷ")), "part-ⅷ");
+        assert_eq!(anchor_slug("Part Ⅷ"), "part-ⅷ");
         // `Other_Alphabetic` is in `Alphabetic` too, and reaches this rule
         // only because `is_word` asks `char::is_alphabetic()` rather than
         // testing the `L*` category group. `Ⓐ` U+24B6 is `So`; it is kept, and
         // it downcases to `ⓐ` U+24D0.
-        assert_eq!(anchor_slug(&t("Ⓐ Notes")), "ⓐ-notes");
+        assert_eq!(anchor_slug("Ⓐ Notes"), "ⓐ-notes");
         // The boundary is `Alphabetic`, not "looks like a letter": the
         // PARENTHESIZED small letter is `So` WITHOUT `Other_Alphabetic`, so it
         // is dropped, and the space after it still becomes a hyphen. GitHub
         // drops it for the same reason.
-        assert_eq!(anchor_slug(&t("⒜ Notes")), "-notes");
+        assert_eq!(anchor_slug("⒜ Notes"), "-notes");
         // Join_Control is inside Ruby's `\p{Word}` and GitHub keeps it. ZWNJ
         // sits INSIDE this ordinary Persian word, so dropping it would
         // mis-anchor the heading against every GitHub render.
-        assert_eq!(anchor_slug(&t("می\u{200C}رود")), "می\u{200C}رود");
+        assert_eq!(anchor_slug("می\u{200C}رود"), "می\u{200C}رود");
         // A title that is nothing but a Join_Control character anchors to that
         // character, not to `section`: the result is non-empty, so the
         // fallback does not fire, and it is exactly the id GitHub computes, so
         // the link resolves in kasane's tree and on GitHub alike. An invisible
         // anchor is odd to look at but is not a broken one, and guarding it
         // would manufacture a divergence where there is currently none.
-        assert_eq!(anchor_slug(&t("\u{200C}")), "\u{200C}");
+        assert_eq!(anchor_slug("\u{200C}"), "\u{200C}");
+        // A footnote reference contributes its digits to the id: the
+        // projection is what puts `[^1]` into the rendered line, and GitHub's
+        // id filter strips `[`, `^` and `]`, so a resolved (superscript) and
+        // an unresolved (literal `[^1]`) reference land on the same digits.
+        assert_eq!(
+            anchor_slug_of(&[Inline::Text("Notes".into()), Inline::FootnoteRef(NoteId(1))]),
+            "notes1"
+        );
+        // A trailing `#` run preceded by a space is an ATX closing sequence.
+        // This row is only a *parity* claim once the writer escapes the run
+        // (design spec 2026-08-14 §4.2): GitHub ids the line it actually
+        // renders, and after the escape that line is `Intro ###` in full.
+        // Before the escape the rendered line was `Intro`, and GitHub said
+        // `intro`.
+        assert_eq!(anchor_slug("Intro ###"), "intro-");
+        // The all-`#` content case: the text slugs to nothing, so it takes
+        // `EMPTY_FALLBACK`. This is the documented empty-id divergence
+        // (GitHub emits no id at all for a heading with no `\p{Word}`
+        // character), not a new one -- see the module doc.
+        assert_eq!(anchor_slug("###"), "section");
     }
 
     /// The anchor is deliberately NOT normalized; the path slug is.
@@ -535,11 +492,11 @@ mod tests {
     fn nfd_and_nfc_diverge_for_anchors_and_agree_for_paths() {
         let nfc = "Café"; // é = U+00E9
         let nfd = "Cafe\u{0301}"; // e + COMBINING ACUTE
-        assert_eq!(anchor_slug(&t(nfc)), "café");
-        assert_eq!(anchor_slug(&t(nfd)), "cafe\u{0301}");
+        assert_eq!(anchor_slug(nfc), "café");
+        assert_eq!(anchor_slug(nfd), "cafe\u{0301}");
         assert_ne!(
-            anchor_slug(&t(nfc)),
-            anchor_slug(&t(nfd)),
+            anchor_slug(nfc),
+            anchor_slug(nfd),
             "each anchor must match the heading line kasane renders for it"
         );
         assert_eq!(path_slug(&t(nfc)), "café");
@@ -611,7 +568,7 @@ mod tests {
         assert_eq!(out, "第".repeat(21));
         assert!(out.len() <= MAX_PATH_SLUG_BYTES);
         // Anchors are not filenames and are deliberately uncapped.
-        assert_eq!(anchor_slug(&t(&long)).len(), 120);
+        assert_eq!(anchor_slug(&long).len(), 120);
         // The cap can land exactly on a separator: 63 `a`s + the collapsed
         // space is 64 bytes ending in `-`, and the `tail` after it is cut
         // off entirely. `trim_tail` must run AFTER `truncate_to` to remove

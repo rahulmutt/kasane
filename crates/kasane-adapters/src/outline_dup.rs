@@ -75,10 +75,10 @@ fn find_run(norm: &[String], drop: &[bool], want: &str) -> Option<(usize, usize)
 /// trimmed. Folds `CHAPTER 1 — The Beginning` and `Chapter 1: the beginning`
 /// onto one another.
 ///
-/// Not `kasane_core::slug`'s word class: that one is a mirror of GitHub's
+/// Not `kasane_gfm::slug`'s word class: that one is a mirror of GitHub's
 /// heading-id filter and carries its own drift contract, which this comparison
 /// has no reason to be bound to (and `kasane-adapters` does not depend on
-/// `kasane-core`).
+/// `kasane-gfm`).
 fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut pending_sep = false;

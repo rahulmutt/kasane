@@ -33,7 +33,7 @@ fn target(name: &str) -> Option<fn(&[u8])> {
         "palmdoc" => fuzz_entry::palmdoc,
         "guards" => fuzz_entry::guards,
         "xmltext" => fuzz_entry::xmltext,
-        "slug" => kasane_core::fuzz_entry::slug,
+        "slug" => kasane_gfm::fuzz_entry::slug,
         "escape" => kasane_writer::fuzz_entry::escape,
         _ => return None,
     })

@@ -1,6 +1,6 @@
 use crate::section::{SectionNode, SectionTree};
-use crate::slug::{path_slug, AnchorCounter};
-use kasane_ir::{Block, BlockId, Inline};
+use kasane_gfm::{path_slug, rendered_text, title_text, AnchorCounter};
+use kasane_ir::{Block, BlockId};
 use std::collections::HashMap;
 
 pub struct Placed {
@@ -52,10 +52,15 @@ fn place(
     // clauses and had its counter seeded from the document title instead of
     // its own -- the same `id.is_none()`-alone conflation `nav.rs` already
     // hit once for the TOC (see its comment on the synthetic-parts fix).
+    // A file's title heading prints `Frontmatter::title`, which `nav::walk`
+    // builds with `title_text` — so the anchor is computed from that same
+    // string, not from the inlines behind it. They differ whenever the title
+    // carries a footnote reference: the printed line has no `[^1]` in it, and
+    // an anchor that predicted one would point at an id no renderer assigns.
     let title_anchor = if is_root {
-        counter.next(&[Inline::Text(doc_title.to_string())])
+        counter.next(doc_title)
     } else {
-        counter.next(&node.title)
+        counter.next(&title_text(&node.title))
     };
     if let Some(id) = node.id {
         anchors.insert(id, format!("{}#{}", self_path, title_anchor));
@@ -111,7 +116,7 @@ fn count_headings(
     for b in blocks {
         match b {
             Block::Heading { id, inlines, .. } => {
-                let a = counter.next(inlines);
+                let a = counter.next(&rendered_text(inlines));
                 if top_level {
                     anchors.insert(*id, format!("{}#{}", self_path, a));
                 }
@@ -467,5 +472,33 @@ mod tests {
         };
         let placed = assign_paths(tree, "Book");
         assert!(!placed.anchors.contains_key(&BlockId(99)));
+    }
+
+    /// A section title carrying a footnote reference anchors on the text the
+    /// title heading PRINTS, which `nav::walk` builds with `title_text` — the
+    /// reference is not in it. Anchoring the inlines instead would predict
+    /// `notes1` for a line that renders `Notes`.
+    #[test]
+    fn a_title_anchor_follows_the_printed_title_not_the_inlines() {
+        let tree = fold_sections(&doc(vec![
+            h(1, 0, "Top"),
+            Node {
+                block: Block::Heading {
+                    level: 2,
+                    id: BlockId(1),
+                    inlines: vec![Inline::Text("Notes".into()), Inline::FootnoteRef(NoteId(7))],
+                },
+                prov: Provenance::default(),
+            },
+        ]));
+        let placed = assign_paths(tree, "Book");
+        let anchor = placed
+            .anchors
+            .get(&BlockId(1))
+            .expect("the subsection has an anchor");
+        assert!(
+            anchor.ends_with("#notes"),
+            "expected the printed-title anchor, got {anchor}"
+        );
     }
 }

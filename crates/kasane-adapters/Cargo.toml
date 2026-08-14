@@ -22,11 +22,15 @@ djvu-rs = "0.27"
 leptess = { version = "0.14", optional = true }
 
 [dev-dependencies]
-# For `tests/fuzz_corpus.rs` only: the `slug` target's seam lives in
-# kasane-core, and this file is the one replay harness for every target.
-# Test-scoped, so it does not put core in the adapter crate's real dependency
-# graph, and acyclic -- core depends on kasane-ir alone.
+# For the end-to-end pipeline test in this crate's own `#[cfg(test)]` module
+# (`src/lib.rs`), which exercises `kasane_core::structure` and
+# `kasane_core::Options` directly.
 kasane-core.workspace = true
+# For `tests/fuzz_corpus.rs` only: the `slug` target's seam lives in
+# kasane-gfm, and this file is the one replay harness for every target.
+# Test-scoped, so it does not put gfm in the adapter crate's real dependency
+# graph, and acyclic -- gfm depends on kasane-ir alone.
+kasane-gfm.workspace = true
 kasane-writer.workspace = true
 tempfile = "3"
 

@@ -9,16 +9,7 @@ repository.workspace = true
 
 [dependencies]
 kasane-ir.workspace = true
-# NFC (for `path_slug` only -- `anchor_slug` must not normalize; see
-# `slug.rs`), and the General_Category tables behind Ruby's `\p{Word}`. std
-# answers the `Alphabetic` term itself (`char::is_alphabetic()` IS that
-# derived property) but neither of the other two: it cannot keep the
-# Devanagari virama (U+094D), a separate Mark that NFC does not compose away
-# and that is not `Alphabetic` -- `हिन्दी` would slug to `हिनदी` -- nor tell
-# `Nd` from `No`, which Ruby's set turns on.
-# `default-features = false` drops the emoji tables, which nothing here needs.
-unicode-normalization = "0.1"
-unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+kasane-gfm.workspace = true
 
 [lints]
 workspace = true

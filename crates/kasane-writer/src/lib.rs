@@ -34,8 +34,8 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     out.push(' ');
     // Folds first and escapes after, where `Block::Heading` escapes first and
     // folds after. That only reaches the same heading line because
-    // `escape::one_line` collapses newline runs -- see its doc comment, and
-    // `slug::fold_newlines`, which has to predict whichever line this emits.
+    // `kasane_gfm::fold_newlines` collapses newline runs -- see its doc
+    // comment.
     //
     // `Pos::Mid`, not `Pos::LineStart`: the text lands after the `# ` this
     // function already pushed, never at column 0, matching the body-heading
@@ -43,14 +43,14 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     // same reason). Before the whitespace-at-line-start rule, claiming
     // `LineStart` here was a harmless over-escape (a needless `\#`); after it,
     // a leading space in the title became `&#32;`, which disarms the
-    // ATX-content strip `kasane-core::slug`'s `anchor_fold` assumes happens --
+    // ATX-content strip `kasane_gfm::anchor_slug` assumes happens --
     // see `the_title_heading_renders_to_exactly_the_trimmed_title` in this
     // module's tests for the parser-verified consequence.
-    out.push_str(&escape::text(
-        &escape::one_line(&file.frontmatter.title),
+    out.push_str(&escape::atx_closing(&escape::text(
+        &kasane_gfm::fold_newlines(&file.frontmatter.title),
         escape::Ctx::Flow,
         escape::Pos::Mid,
-    ));
+    )));
     out.push('\n');
     out.push('\n');
     out.push_str(&blocks_to_markdown(&file.blocks, assets));
@@ -290,8 +290,9 @@ mod tests {
     /// never at column 0. Before the whitespace-at-line-start rule the lie was
     /// harmless (a needless `\#`); after it, a leading space in the title
     /// became `&#32;`, which disarms the ATX-content strip a real parser would
-    /// otherwise apply. `anchor_fold` (in `kasane-core::slug`) assumes that
-    /// strip happens — its own doc comment says "a Markdown parser strips a
+    /// otherwise apply. `anchor_fold` (a private helper inside `kasane-gfm`'s
+    /// `slug` module, reached through the public `kasane_gfm::anchor_slug`)
+    /// assumes that strip happens — its own doc comment says "a Markdown parser strips a
     /// heading's surrounding whitespace before GitHub ever computes an id" —
     /// so when it doesn't, the anchor kasane embeds (computed from
     /// `title.trim()`) diverges from the id a real renderer assigns (computed
@@ -344,5 +345,39 @@ mod tests {
                  this line: {md:?}"
             );
         }
+    }
+
+    /// The title path needs the same guard as `Block::Heading`: this line is
+    /// built here, not by `markdown.rs`.
+    #[test]
+    fn a_title_ending_in_hashes_keeps_them_in_the_rendered_heading() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        let file = FileNode {
+            path: "index.md".into(),
+            frontmatter: Frontmatter {
+                title: "Intro ###".into(),
+                breadcrumb: vec!["Book".into()],
+                parent: None,
+                prev: None,
+                next: None,
+                children: vec![],
+                source_pages: None,
+            },
+            blocks: vec![],
+        };
+        let md = file_to_markdown(&file, &AssetBag::default());
+
+        let mut in_heading = false;
+        let mut text = String::new();
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(Tag::Heading { .. }) => in_heading = true,
+                Event::End(TagEnd::Heading(_)) => in_heading = false,
+                Event::Text(t) if in_heading => text.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(text.trim(), "Intro ###", "rendered:\n{md}");
     }
 }

@@ -740,6 +740,7 @@ dependencies = [
  "djvu-rs",
  "html5ever",
  "kasane-core",
+ "kasane-gfm",
  "kasane-ir",
  "kasane-writer",
  "leptess",
@@ -771,6 +772,14 @@ dependencies = [
 name = "kasane-core"
 version = "0.1.0"
 dependencies = [
+ "kasane-gfm",
+ "kasane-ir",
+]
+
+[[package]]
+name = "kasane-gfm"
+version = "0.1.0"
+dependencies = [
  "kasane-ir",
  "unicode-normalization",
  "unicode-properties",
@@ -786,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "kasane-core",
+ "kasane-gfm",
  "kasane-ir",
  "proptest",
  "pulldown-cmark",

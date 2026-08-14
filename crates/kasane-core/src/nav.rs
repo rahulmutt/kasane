@@ -3,8 +3,8 @@ use crate::paths::{assign_paths, Placed};
 use crate::refs::resolve_refs;
 use crate::section::fold_sections;
 use crate::sitetree::{FileNode, Frontmatter, SiteTree};
-use crate::slug::inline_text;
 use crate::Options;
+use kasane_gfm::title_text;
 use kasane_ir::{Block, Document, Inline, RefTarget};
 
 pub fn structure(doc: Document, opts: &Options) -> SiteTree {
@@ -70,7 +70,7 @@ fn walk(
     let title = if p.node.id.is_none() && trail.is_empty() {
         doc_title.to_string()
     } else {
-        inline_text(&p.node.title)
+        title_text(&p.node.title)
     };
     let mut breadcrumb = trail.to_vec();
     breadcrumb.push(title.clone());
@@ -108,7 +108,7 @@ fn walk(
                         // TOC used to key off `id.is_none()` alone, which is
                         // also true of every synthetic part, so a split body
                         // produced a TOC of N entries all named after the book.
-                        inlines: vec![Inline::Text(inline_text(&c.node.title))],
+                        inlines: vec![Inline::Text(title_text(&c.node.title))],
                     }])]
                 })
                 .collect(),

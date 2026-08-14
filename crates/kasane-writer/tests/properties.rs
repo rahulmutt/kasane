@@ -14,8 +14,9 @@
 mod generator;
 
 use generator::{Case, Expect};
-use kasane_core::{anchor_slug_of, anchors_for_headings, est_tokens, structure, FileNode};
-use kasane_ir::{AssetBag, Block, BlockId, Inline, RefTarget};
+use kasane_core::{est_tokens, structure, FileNode};
+use kasane_gfm::{anchor_slug_of, anchors_for_headings};
+use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
 use proptest::prelude::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::collections::{HashMap, HashSet};
@@ -140,6 +141,20 @@ fn parse_events(md: &str) -> Parsed {
                 p.text.push(' ');
                 if heading_depth > 0 {
                     heading.push_str(&t);
+                }
+            }
+            // GitHub renders a resolved reference as a superscript number and
+            // leaves an unresolved one as the literal `[^1]`; its id filter
+            // strips `[`, `^` and `]`, so both spellings contribute the same
+            // digits to a heading's id. Modelling the reference here is what
+            // lets this tier see a divergence it used to share: the parsed
+            // side skipped the reference exactly as the title projection did.
+            //
+            // Heading text only. `p.text` feeds P1's sentinel accounting,
+            // where a footnote label is not a payload.
+            Event::FootnoteReference(label) => {
+                if heading_depth > 0 {
+                    heading.push_str(&label);
                 }
             }
             Event::SoftBreak | Event::HardBreak => p.text.push(' '),
@@ -605,6 +620,92 @@ proptest! {
             Some(embedded.as_str()),
             "anchor/render divergence for kind {} nl1 {:?} nl2 {:?}:\n{}",
             kind, nl1, nl2, md
+        );
+    }
+
+    /// P10 — a footnote reference in a heading anchors the way GitHub ids it
+    /// (design spec 2026-08-14 §3).
+    ///
+    /// The reference is visible text the writer emits and the IR does not
+    /// spell, which is the one place `rendered_text` diverges from
+    /// `title_text`. Both spellings are drawn: with the definition in the same
+    /// file (GitHub renders a superscript number) and without it (the literal
+    /// `[^1]` survives), because §3's claim is that the id is the same either
+    /// way.
+    #[test]
+    fn p10_footnote_ref_in_a_heading_anchors_the_same(
+        n in 1u32..=20,
+        tail in "[a-z]{0,4}",
+        with_def in any::<bool>(),
+    ) {
+        let inlines = vec![
+            Inline::Text("Notes".into()),
+            Inline::FootnoteRef(NoteId(n)),
+            Inline::Text(format!(" {tail}")),
+        ];
+        let mut blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: inlines.clone(),
+        }];
+        if with_def {
+            blocks.push(Block::Footnote {
+                id: NoteId(n),
+                blocks: vec![Block::Para(vec![Inline::Text("def".into())])],
+            });
+        }
+        let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let rendered = anchors_for_headings(&parse_events(&md).headings);
+        let embedded = anchor_slug_of(&inlines);
+
+        prop_assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(embedded.as_str()),
+            "anchor/render divergence for [^{}] (definition present: {}):\n{}",
+            n, with_def, md
+        );
+    }
+
+    /// P11 — a heading ending in a `#` run renders that run, and anchors the
+    /// same way GitHub ids the line (design spec 2026-08-14 §4.2).
+    ///
+    /// CommonMark strips a trailing `#` run preceded by a space as an ATX
+    /// *closing sequence*, at block level, before inline parsing. Unescaped,
+    /// the writer therefore emitted a line whose rendered text was missing
+    /// document text — and an id computed from the shorter text.
+    #[test]
+    fn p11_a_trailing_hash_run_survives_and_anchors_the_same(
+        mid in "[a-z ]{0,6}",
+        hashes in 1usize..=4,
+        spaced in any::<bool>(),
+    ) {
+        let text = format!(
+            "Intro {mid}{}{}",
+            if spaced { " " } else { "" },
+            "#".repeat(hashes)
+        );
+        let inlines = vec![Inline::Text(text.clone())];
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: inlines.clone(),
+        }];
+        let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+        let parsed = parse_events(&md);
+
+        prop_assert_eq!(
+            parsed.headings.first().map(String::as_str),
+            Some(text.trim()),
+            "the rendered heading lost text:\n{}", md
+        );
+
+        let rendered = anchors_for_headings(&parsed.headings);
+        let embedded = anchor_slug_of(&inlines);
+        prop_assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(embedded.as_str()),
+            "anchor/render divergence:\n{}", md
         );
     }
 }
