@@ -50,8 +50,8 @@ pub struct Sentinel {
     /// one documented exception to "escaping must never change what the
     /// Markdown renders to" (an HTML comment has no escape mechanism for a
     /// `-->` run, so it transforms rather than escapes), but that exception
-    /// is narrow -- of `HOSTILE`'s 25 fragments, only `-->` triggers it; the
-    /// other 24 round-trip through a comment verbatim like anything else.
+    /// is narrow -- of `HOSTILE`'s 26 fragments, only `-->` triggers it; the
+    /// other 25 round-trip through a comment verbatim like anything else.
     /// Scoping the skip to the one transformation, not the whole shape,
     /// keeps P7 checking everything `comment_note` does not have to touch,
     /// and would fail loudly if `comment_note` ever grew a transformation
@@ -124,6 +124,11 @@ const HOSTILE: &[&str] = &[
     "-->",
     "|pipe|",
     "#hash",
+    // A trailing `#` run preceded by a space: an ATX *closing* sequence, which
+    // the parser strips from a heading before inline parsing unless the writer
+    // disarms it (2026-08-14 spec §4.2). `"#hash"` above is the line-START
+    // case and does not reach this one.
+    "tail ###",
     "- bullet",
     "1. ordered",
     "> quote",
@@ -142,7 +147,7 @@ const HOSTILE: &[&str] = &[
     // A run that *ends* one inline and one that *begins* the next. Together
     // they let the main tier draw the boundary shape P9 covers directly
     // (residuals spec §5.3) -- which matters for shrinking, not for coverage:
-    // the payload must end with the first fragment (1 in 25), the decoration
+    // the payload must end with the first fragment (1 in 26), the decoration
     // must be an `Inline::Code` (1 in 13), and that code's filler must draw
     // the second as its first word (1 in 100). About 1 in 32,500 per shape,
     // so roughly one default run in seven sees it at all. P9 and the unit

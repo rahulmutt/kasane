@@ -558,6 +558,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "kasane-core",
+ "kasane-gfm",
  "kasane-ir",
 ]
 

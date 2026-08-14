@@ -64,6 +64,16 @@ pub fn escape(data: &[u8]) {
         "code_span kept a newline: {span:?} from {text:?}"
     );
 
+    // A heading line's closing-sequence guard must leave nothing to disarm:
+    // re-running it is a no-op precisely when the first pass removed the
+    // condition it detects.
+    let heading = escape::atx_closing(&escape::text(text, Ctx::Flow, Pos::Mid));
+    assert_eq!(
+        escape::atx_closing(&heading),
+        heading,
+        "atx_closing left a closing sequence: {heading:?} from {text:?}"
+    );
+
     // A fenced block's fence must not appear at the start of a body line.
     let block = escape::fenced_block(text, Some(text));
     let fence_len = block.chars().take_while(|c| *c == '`').count();

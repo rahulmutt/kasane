@@ -34,8 +34,8 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     out.push(' ');
     // Folds first and escapes after, where `Block::Heading` escapes first and
     // folds after. That only reaches the same heading line because
-    // `escape::one_line` collapses newline runs -- see its doc comment, and
-    // `slug::fold_newlines`, which has to predict whichever line this emits.
+    // `kasane_gfm::fold_newlines` collapses newline runs -- see its doc
+    // comment.
     //
     // `Pos::Mid`, not `Pos::LineStart`: the text lands after the `# ` this
     // function already pushed, never at column 0, matching the body-heading
@@ -46,11 +46,11 @@ pub fn file_to_markdown(file: &FileNode, assets: &AssetBag) -> String {
     // ATX-content strip `kasane-core::slug`'s `anchor_fold` assumes happens --
     // see `the_title_heading_renders_to_exactly_the_trimmed_title` in this
     // module's tests for the parser-verified consequence.
-    out.push_str(&escape::text(
-        &escape::one_line(&file.frontmatter.title),
+    out.push_str(&escape::atx_closing(&escape::text(
+        &kasane_gfm::fold_newlines(&file.frontmatter.title),
         escape::Ctx::Flow,
         escape::Pos::Mid,
-    ));
+    )));
     out.push('\n');
     out.push('\n');
     out.push_str(&blocks_to_markdown(&file.blocks, assets));
@@ -344,5 +344,39 @@ mod tests {
                  this line: {md:?}"
             );
         }
+    }
+
+    /// The title path needs the same guard as `Block::Heading`: this line is
+    /// built here, not by `markdown.rs`.
+    #[test]
+    fn a_title_ending_in_hashes_keeps_them_in_the_rendered_heading() {
+        use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+        let file = FileNode {
+            path: "index.md".into(),
+            frontmatter: Frontmatter {
+                title: "Intro ###".into(),
+                breadcrumb: vec!["Book".into()],
+                parent: None,
+                prev: None,
+                next: None,
+                children: vec![],
+                source_pages: None,
+            },
+            blocks: vec![],
+        };
+        let md = file_to_markdown(&file, &AssetBag::default());
+
+        let mut in_heading = false;
+        let mut text = String::new();
+        for ev in Parser::new_ext(&md, Options::empty()) {
+            match ev {
+                Event::Start(Tag::Heading { .. }) => in_heading = true,
+                Event::End(TagEnd::Heading(_)) => in_heading = false,
+                Event::Text(t) if in_heading => text.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(text.trim(), "Intro ###", "rendered:\n{md}");
     }
 }

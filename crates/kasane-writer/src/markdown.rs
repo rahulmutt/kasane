@@ -31,10 +31,8 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
             }
             out.push(' ');
             let inlines = escape::fold_inline_newlines(inlines);
-            out.push_str(&escape::one_line(&inlines_to_md(
-                &inlines,
-                Ctx::Flow,
-                Pos::Mid,
+            out.push_str(&escape::atx_closing(&kasane_gfm::fold_newlines(
+                &inlines_to_md(&inlines, Ctx::Flow, Pos::Mid),
             )));
             out.push('\n');
         }
@@ -77,7 +75,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
             let caption = escape::fold_inline_newlines(caption);
-            let alt = escape::one_line(&inlines_to_md(&caption, Ctx::Flow, Pos::Mid));
+            let alt = kasane_gfm::fold_newlines(&inlines_to_md(&caption, Ctx::Flow, Pos::Mid));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
                 alt,
@@ -236,7 +234,7 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
                 inlines,
             } => s.push_str(&format!(
                 "[{}]({})",
-                escape::one_line(&inlines_to_md_at(
+                kasane_gfm::fold_newlines(&inlines_to_md_at(
                     &escape::fold_inline_newlines(inlines),
                     depth + 1,
                     ctx,

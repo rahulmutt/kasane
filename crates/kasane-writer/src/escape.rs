@@ -271,45 +271,43 @@ fn html_text(s: &str) -> String {
     out
 }
 
-/// Fold every newline spelling to a single space, **collapsing runs**, for the
-/// contexts where a newline is structurally impossible: heading lines, link
-/// labels, image alt text, code spans, YAML scalars (§4.1).
+/// Disarm an ATX closing sequence at the end of a heading line (design spec
+/// 2026-08-14 §4.2).
 ///
-/// One fold for the whole crate, and the collapse is what makes that possible.
-/// The two heading paths reach this from opposite directions and used to
-/// disagree because it did not collapse: `markdown.rs`'s `Block::Heading`
-/// escapes first and folds after, so `escape::text`'s own `normalize_newlines`
-/// had already collapsed the run by the time it got here and `"A\n\nB"`
-/// rendered `## A B`; `lib.rs`'s file-title heading folds first and escapes
-/// after, so nothing had collapsed anything and the same title rendered
-/// `# A  B`. `code_span` is a third caller with the same split — it folds
-/// unescaped content, so nothing collapses ahead of it either.
+/// CommonMark strips a trailing run of `#` from an ATX heading — at **block**
+/// level, from raw text, before inline parsing — when the run is preceded by a
+/// space or tab, or is the whole content. `## Intro ###` therefore renders the
+/// text `Intro`, losing document text and, with it, the id kasane computed
+/// from the text the IR holds.
 ///
-/// That is not cosmetic. `kasane-core::slug`'s `anchor_fold` computes a
-/// heading's fragment by predicting the rendered heading line, and it can only
-/// predict one rule; whichever paths disagree with it emit a cross-reference
-/// pointing at an id GitHub does not assign. `slug::fold_newlines` is this
-/// function's hand-kept mirror in `kasane-core`, which cannot depend on this
-/// crate — changing one without the other reopens that mismatch, and P2 is
-/// what catches it.
+/// Escaping the first `#` of the run fixes both at once: the block-level scan
+/// sees a `\` before the run and does not strip it, then inline parsing turns
+/// `\#` back into a literal. `## Intro###` needs nothing, because a run with
+/// no space before it was never a closing sequence.
 ///
-/// Literal spaces are a different mechanism and are deliberately *not*
-/// collapsed, here or in the mirror: `Background & Notes` still anchors
-/// `background--notes`.
-pub(crate) fn one_line(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_was_newline = false;
-    for c in s.chars() {
-        if c == '\n' || c == '\r' {
-            if !last_was_newline {
-                out.push(' ');
-            }
-            last_was_newline = true;
-        } else {
-            out.push(c);
-            last_was_newline = false;
-        }
+/// This is a writer fix rather than an anchor-rule fix on purpose. Teaching
+/// `anchor_slug` about closing sequences would buy parity by agreeing that the
+/// rendered heading may drop text the document had — the escaping spec's §5
+/// invariant, conceded rather than upheld.
+pub(crate) fn atx_closing(escaped: &str) -> String {
+    // Trailing blanks are dropped by the parser before it looks for the run,
+    // so they do not protect it.
+    let end = escaped.trim_end_matches([' ', '\t']).len();
+    let run_start = escaped[..end].trim_end_matches('#').len();
+    if run_start == end {
+        return escaped.to_string();
     }
+    let closes = escaped[..run_start]
+        .chars()
+        .next_back()
+        .is_none_or(|c| c == ' ' || c == '\t');
+    if !closes {
+        return escaped.to_string();
+    }
+    let mut out = String::with_capacity(escaped.len() + 1);
+    out.push_str(&escaped[..run_start]);
+    out.push('\\');
+    out.push_str(&escaped[run_start..]);
     out
 }
 
@@ -409,7 +407,7 @@ fn fold_leaf(s: &str, pending: &mut bool) -> String {
 /// anchors are computed from unescaped IR text and must still match what the
 /// heading renders to.
 pub(crate) fn label(s: &str) -> String {
-    one_line(&text(s, Ctx::Flow, Pos::Mid))
+    kasane_gfm::fold_newlines(&text(s, Ctx::Flow, Pos::Mid))
 }
 
 /// Restore whitespace at a rendered cell's trailing edge (§3.3).
@@ -445,7 +443,7 @@ pub(crate) fn cell_edges(rendered: &str) -> String {
 /// than being context-free like `fenced_block`; P8 fails on a row that gained
 /// a cell otherwise.
 pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
-    let content = one_line(s);
+    let content = kasane_gfm::fold_newlines(s);
     let content = if ctx == Ctx::Cell {
         content.replace('|', "\\|")
     } else {
@@ -610,7 +608,7 @@ pub(crate) fn dest_url(s: &str) -> String {
 /// newline, and for the same reason: folding, not dropping, is what keeps two
 /// words from silently fusing into one.
 pub(crate) fn yaml_scalar(s: &str) -> String {
-    let flat = one_line(s);
+    let flat = kasane_gfm::fold_newlines(s);
     let mut out = String::with_capacity(flat.len() + 2);
     out.push('"');
     for c in flat.chars() {
@@ -654,7 +652,7 @@ pub(crate) fn yaml_scalar(s: &str) -> String {
 /// dashes can ever survive into `out`.
 pub(crate) fn comment_note(s: &str) -> String {
     let mut out = String::new();
-    for c in one_line(s).chars() {
+    for c in kasane_gfm::fold_newlines(s).chars() {
         if c == '-' && out.ends_with('-') {
             out.push(' ');
         }
@@ -841,17 +839,17 @@ mod tests {
     }
 
     #[test]
-    fn one_line_folds_every_newline_run_to_a_single_space() {
-        assert_eq!(one_line("a\nb\r\nc\rd"), "a b c d");
-        // The rows this used to get wrong: a blank line is ONE separator on the
-        // rendered line, so it must be one space here and one hyphen in
-        // `anchor_slug`.
-        assert_eq!(one_line("a\n\nb"), "a b");
-        assert_eq!(one_line("a\r\n\r\nb"), "a b");
-        assert_eq!(one_line("a\n\r\n\rb"), "a b");
-        // Literal spaces are a different mechanism and are NOT collapsed --
-        // `Background & Notes` still anchors `background--notes`.
-        assert_eq!(one_line("a  b"), "a  b");
+    fn atx_closing_disarms_only_a_real_closing_sequence() {
+        assert_eq!(atx_closing("Intro ###"), "Intro \\###");
+        assert_eq!(atx_closing("Intro\t###"), "Intro\t\\###");
+        assert_eq!(atx_closing("Intro ### "), "Intro \\### ");
+        assert_eq!(atx_closing("###"), "\\###");
+        // No space before the run: never a closing sequence.
+        assert_eq!(atx_closing("Intro###"), "Intro###");
+        assert_eq!(atx_closing("Intro"), "Intro");
+        assert_eq!(atx_closing(""), "");
+        // Idempotent: after the guard there is nothing left to disarm.
+        assert_eq!(atx_closing(&atx_closing("Intro ###")), "Intro \\###");
     }
 
     /// GFM splits a row on `|` before it parses any inline, so a code span is

@@ -448,6 +448,18 @@ mod tests {
             anchor_slug_of(&[Inline::Text("Notes".into()), Inline::FootnoteRef(NoteId(1))]),
             "notes1"
         );
+        // A trailing `#` run preceded by a space is an ATX closing sequence.
+        // This row is only a *parity* claim once the writer escapes the run
+        // (design spec 2026-08-14 §4.2): GitHub ids the line it actually
+        // renders, and after the escape that line is `Intro ###` in full.
+        // Before the escape the rendered line was `Intro`, and GitHub said
+        // `intro`.
+        assert_eq!(anchor_slug("Intro ###"), "intro-");
+        // The all-`#` content case: the text slugs to nothing, so it takes
+        // `EMPTY_FALLBACK`. This is the documented empty-id divergence
+        // (GitHub emits no id at all for a heading with no `\p{Word}`
+        // character), not a new one -- see the module doc.
+        assert_eq!(anchor_slug("###"), "section");
     }
 
     /// The anchor is deliberately NOT normalized; the path slug is.

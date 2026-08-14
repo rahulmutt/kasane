@@ -666,6 +666,48 @@ proptest! {
             n, with_def, md
         );
     }
+
+    /// P11 — a heading ending in a `#` run renders that run, and anchors the
+    /// same way GitHub ids the line (design spec 2026-08-14 §4.2).
+    ///
+    /// CommonMark strips a trailing `#` run preceded by a space as an ATX
+    /// *closing sequence*, at block level, before inline parsing. Unescaped,
+    /// the writer therefore emitted a line whose rendered text was missing
+    /// document text — and an id computed from the shorter text.
+    #[test]
+    fn p11_a_trailing_hash_run_survives_and_anchors_the_same(
+        mid in "[a-z ]{0,6}",
+        hashes in 1usize..=4,
+        spaced in any::<bool>(),
+    ) {
+        let text = format!(
+            "Intro {mid}{}{}",
+            if spaced { " " } else { "" },
+            "#".repeat(hashes)
+        );
+        let inlines = vec![Inline::Text(text.clone())];
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: inlines.clone(),
+        }];
+        let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+        let parsed = parse_events(&md);
+
+        prop_assert_eq!(
+            parsed.headings.first().map(String::as_str),
+            Some(text.trim()),
+            "the rendered heading lost text:\n{}", md
+        );
+
+        let rendered = anchors_for_headings(&parsed.headings);
+        let embedded = anchor_slug_of(&inlines);
+        prop_assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(embedded.as_str()),
+            "anchor/render divergence:\n{}", md
+        );
+    }
 }
 
 /// The merged-subsection anchor, pinned end to end and deterministically.

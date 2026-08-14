@@ -89,3 +89,22 @@ fn walk(inlines: &[Inline], depth: usize, notes: bool, s: &mut String) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fold_newlines_folds_every_newline_run_to_a_single_space() {
+        assert_eq!(fold_newlines("a\nb\r\nc\rd"), "a b c d");
+        // The rows this used to get wrong: a blank line is ONE separator on the
+        // rendered line, so it must be one space here and one hyphen in
+        // `anchor_slug`.
+        assert_eq!(fold_newlines("a\n\nb"), "a b");
+        assert_eq!(fold_newlines("a\r\n\r\nb"), "a b");
+        assert_eq!(fold_newlines("a\n\r\n\rb"), "a b");
+        // Literal spaces are a different mechanism and are NOT collapsed --
+        // `Background & Notes` still anchors `background--notes`.
+        assert_eq!(fold_newlines("a  b"), "a  b");
+    }
+}
