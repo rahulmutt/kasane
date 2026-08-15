@@ -1232,12 +1232,14 @@ mod tests {
             .expect("the chapter must survive as a paragraph, not be dropped");
 
         let depth = depth_of(inls);
-        assert!(
-            depth <= xhtml::MAX_INLINE_DEPTH,
-            "5000 nested <em> must flatten to the bound, got {depth}"
+        // `depth <= MAX_INLINE_DEPTH` alone would also pass if flattening
+        // clamped 5000 levels down to 2: it bounds from above only. The seed
+        // is 5000 deep and the bound is exactly `MAX_INLINE_DEPTH`, so the
+        // real property is equality, not merely an upper bound.
+        assert_eq!(
+            depth,
+            xhtml::MAX_INLINE_DEPTH,
+            "5000 nested <em> must flatten to exactly the bound, got {depth}"
         );
-        // A bound that flattened everything to nothing would also satisfy the
-        // assertion above. The seed is 5000 deep, so real nesting must survive.
-        assert!(depth > 1, "flattening must keep nesting, got {depth}");
     }
 }
