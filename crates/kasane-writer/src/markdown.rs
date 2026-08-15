@@ -1901,9 +1901,9 @@ mod tests {
     /// and both children's delimiter shares the `*` character with the run's
     /// own (`Delim::ch`, not `Delim` equality — a `Strong` and an `Emph`
     /// collide on the character even though they are different `Delim`s), so
-    /// `splice_children`'s edge rule splices both away. The run then prints with only
-    /// its own delimiter: one pair, not the nested two the base recovered
-    /// `ab` through, and still exactly `ab`.
+    /// `splice_children`'s edge rule splices both away. The run then prints
+    /// with only its own delimiter: one pair, not the nested two the base
+    /// recovered `ab` through, and still exactly `ab`.
     #[test]
     fn fusing_nested_emphasis_does_not_leak_its_delimiters() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
