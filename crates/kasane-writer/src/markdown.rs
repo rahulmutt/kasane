@@ -422,13 +422,21 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
 /// to re-walk from its own start — quadratic in the length of a long vacuous
 /// run (e.g. `[Emph(vec![]); m]`, where every element is both
 /// delimiter-bearing and vacuous) where the loop this replaced was linear.
+///
+/// A run is grouped by the delimiter's **character**, not by its `Delim`: `*`
+/// and `**` abut into one `***` run that a parser splits somewhere the writer
+/// did not intend, so two adjacent emphasis runs of different classes are one
+/// run. The first member's class wins, which is what the emit loop already
+/// reads from `items[i]` (design spec §2.1, seam two).
 fn run_end(items: &[Flat<'_>], start: usize) -> usize {
-    let Some(want) = escape::delim(items[start].0) else {
+    let Some(d) = escape::delim(items[start].0) else {
         return start + 1;
     };
+    let ch = d.ch();
     let mut k = start + 1;
     while k < items.len()
-        && (renders_empty(items[k].0, items[k].1) || escape::delim(items[k].0) == Some(want))
+        && (renders_empty(items[k].0, items[k].1)
+            || escape::delim(items[k].0).map(escape::Delim::ch) == Some(ch))
     {
         k += 1;
     }
@@ -1546,10 +1554,6 @@ mod tests {
     /// text intact today (design spec §1, "Confirmed").
     #[test]
     fn inlines_with_different_delimiters_are_left_alone() {
-        let em = |s: &str| Inline::Emph(vec![Inline::Text(s.into())]);
-        let st = |s: &str| Inline::Strong(vec![Inline::Text(s.into())]);
-
-        assert_eq!(para(vec![em("a"), st("b")]), "*a***b**");
         assert_eq!(
             para(vec![Inline::Code("x".into()), Inline::Math("y".into())]),
             "`x`$y$"
@@ -1557,6 +1561,53 @@ mod tests {
         assert_eq!(
             para(vec![Inline::Math("x".into()), Inline::Math("y".into())]),
             "$x$$y$"
+        );
+    }
+
+    /// Two runs whose delimiters share a character are one run. Their
+    /// delimiters would otherwise abut into a longer run, and whether that
+    /// parses as intended depends on CommonMark's multiple-of-three rule —
+    /// `[Emph(a), Strong(b)]` survives it and `[Emph(a), Strong([Code])]` does
+    /// not, differing only in the character after the second opening
+    /// delimiter. Telling those apart means mirroring the parser's delimiter
+    /// matching, which this repo has refused three times (design spec §7 A).
+    #[test]
+    fn adjacent_runs_sharing_a_delimiter_character_fuse() {
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![Inline::Text("a".into())]),
+                Inline::Strong(vec![Inline::Code("bc".into())]),
+            ]),
+            "*a`bc`*"
+        );
+    }
+
+    /// The cost this item pays, pinned so a later reader meets it as a
+    /// decision rather than a surprise. `[Emph(a), Strong(b)]` renders as one
+    /// `<em>` where it used to render as an `<em>` and a `<strong>`. The
+    /// recovered text is identical; a boundary is lost on a shape that is not
+    /// broken (design spec §1, "The trade this item makes").
+    #[test]
+    fn fusing_adjacent_runs_costs_a_structural_boundary() {
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![Inline::Text("a".into())]),
+                Inline::Strong(vec![Inline::Text("b".into())]),
+            ]),
+            "*ab*"
+        );
+    }
+
+    /// A backtick run beside an emphasis run shares no character, so the two
+    /// stay separate. The control against over-fusing.
+    #[test]
+    fn runs_with_different_delimiter_characters_do_not_fuse() {
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Emph(vec![Inline::Text("a".into())]),
+            ]),
+            "`x`*a*"
         );
     }
 
@@ -1848,20 +1899,21 @@ mod tests {
 
     /// A container at the *tail* of a run's children carries a delimiter that
     /// abuts the one `emphasize` is about to append, so the two merge into a
-    /// longer run and the parser splits it in the wrong place. This shape
-    /// recovered `abc` before the fusion item and `abc**` after it — the
-    /// regression this task closes (design spec §1).
+    /// longer run and the parser splits it in the wrong place. The edge trim
+    /// removes the tail container's own delimiter (design spec §1); grouping
+    /// by delimiter *character* then also merges this run with the preceding
+    /// `Emph` run, since both share `*` (design spec §2.1, seam two),
+    /// collapsing the whole shape into one span.
     #[test]
     fn a_container_at_a_runs_tail_is_trimmed_into_it() {
         let em = |s: &str| Inline::Emph(vec![Inline::Text(s.into())]);
-        assert_eq!(
-            para(vec![
-                em("a"),
-                Inline::Strong(vec![Inline::Text("b".into())]),
-                Inline::Strong(vec![em("c")]),
-            ]),
-            "*a***bc**"
-        );
+        let inls = vec![
+            em("a"),
+            Inline::Strong(vec![Inline::Text("b".into())]),
+            Inline::Strong(vec![em("c")]),
+        ];
+        assert_eq!(para(inls.clone()), "*abc*");
+        assert_eq!(recovered(inls), "abc");
     }
 
     /// The same at the head of the run.
