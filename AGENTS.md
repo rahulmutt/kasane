@@ -193,21 +193,20 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `epub/xhtml.rs` and `epub/mod.rs` both build a note via
   `format!("image unavailable: {src}")` from an `<img src>` attribute the
   source document supplied.
-  Adjacent inlines that print with the same delimiter -- two code spans, two
-  `Emph`, two `Strong` -- render as one span over their concatenation, because
-  CommonMark cannot express two such spans in a row and the two delimiter pairs
-  would otherwise fuse into one span in the rendered line, leaking the
-  delimiters into the text as visible characters. `markdown.rs` decides that on
-  a flattened view of the *printed* stream rather than on IR siblings, because
-  the two are not the same list: an unresolved link prints only its children,
-  so those children stand beside the link's own neighbours, and a fused run
-  concatenates its members' children into one span, so the last child of one
-  member stands beside the first child of the next. Scanning IR siblings alone
-  left the collision open at both of those seams. Emphasis nested directly
-  inside emphasis is the one carve-out: alone it stacks into `**a**`, which
-  CommonMark reads back as one nested span, and `kasane-cli/tests/e2e.rs` reads
-  the EPUB adapter's inline-depth bound through exactly that; beside anything
-  else it leaks, and is spliced into the run instead.
+  Delimiter runs that share a character never abut in the printed line: a
+  container at the edge of an emphasis run is spliced into it, two adjacent
+  runs spelled with the same character are one run, and a delimiter that would
+  flank on neither side where it lands is not emitted at all. CommonMark cannot
+  express those arrangements, so the writer trades the span boundary for the
+  text -- which is the invariant -- and `kasane-writer/tests/census.rs` is the
+  exhaustive check that it does.
+  `markdown.rs` decides all of this on a flattened view of the *printed*
+  stream rather than on IR siblings, because the two are not the same list: an
+  unresolved link prints only its children, so those children stand beside the
+  link's own neighbours, and a fused run concatenates its members' children
+  into one span, so the last child of one member stands beside the first child
+  of the next. Scanning IR siblings alone left collisions open at both of
+  those seams.
   Math is the one inline the writer escapes nothing inside: `Inline::Math`
   and `Block::MathBlock` are both pushed verbatim — the inline form between
   `$…$`, the block form between `$$…$$` — on the strength of a contract that

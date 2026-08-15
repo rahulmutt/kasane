@@ -1,7 +1,11 @@
 # kasane — Emphasis Seam Design Spec
 
 **Date:** 2026-08-15
-**Status:** Designed 2026-08-15. Not yet implemented.
+**Status:** Implemented 2026-08-15. The edge trim, the run fuse and the
+flanking decline each landed with unit coverage; the census
+(`kasane-writer/tests/census.rs`) is committed with its ratcheting allowlist,
+and P13 now draws delimiter-bearing emphasis children. The allowlist still
+names the shapes §8 records as out of this item's scope.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open"),
 whose last three bullets this item closes together. Two of them were found by
 `2026-08-15-adjacent-inline-fusion-design.md`'s review while widening P13's
@@ -320,11 +324,27 @@ plus the parsed recovery where the point is what a reader sees:
 
 ### 5.3 Property
 
-P13's alphabet gains `Strong(vec![Emph(vec![Text(w)])])`,
-`Emph(vec![Code(w)])` and `Emph(vec![Emph(vec![Text(w)])])` — the three
-widenings the parent spec records as blocked, all three unblocked by this item.
-`P13_WORDS`'s doc comment loses the two blocking entries and keeps its
-restricted-alphabet argument, which is unrelated and still true.
+P13's alphabet gains `Strong(vec![Emph(vec![Text(w)])])` and
+`Emph(vec![Emph(vec![Text(w)])])` — two of the three widenings the parent spec
+records as blocked. `Emph(vec![Code(w)])` stays out.
+
+> **Corrected 2026-08-15, after implementation.** This section originally
+> claimed all three widenings would unblock; only two did. With
+> `Emph(vec![Code(w)])` in the alphabet the property failed on roughly one
+> run in four, on `[Code("a"), Emph([Code("a")]), Text("a")]`: the middle
+> member declines its delimiters (§2.3) and prints its bare `Code` child, so a
+> leading backtick lands immediately after the previous code span's closing
+> backtick, and a parser reads the adjacent pair as one delimiter — the
+> shape recovers `` a``aa `` against `rendered_text`'s `aaa`. This is not one
+> of the defects §1 named; it is a member of the residual family that §8 and
+> the census allowlist already track (the shape is one of the 32 the allowlist
+> still names, corrupt at this item's base and not closed by it). Widening the
+> alphabet to include it would make the property intermittently fail on a
+> pre-existing defect, which is worse than not drawing the shape at all, so
+> the third arm is deferred rather than landed. `P13_WORDS`'s doc comment
+> loses the two blocking entries that *did* close, keeps its
+> restricted-alphabet argument, which is unrelated and still true, and records
+> the `Emph(vec![Code(w)])` exclusion with this counterexample.
 
 ## 6. Documentation
 
@@ -394,13 +414,40 @@ at least the 18 regressed shapes and the two older families, and must not grow
 by one. Converting `tests/fixtures/epub/rich.epub` must produce a tree
 identical to the fusion item's, since that fixture holds no colliding seam.
 
+> **Result, recorded 2026-08-15.** The committed census
+> (`kasane-writer/tests/census.rs`) is the authority for what this item
+> achieved, not the throwaway probe's ~5,800-shape, 715-corrupt count in §1
+> and § "Confirmed" — a different instrument, run at a different revision.
+> The committed allowlist went 686 (first bless, Task 2) → 602 (the edge
+> trim) → 290 (the run fuse) → 48 (the flanking decline) → **32**, where it
+> stands now — the line count never grew at any commit, so the letter of "must
+> not grow by one" held throughout. But the *set of named shapes* did churn in
+> a way this sentence did not anticipate: the edge-trim commit newly
+> corrupted 9 shapes that were correct at this item's own base while fixing
+> 93 others (net 686 → 602). The run-fuse commit's own `run_end` change closed
+> 4 of those 9 as a side effect while newly corrupting 5 different shapes and
+> fixing 317 more besides (net 602 → 290), leaving 10 distinct regressed
+> shapes outstanding (the 5 that survived the fuse, plus the fuse's own 5).
+> None of this was the three-family scope this spec designs; it was landed
+> under controller ruling, gated on all 10 being gone before the item
+> finished. An inserted task between Tasks 5 and 6 closed them with a fourth
+> rule (a same-`Delim` splice, `splice_children` in `markdown.rs`, not
+> designed here — see its doc comment) rather than by the flanking decline
+> alone. See the plan's "Amendments during execution" section for the
+> sequence; this spec's §2 was not revised to add the fourth rule, since the
+> rule's own doc comment is now the more current record of it.
+
 Three residual risks, recorded rather than closed:
 
-- **The shapes the allowlist still names after this item.** It closes three
-  families and does not claim the rest. The allowlist makes them visible and
-  bounded; a later item works the list down. The risk is that the list is read
-  as an acceptance rather than a queue, which is why §5.1 makes a stale entry
-  fail the build.
+- **The shapes the allowlist still names after this item.** It closes the
+  three families in §1's table, plus a fourth this item found and closed
+  mid-execution (the same-`Delim` splice; see the result note above), and does
+  not claim the rest: 32 shapes remain named, including
+  `[Code("x"), Emph([Code("x")]), Text("a")]`, the census alphabet's instance
+  of the family §5.3 records as why `Emph(vec![Code(w)])` did not join P13's
+  alphabet. The allowlist makes them visible and bounded; a later item works
+  the list down. The risk is that the list is read as an acceptance rather
+  than a queue, which is why §5.1 makes a stale entry fail the build.
 - **The structural loss in §1.** `<em>a</em><strong>b</strong>` becomes one
   `<em>`. Deliberate, pinned by a unit test, and reversible only by approach A.
 - **`Delim::ch()` invites a `_` spelling.** Nothing here adds one, and the

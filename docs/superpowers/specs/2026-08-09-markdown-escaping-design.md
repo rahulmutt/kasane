@@ -549,6 +549,17 @@ here as a question rather than a defect.
   (`properties.rs`'s `P13_WORDS` doc comment states the block). The writer
   cannot see the character before its own delimiter at the point `emphasize`
   runs, so this needs its own design rather than a patch.
+  **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`'s flanking
+  decline (§2.3), where this bullet predicted it would land: before wrapping a
+  run, the scan in `inlines_to_md_flat` checks whether the delimiter it is
+  about to add can both open and close where it lands — the character already
+  emitted before the run, and the first printing character the rest of the
+  view will emit after it — and renders the run's children bare when either
+  side fails. `emphasize` itself is unchanged; the scan decides whether to
+  call it with delimiters at all, rather than `emphasize` learning to look
+  outside its own buffer. Pinned by unit tests in `markdown.rs` (the
+  content-punctuation drop, in both the opening-side and closing-side orders)
+  and, exhaustively, by `kasane-writer/tests/census.rs`.
 - **A lone nested emphasis prints a delimiter its class does not name.** Found
   the same way and also present at base. `Emph([Emph([Text("a")])])` prints
   `**a**`, since the two pairs stack, but `escape::delim` classes it
@@ -564,6 +575,23 @@ here as a question rather than a defect.
   bound through writer bytes. Move that assertion into `kasane-adapters`,
   where it can read `Emph` nesting off the parsed IR, and the splice becomes
   uniform and this bullet closes with it.
+  **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`'s edge trim
+  (§2.1, `edge_to_splice`/`splice_children` in `markdown.rs`), and not by the
+  `(character, length)` delimiter class this bullet's own 2026-08-14 correction
+  predicted. `edge_to_splice` needs no such class: it looks only at whether the
+  first or last *printing* child of a run is a container whose delimiter
+  shares the run's own delimiter *character*, and splices it in place, wherever
+  the edge lands. `Emph([Emph([Text("a")])])`'s inner `Emph` is both the first
+  and last printing child, so it is spliced and the run prints `*a*` — matching
+  what its class names, with no length bookkeeping at all. The `kasane-cli`
+  assertion this bullet named moved into `kasane-adapters` in the same item's
+  first task, exactly as predicted, which is what let the splice apply
+  uniformly with no carve-out. A second, separate rule — splicing a
+  same-`Delim` container *anywhere* in a run, not only at an edge — was added
+  later in the same item to close a family of regressions the edge rule alone
+  did not reach (`splice_children`'s doc comment in `markdown.rs` records both
+  rules and why each is keyed the way it is); that second rule is not what
+  closes this bullet's shape, which the edge rule alone already reaches.
 - **An emphasis delimiter meeting the *other* class's delimiter at
   `emphasize`'s wrap seam.** Found 2026-08-15 by the fusion item's
   whole-branch review, which ran an exhaustive differential census — every
@@ -586,6 +614,21 @@ here as a question rather than a defect.
   scope, deliberately left it rather than patching the run scan a third time.
   Two attempts to close this family from the run scan each closed their named
   shapes and introduced new ones.
+  **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`, together with
+  the two bullets above — the three closed together, as this bullet predicted.
+  Not by the candidate rule named here, though: that rule lived inside
+  `emphasize`, separating the delimiter it is about to add from an inner
+  buffer that already starts or ends with that character. The rule that
+  actually shipped lives one level up, in the run scan (`inlines_to_md_flat`):
+  the edge trim (seam one, §2.1) removes an edge container whose delimiter
+  shares the run's own character before `emphasize` is ever called, and the
+  run fuse (seam two, §2.1) merges two adjacent runs that share a delimiter
+  character into one run before either is wrapped, so their delimiters never
+  abut in the first place. `emphasize` itself was not touched, exactly as
+  that spec's own §2.3 states. The census (`kasane-writer/tests/census.rs`) is the
+  committed successor to the throwaway probe this bullet's numbers came from;
+  its allowlist went from 686 corrupt shapes when first committed to 32 after
+  this item's fixes landed.
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14 as well:

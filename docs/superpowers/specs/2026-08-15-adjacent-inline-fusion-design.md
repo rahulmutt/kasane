@@ -191,6 +191,16 @@ The rule the class enables:
 A run of one is what happens today, so a document containing no adjacent pair
 renders byte-identically.
 
+> **Superseded 2026-08-15** by `2026-08-15-emphasis-seam-design.md`. That
+> clause was already false at this item's own head —
+> `Emph([Emph([Text("a")]), Text("bc")])` moved from `**a*bc*` to `*abc*`
+> under §2.2's `also` splice below, with no adjacent *pair* anywhere in the
+> IR — and it is falser now that the emphasis-seam item's edge trim and run
+> fuse also move bytes on shapes with no adjacent pair (§2.4 of that spec).
+> The claim to make instead: a document with no *colliding* seam renders
+> byte-identically; a colliding one is what both this item and the
+> emphasis-seam item exist to change.
+
 ### 2.2 Where the run is grouped
 
 In `inlines_to_md_at`'s loop (`markdown.rs:211-250`), which becomes an
@@ -243,16 +253,17 @@ already gives them `depth + 1`, so a flat depth would silently move the
 recomputed per element by the same four rules the outer loop uses, so a run of
 one behaves exactly as today.
 
-One carve-out, measured rather than reasoned about. An `Emph` whose *whole*
-printing content is a nested `Emph` prints `**a**`, whose stacked delimiters
-CommonMark reads back as one nested span, so the text survives; beside anything
-else the stack is broken up on one side and the surplus delimiters leak
-(`**a*bc*` recovers `**abc`). A same-delimiter child is therefore transparent
-inside its run *except* when it is the run's entire content. The exception is
-load-bearing beyond aesthetics: `kasane-cli/tests/e2e.rs` reads the EPUB
-adapter's inline-depth bound through the `*` run a 64-deep `Emph` chain prints,
-one `*` per surviving level, and splicing uniformly would collapse it to one
-pair.
+> **Superseded 2026-08-15.** This section originally carried a carve-out here
+> — `flatten_into`'s `also` parameter, splicing a same-delimiter child
+> *everywhere* in a run's children except when it was the run's entire
+> content (`nests_alone`), the exception existing only to preserve the `*`
+> count `kasane-cli/tests/e2e.rs` read through writer bytes. Both go with the
+> parameter: `2026-08-15-emphasis-seam-design.md` §2.1 replaces the blanket
+> splice with the edge trim, keyed on the delimiter *character* and applied
+> only at a run's edges, and its §2.4 moves the depth assertion into
+> `kasane-adapters` to read off the parsed IR instead, which is what releases
+> the carve-out. See that spec's §2.1 and §2.2 for the current rule and why it
+> is no longer this one.
 
 ### 2.3 What breaks a run
 
@@ -360,6 +371,15 @@ forced absolutely — §7's B and C each keep the boundary, one by alternating
 delimiters and one by inserting inline HTML, and each is rejected on its own
 grounds rather than on impossibility. The text is what is corrupt today, and the
 text is what every option here preserves.
+
+`2026-08-15-emphasis-seam-design.md` extends this same trade to a boundary
+this item left standing: its run fuse (that spec's §2.1, seam two) merges two
+*abutting runs of different classes* that share a delimiter character into a
+single run wherever they are adjacent, not only where a collision is
+predicted. `[Emph(a), Strong(b)]` — one `Emph` and one `Strong`, not two
+members of the same run, and text-correct today at `*a***b**` — becomes one
+`Emph` after that item, the same shape of loss this section already pays for
+same-class runs, spent one seam further out.
 
 ## 3. Blast radius
 

@@ -1289,3 +1289,20 @@ Plan complete and saved to `docs/superpowers/plans/2026-08-15-emphasis-seam.md`.
 **2. Inline Execution** — execute tasks in this session using executing-plans, batch execution with checkpoints.
 
 Which approach?
+
+---
+
+## Amendments during execution
+
+- **Task 5b, inserted between Tasks 5 and 6.** Tasks 3-5 as written left 10
+  shapes regressed against the branch's base — a same-length delimiter pair
+  nesting mid-buffer, neither an edge collision nor a flanking failure. Task
+  5b added a fourth rule, a same-`Delim` splice applied anywhere in a run's
+  children, and closed all 10. Commits `6936036`, `ec95061`, `9033515`.
+- **Task 6 landed two of three planned P13 widenings.** `Emph([Code(w)])`
+  stayed out: drawing it hit a pre-existing census-allowlist shape, not a
+  regression this item caused. Recorded in `P13_WORDS`'s doc comment.
+- **Tasks 3 and 4 each committed with the allowlist naming newly regressed
+  shapes** (9 at Task 3, 5 at Task 4), under controller rulings gating their
+  closure to a later task rather than reopening the one that introduced them.
+  Both sets were gone by the time Task 5b landed.
