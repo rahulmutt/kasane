@@ -972,12 +972,22 @@ In the paragraph above (`:52-67`), the sentence beginning "A heading containing
 empty spans *next to each other* are a different shape and still diverge; see
 the second bullet." Replace that clause with:
 
+> **Corrected by Task 5's review (round 1 of 5).** The block below is the
+> *fixed* version, not what Step 1 originally specified. The original last
+> sentence read "That is a fourth mechanism, and the only one of the four that
+> lives outside this crate" — false: of the four closing mechanisms this
+> paragraph names (`rendered_text`, `escape::atx_closing`, the
+> `Inline::Code("")` canonicalization, and this fusion), only `rendered_text`
+> is internal to `kasane-gfm`; the other three, including this fourth one, all
+> live outside it. A future reader implementing this plan from scratch should
+> write the sentence below, not the one this note describes.
+
 ```rust
 //! Two or more empty spans next to each other were a different shape and did
 //! diverge until 2026-08-15, when `kasane-writer` began rendering a run of
 //! adjacent same-delimiter inlines as one span
 //! (`2026-08-15-adjacent-inline-fusion-design.md`). That is a fourth
-//! mechanism, and the only one of the four that lives outside this crate: the
+//! mechanism, and like the two before it, it lives outside this crate: the
 //! rule here was never wrong for that shape, the printed line was.
 ```
 

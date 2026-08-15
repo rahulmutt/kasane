@@ -66,7 +66,7 @@
 //! different shape and did diverge until 2026-08-15, when `kasane-writer`
 //! began rendering a run of adjacent same-delimiter inlines as one span
 //! (`2026-08-15-adjacent-inline-fusion-design.md`). That is a fourth
-//! mechanism, and the only one of the four that lives outside this crate: the
+//! mechanism, and like the two before it, it lives outside this crate: the
 //! rule here was never wrong for that shape, the printed line was.
 //!
 //! One divergence is left, and it is a choice rather than a construction
