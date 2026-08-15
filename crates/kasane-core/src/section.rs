@@ -92,6 +92,13 @@ pub fn fold_sections(doc: &Document) -> SectionTree {
 // is the first core walk to touch adapter or caller IR, so past this point
 // every later core and writer walk sees already-shallow blocks -- their own
 // guards are defence in depth, not a second truncation stacked on this one.
+//
+// `clone_inlines_at` carries one canonicalization as well as the bound: an
+// empty `Inline::Code` becomes a single space. That is not a tidy-up -- it is
+// load-bearing for anchors, and it lives here rather than in a pass of its own
+// because this walk is the one place every inline is guaranteed to pass
+// through exactly once. See the arm's own comment, and
+// `docs/superpowers/specs/2026-08-14-empty-code-span-anchor-design.md` §2.
 fn clone_block(b: &Block, depth: usize) -> Block {
     if depth >= kasane_ir::MAX_BLOCK_DEPTH {
         return Block::Raw {
@@ -150,6 +157,18 @@ pub(crate) fn clone_inlines_at(inls: &[Inline], depth: usize) -> Vec<Inline> {
     inls.iter()
         .map(|i| match i {
             Inline::Text(t) => Inline::Text(t.clone()),
+            // CommonMark cannot express an empty code span, so
+            // `kasane-writer::escape::code_span` prints one as `` ` ` `` --
+            // a padding space that is real text in the rendered line GitHub
+            // computes a heading id from. Canonicalizing the empty form here,
+            // at the single walk every inline passes through, is what lets
+            // `rendered_text` and `title_text` see that space without either
+            // importing the writer's escaping rules. `Code("")` and
+            // `Code(" ")` render to the same three bytes, so no code span's
+            // output moves; `escape.rs`'s
+            // `code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders`
+            // is the test that keeps that true.
+            Inline::Code(t) if t.is_empty() => Inline::Code(" ".into()),
             Inline::Code(t) => Inline::Code(t.clone()),
             Inline::Math(t) => Inline::Math(t.clone()),
             Inline::Emph(x) => Inline::Emph(clone_inlines_at(x, depth + 1)),
