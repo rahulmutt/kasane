@@ -354,50 +354,23 @@ const P12_TEXTS: &[&str] = &[
 /// it prints nothing, and an inline that prints nothing sitting between two
 /// spans is exactly the shape the run scan has to see through.
 ///
-/// The alphabet is narrow in a second way, and this one is a **known
-/// limitation, not a choice**: no drawn `Emph`/`Strong` holds a
-/// delimiter-bearing child. It should. The member seam — one member's last
-/// child meeting the next member's first — is exactly where the run scan had
-/// to be taught to look, and only a delimiter-bearing child reaches it. Two
-/// separate defects, both present at this item's base and neither about
-/// fusion, make the equality above fail on shapes that hold one, so the seam
-/// is pinned by unit assertions in `markdown.rs` instead
-/// (`a_run_fuses_across_its_members_children_too`,
-/// `fusing_nested_emphasis_does_not_leak_its_delimiters`,
-/// `a_nested_emphasis_beside_other_content_joins_its_run`,
-/// `a_lone_nested_emphasis_keeps_its_own_delimiters`,
-/// `a_transparent_link_does_not_hide_a_collision_from_the_run_scan`):
+/// The alphabet draws two of the three delimiter-bearing children the parent
+/// spec named as blocked — `Emph([Emph([Text(w)])])` and
+/// `Strong([Emph([Text(w)])])` — because the seam between one member's last
+/// child and the next member's first is where the run scan had to be taught
+/// to look, and only such a child reaches it. Both were unblocked by
+/// `2026-08-15-emphasis-seam-design.md`.
 ///
-/// 1. **Emphasis flush against a word character with punctuation just inside
-///    it is not emphasis at all.** `emphasize` hoists edge *whitespace* outside
-///    the delimiters, which is what CommonMark's flanking rules ask for, but
-///    edge punctuation gets no such treatment: `[Text("a"), Emph([Code("a")])]`
-///    prints ``a*`a`*`` and recovers `a*a*`, with both asterisks visible in the
-///    prose. `[Emph([Text("a")]), Strong([Code("bc")])]` and
-///    `[Emph([Code("a")]), Text("a")]` fail the same way. Measured identical at
-///    this item's base; the writer has no way to know the character before its
-///    own delimiter today, so this needs its own item.
-/// 2. **A lone nested emphasis prints a delimiter its class does not name.**
-///    `Emph([Emph([Text("a")])])` prints `**a**` — the two pairs stack — so
-///    what it prints is a `**` run while `escape::delim` classes it as
-///    `Delim::Emph`. Beside a real `Strong` the two `**` runs meet and the text
-///    leaks. Also identical at base, with no run and no fusion involved.
-///    Splicing this child into its run *does* fix it — it then prints `*a*` —
-///    and `emphasis_run` splices every other such child; the lone-content
-///    carve-out that exempts this one exists to hold `kasane-cli`'s
-///    inline-depth e2e assertion, which counts `*` in writer output. That
-///    assertion belongs in `kasane-adapters`, and moving it closes this.
-///
-/// Widen the alphabet with `Emph(vec![Code(w)])` or
-/// `Emph(vec![Emph(vec![Text(w)])])` only together with a fix for the matching
-/// defect above, or this property goes red on something it was not written to
-/// find.
-///
-/// `Strong(vec![Emph(vec![Text(w)])])` is blocked by neither of those two, and
-/// is the widening to add first: it goes red within seconds on the third
-/// defect at this seam — `emphasize` wrapping an inner buffer whose edge
-/// already carries the other class's delimiter, so `*` meets `**` — which the
-/// escaping spec records as an open regression. Add it with that fix.
+/// `Emph(vec![Code(w)])` stays out. Not blocked by the old `emphasize`-seam
+/// defects that blocked the other two — a different one, now precisely
+/// known: `[Code("a"), Emph([Code("a")]), Text("a")]` prints `` `a``a`a ``
+/// and recovers `"a``aa"` against `rendered_text`'s `"aaa"`. The middle
+/// member declines its delimiters and prints its bare `Code` child, which
+/// then puts a backtick immediately after the previous code span's closing
+/// backtick; a parser reads that adjacent pair as one delimiter and the code
+/// span swallows past it. `tests/census.rs`'s allowlist already names this
+/// shape as one of the 32 it still tracks corrupt, and will fail the build
+/// the day someone closes it and leaves the entry stale.
 const P13_WORDS: &[&str] = &["a", "bc", "xyz"];
 
 fn p13_inline() -> impl Strategy<Value = Inline> {
@@ -408,6 +381,8 @@ fn p13_inline() -> impl Strategy<Value = Inline> {
         word().prop_map(|w| Inline::Emph(vec![Inline::Text(w)])),
         word().prop_map(|w| Inline::Strong(vec![Inline::Text(w)])),
         Just(Inline::Text(String::new())),
+        word().prop_map(|w| Inline::Emph(vec![Inline::Emph(vec![Inline::Text(w)])])),
+        word().prop_map(|w| Inline::Strong(vec![Inline::Emph(vec![Inline::Text(w)])])),
     ]
 }
 
