@@ -1294,15 +1294,17 @@ Which approach?
 
 ## Amendments during execution
 
-- **Task 5b, inserted between Tasks 5 and 6.** Tasks 3-4 named 10 shapes in
-  the allowlist that Task 5's flanking decline did not close (measured: 8
-  survived Task 5, since the decline closed 2 as a side effect); of those 10,
-  7 were genuine regressions against the branch's base and 3 were shapes
-  already corrupt at base that Task 3 fixed and Task 4 re-broke. All were a
-  same-length delimiter pair nesting mid-buffer — neither an edge collision
+- **Task 5b, inserted between Tasks 5 and 6.** 8 shapes survived Task 5's
+  flanking decline, out of the 10 Tasks 3-4 had named in the allowlist — the
+  decline closed the other 2 as a side effect, each a nested `Emph` that was
+  the run's *entire* content, not a same-length delimiter pair mid-buffer. Of
+  the original 10, 7 were genuine regressions against the branch's base and 3
+  were shapes already corrupt at base that Task 3 fixed and Task 4 re-broke.
+  The 8 that survived into Task 5b were, unlike the 2 the decline closed, all
+  a same-length delimiter pair nesting mid-buffer — neither an edge collision
   nor a flanking failure. Task 5b added a fourth rule, a same-`Delim` splice
-  applied anywhere in a run's children, and closed the 8 that remained.
-  Commits `6936036`, `ec95061`, `9033515`. Numbers re-derived from
+  applied anywhere in a run's children, and closed those 8. Commits
+  `6936036`, `ec95061`, `9033515`. Numbers re-derived from
   `census-known-corrupt.txt` at each commit with `comm`, not taken from
   either task's own report on trust — see the design spec's §8 result note
   for the full derivation.

@@ -160,6 +160,14 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   prev/next chain, path well-formedness, determinism. It reaches the writer
   rather than stopping at `kasane-core` because §9's link invariant is about a
   real file *and a real anchor*, which only rendered text can answer.
+  `tests/census.rs` is a second, exhaustive tier alongside it rather than a
+  replacement: it renders every sequence of length 1-3 over a small inline
+  alphabet, parses the result, and checks the recovered text against
+  `kasane_gfm::rendered_text` — the same equality a property samples, run over
+  all of a chosen alphabet instead of generated cases. It is what found the
+  emphasis-seam defects three property rounds missed, because a property draws
+  from an alphabet someone chose and a census draws from all of it; see
+  `census-known-corrupt.txt` above.
   `file_to_markdown` is what both the property suite and `write_tree_contents`
   render through, so what CI asserts is what a conversion writes.
   `escape.rs` is the only path from document text to an output buffer, and
@@ -193,23 +201,22 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `epub/xhtml.rs` and `epub/mod.rs` both build a note via
   `format!("image unavailable: {src}")` from an `<img src>` attribute the
   source document supplied.
-  Delimiter runs that share a character never abut in the printed line, by
-  four rules: a container at the edge of an emphasis run whose delimiter
-  shares the run's own *character* is spliced into it; a container *anywhere*
-  in a run whose `Delim` equals the run's own is spliced too, even where the
-  nesting it replaces would sometimes have printed correctly; two adjacent
-  runs spelled with the same character are fused into one run; and a
-  delimiter that would flank on neither side where it lands is not emitted at
-  all. CommonMark can express some of what these rules give up --
-  `[Emph(a), Strong(b)]` is expressible as two spans (`*a***b**` recovers
-  `ab`) and a same-`Delim` container can nest safely when its own delimiters
-  are one-sided-flanking (`*a *b* c*` keeps its inner `<em>`) -- but telling
-  that safe spelling apart from one that corrupts (`*a*b*c*`) means reasoning
-  about how a parser pairs delimiters, the mirror this repo has refused three
-  times. So the writer
-  trades the span boundary for the text -- which is the invariant -- uniformly
-  rather than case by case, and `kasane-writer/tests/census.rs` is the
-  exhaustive check that no such collision reaches the printed line regardless.
+  Delimiter runs that share a character never abut in the printed line, by four
+  rules: a container at the edge of an emphasis run whose delimiter shares the
+  run's own *character* is spliced into it; a container *anywhere* in a run
+  whose `Delim` equals the run's own is spliced too, even where the nesting it
+  replaces would sometimes have printed correctly; two adjacent runs spelled
+  with the same character are fused into one run; and a delimiter that would
+  fail to flank on either side where it lands is not emitted at all. CommonMark
+  can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
+  expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
+  container can nest safely when its own delimiters are one-sided-flanking (`*a
+  *b* c*` keeps its inner `<em>`) -- but telling that safe spelling apart from
+  one that corrupts (`*a*b*c*`) means reasoning about how a parser pairs
+  delimiters, the mirror this repo has refused three times. So the writer trades
+  the span boundary for the text -- which is the invariant -- uniformly rather
+  than case by case, and `kasane-writer/tests/census.rs` is the exhaustive check
+  that no such collision reaches the printed line regardless.
   `markdown.rs` decides all of this on a flattened view of the *printed*
   stream rather than on IR siblings, because the two are not the same list: an
   unresolved link prints only its children, so those children stand beside the
@@ -294,6 +301,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 - A failing property writes `crates/kasane-writer/tests/properties.proptest-regressions`.
   Commit it, for the same reason a fuzz reproducer is committed: it is what makes
   the found case a permanent regression test.
+- `crates/kasane-writer/tests/census-known-corrupt.txt` is a ratchet, not a
+  todo list: `census.rs` fails the build if a shape is corrupt and unlisted,
+  *and* if a listed shape is no longer corrupt, so the file cannot grow
+  silently or rot into stale excuses. Regenerate it with
+  `KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census` and read
+  the diff — that diff is the exact evidence a reviewer wants, of what a
+  change fixed or broke.
 - Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
   (64) is a fidelity bound that flattens without losing content;
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's

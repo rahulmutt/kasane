@@ -206,7 +206,12 @@ See AGENTS.md for the codebase map.
   space, or to `<br>` in a cell — because those places are a single line by
   grammar. And a merged-cell table, which is emitted as raw HTML, carries its
   emphasis as `<strong>`/`<em>` tags and its equations as literal LaTeX, since
-  GitHub parses no Markdown inside an HTML block.
+  GitHub parses no Markdown inside an HTML block. Adjacent emphasis that would
+  otherwise print two touching delimiter runs of the same character is merged
+  into one span instead, since CommonMark reads touching runs as one whether
+  or not that was intended: a document with `<em>a</em><strong>b</strong>`
+  side by side converts to a single `<em>ab</em>` rather than the two spans it
+  had. The recovered text is unaffected either way; only the span boundary is.
 - Block nesting is bounded, and deep nesting flattens rather than failing.
   Lists and footnotes nested past the EPUB parser's fidelity bound stop
   producing further nesting: an over-deep list's items become siblings at the

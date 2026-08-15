@@ -291,6 +291,13 @@ one it pins is structurally worse: 64 stacked `*` are read as 32 nested
 the property it was always about. The writer's central rule then needs no
 special case.
 
+### 2.5 A fourth rule, added mid-execution
+
+§2.1-§2.4 above were not revised to add the same-`Delim` splice a later task
+inserted; §8's result note is the current record of why it exists and what it
+cost, and `splice_children`'s doc comment (`markdown.rs`) is the current
+record of the rule itself.
+
 ## 3. Blast radius
 
 - **`markdown.rs`** — `flatten_into` loses `also`; `emphasis_run` is rewritten
@@ -518,12 +525,22 @@ inserted task, see the result note above:
 - **The shapes the allowlist still names after this item.** It closes the
   three families in §1's table, plus a fourth this item found and closed
   mid-execution (the same-`Delim` splice; see the result note above), and does
-  not claim the rest: 32 shapes remain named, including
-  `[Code("x"), Emph([Code("x")]), Text("a")]`, the census alphabet's instance
-  of the family §5.3 records as why `Emph(vec![Code(w)])` did not join P13's
-  alphabet. The allowlist makes them visible and bounded; a later item works
-  the list down. The risk is that the list is read as an acceptance rather
-  than a queue, which is why §5.1 makes a stale entry fail the build.
+  not claim the rest: 32 shapes remain named. All 32 are one family — verified
+  against the committed allowlist, not assumed — the flanking decline's
+  exposed backtick seam: `[backtick-bearing, Emph|Strong([Code]), Text]` and
+  its mirror `[Text, Emph|Strong([Code]), backtick-bearing]`.
+  `[Code("x"), Emph([Code("x")]), Text("a")]` is the census alphabet's
+  instance, and the same shape §5.3 records as why `Emph(vec![Code(w)])` did
+  not join P13's alphabet. The allowlist makes the family visible and
+  bounded; a later item works it down. The shape of that fix is already
+  known: a re-scan. If a declined run's children re-entered the outer view
+  before run detection instead of landing directly in the buffer,
+  `[Code("x"), Emph([Code("x")]), Text("a")]` would fuse to `` `xx` `` and
+  recover `xxa`, closing the whole residual set without any delimiter-pairing
+  logic — no approach-A reasoning required, just one more pass over the
+  declined run's own exposed edge. The risk today is that the list is read as
+  an acceptance rather than a queue, which is why §5.1 makes a stale entry
+  fail the build.
 - **The structural loss in §1.** `<em>a</em><strong>b</strong>` becomes one
   `<em>`. Deliberate, pinned by a unit test, and reversible only by approach A.
 - **The structural loss the same-`Delim` splice pays unconditionally.**
