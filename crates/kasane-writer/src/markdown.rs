@@ -522,30 +522,45 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 ///   why this rule only ever looks at the first and last printing element
 ///   (design spec § Confirmed).
 /// - **Anywhere, keyed on the *`Delim`* itself** ([`same_delim_to_splice`]).
-///   A container whose `Delim` equals the run's own cannot nest inside a span
-///   of that same length at all, wherever it sits: `*` inside `*...*` is not
-///   an arrangement CommonMark can express, so the delimiters pair against
-///   each other instead of against the ones the writer intended, and the
-///   leftovers survive into the visible text as literal asterisks. A
-///   container of a *different* length is unaffected and stays where it is —
-///   `*a**b**c*` is exactly how `<em>a<strong>b</strong>c</em>` is spelled and
-///   round-trips — which is why this rule is keyed on `Delim` and not on the
-///   character the edge rule uses.
+///   A container whose `Delim` equals the run's own is spliced wherever it
+///   sits, even though same-`Delim` nesting is sometimes expressible:
+///   `*a *b* c*` parses with its inner `<em>` intact, because the whitespace
+///   on both sides of the inner `*`s stops them from flanking the way the
+///   outer pair does, so a parser pairs them with each other rather than the
+///   outer delimiters. Telling that case apart from one that would corrupt —
+///   `*a*b*c*`, no whitespace, where the inner delimiters *do* flank and pair
+///   with the outer ones, silently dropping the middle character's emphasis
+///   — means reasoning about how a parser pairs delimiters at splice time:
+///   the hand-mirrored CommonMark rule design spec §7 approach A rejects,
+///   and which this run scan exists to retire rather than reimplement one
+///   seam at a time. So this rule splices unconditionally and pays the cost
+///   on shapes it did not strictly have to — the same trade
+///   `fusing_adjacent_runs_costs_a_structural_boundary` pins for the run
+///   fuse, paid here for the same reason and pinned by
+///   `splicing_mid_buffer_costs_a_span_that_would_round_trip` (design spec §
+///   Confirmed). A container of a *different* length is unaffected and stays
+///   where it is — `*a**b**c*` is exactly how
+///   `<em>a<strong>b</strong>c</em>` is spelled and round-trips — which is
+///   why this rule is keyed on `Delim` and not on the character the edge
+///   rule uses.
 ///
 /// These are two rules and not one rule with an inconsistent key: the
 /// character rule exists because two *different* classes abut into a run a
-/// parser re-splits; the `Delim` rule exists because two *same*-length
-/// delimiters can never nest at all, regardless of adjacency. Neither
-/// subsumes the other — dropping the edge rule would leave `*a***b*` (an
-/// `Emph` and a `Strong` abutting at the edge) unclosed, and dropping the
-/// `Delim` rule would leave this task's shapes unclosed.
+/// parser re-splits; the `Delim` rule exists because a same-length pair
+/// *can* corrupt when it nests, and telling a corrupting nest apart from a
+/// safe one is the very delimiter-pairing logic this item refuses to
+/// reimplement. Neither subsumes the other — dropping the edge rule would
+/// leave `*a***b*` (an `Emph` and a `Strong` abutting at the edge) unclosed,
+/// and dropping the `Delim` rule would leave this task's shapes unclosed.
 ///
 /// Splicing replaces a container with its own children, which may expose a
 /// new collision — a new edge, or a new element the `Delim` rule can now see
 /// — so the loop repeats until neither rule finds anything. It terminates
 /// because each splice replaces one container with its own children, so the
-/// number of IR nodes the view spans strictly decreases, and `flatten_into`
-/// yields nothing at `MAX_INLINE_DEPTH`.
+/// number of IR nodes the view spans strictly decreases (read as the subtree
+/// each pointer roots, not as `children.len()` — which usually *grows* on a
+/// splice, since a container's children are often more than one element),
+/// and `flatten_into` yields nothing at `MAX_INLINE_DEPTH`.
 ///
 /// Only pointers move: `flatten_into` borrows, and `Vec::splice` shuffles
 /// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
@@ -1964,14 +1979,16 @@ mod tests {
         // Mid-buffer, not an edge — and, before controller-authored task 5b,
         // left alone here because the edge rule only looks at the first and
         // last printing element. That used to print `*a*b*c*`, which is worse
-        // than it looks: a parser pairs delimiter 0 with 2 and 4 with 6, so
-        // "b" comes back in neither `<em>` at all, silently losing the
-        // emphasis the source put on it (nested `Emph` inside `Emph` is not
-        // an arrangement CommonMark can spell, so it was never really
-        // reachable through this printed form). Task 5b's `Delim`-keyed rule
-        // splices the inner `Emph` away wherever it sits, so this now joins
-        // the outer run exactly as the edge cases above do, and "b" comes
-        // back inside the one `<em>` that actually reaches it.
+        // than it looks: with no whitespace around the inner `*`s they flank
+        // on both sides, so a parser pairs delimiter 0 with 2 and 4 with 6,
+        // and "b" comes back in neither `<em>` at all, silently losing the
+        // emphasis the source put on it. (Whitespace changes this --
+        // `splicing_mid_buffer_costs_a_span_that_would_round_trip` pins the
+        // shape where the inner span would have round-tripped intact -- but
+        // task 5b's `Delim`-keyed rule splices the inner `Emph` away
+        // wherever it sits regardless, so this now joins the outer run
+        // exactly as the edge cases above do, and "b" comes back inside the
+        // one `<em>` that actually reaches it.)
         let mid = vec![em(vec![t("a"), em(vec![t("b")]), t("c")])];
         assert_eq!(para(mid.clone()), "*abc*");
         assert_eq!(recovered(mid.clone()), "abc");
@@ -1989,9 +2006,9 @@ mod tests {
     /// so nothing depends on the delimiter count any more. A run whose only
     /// member is a nested container is a run whose one element is both the
     /// first and the last, so `splice_children`'s edge rule treats it exactly
-    /// like any other edge and it collapses all the way down to one delimiter
-    /// pair, same as
-    /// `the_trim_repeats_until_neither_edge_is_a_container`. The text still
+    /// like any other edge and it collapses all the way down to one
+    /// delimiter pair, same as
+    /// `splicing_repeats_until_neither_rule_finds_anything`. The text still
     /// survives intact either way.
     #[test]
     fn a_lone_nested_emphasis_collapses_to_one_delimiter_pair() {
@@ -2100,30 +2117,45 @@ mod tests {
         );
     }
 
-    /// Splicing exposes a new edge, so the trim repeats. Three levels collapse
-    /// to one.
+    /// Splicing exposes a new edge every time, so the loop repeats. Three
+    /// levels collapse to one. This no longer isolates the edge rule on its
+    /// own: a run whose one member is a nested container of its own class is
+    /// caught by both `edge_to_splice` and `same_delim_to_splice` at every
+    /// step (a one-element buffer is simultaneously the first, the last, and
+    /// a same-`Delim` match), so what this pins is the loop's repetition
+    /// itself, not which rule does the catching.
     #[test]
-    fn the_trim_repeats_until_neither_edge_is_a_container() {
+    fn splicing_repeats_until_neither_rule_finds_anything() {
         let inner = Inline::Emph(vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
             "a".into(),
         )])])]);
         assert_eq!(para(vec![inner]), "*a*");
     }
 
-    /// A container *between* other content contributes its delimiters with
-    /// content on both sides, so nothing abuts and nothing is trimmed. This is
-    /// the control: over-trimming here would flatten structure that is correct
-    /// today, for no text gain (design spec § Confirmed).
+    /// A container *between* other content whose `Delim` **differs** from
+    /// the run's own contributes its delimiters with content on both sides,
+    /// so nothing abuts and nothing is spliced: flattening it would lose
+    /// structure that is correct today, for no text gain (design spec §
+    /// Confirmed). This is also why the `Delim` rule is keyed on `Delim` and
+    /// not on the character the edge rule uses — a `Strong` inside an `Emph`
+    /// run is spelled `*a**b**c*`, exactly how
+    /// `<em>a<strong>b</strong>c</em>` is written, and it round-trips both
+    /// ways; splicing on the character alone would flatten it for no gain.
+    ///
+    /// A *same*-`Delim` container in the middle is a different case, not
+    /// this one — it is spliced unconditionally, even on a shape that would
+    /// have round-tripped intact — and it is pinned separately by
+    /// `a_same_class_container_mid_buffer_is_spliced` and
+    /// `splicing_mid_buffer_costs_a_span_that_would_round_trip`.
     #[test]
     fn a_container_mid_buffer_is_left_alone() {
-        assert_eq!(
-            para(vec![Inline::Emph(vec![
-                Inline::Text("a".into()),
-                Inline::Strong(vec![Inline::Text("b".into())]),
-                Inline::Text("c".into()),
-            ])]),
-            "*a**b**c*"
-        );
+        let inls = vec![Inline::Emph(vec![
+            Inline::Text("a".into()),
+            Inline::Strong(vec![Inline::Text("b".into())]),
+            Inline::Text("c".into()),
+        ])];
+        assert_eq!(para(inls.clone()), "*a**b**c*");
+        assert_eq!(recovered(inls), "abc");
     }
 
     /// A backtick at an edge does not share a character with `*`, so it does
@@ -2216,11 +2248,18 @@ mod tests {
     }
 
     /// A container of the run's own class sitting *between* other content is
-    /// spliced, not left alone: `*` inside `*...*` is not an arrangement
-    /// CommonMark can express, so the delimiters do not pair the way the
-    /// nesting intended and the leftovers survive into the visible text. This
-    /// shape printed `*a*a*`x`*` and recovered `aa*x*` before this task
+    /// spliced, not left alone. Before this task this shape printed
+    /// `*a*a*`x`*`: the opener at index 0 pairs with the inner span's own
+    /// opener at index 2, so the delimiters at 4 and 8 are left with no
+    /// opener to pair with and survive into the visible text as literal
+    /// asterisks -- recovering `aa*x*` instead of `aax`
     /// (controller-authored task 5b; see the ledger's Task 4 rulings).
+    ///
+    /// The splice happens even though not every same-`Delim` nest would
+    /// actually corrupt this way — see
+    /// `splicing_mid_buffer_costs_a_span_that_would_round_trip` for the
+    /// shape where it wouldn't have, and `splice_children`'s doc for why the
+    /// rule flattens both alike rather than telling them apart.
     #[test]
     fn a_same_class_container_mid_buffer_is_spliced() {
         let inls = vec![
@@ -2232,19 +2271,35 @@ mod tests {
         assert_eq!(recovered(inls), "aax");
     }
 
-    /// The control that keeps this rule honest, and the reason it is keyed on
-    /// `Delim` rather than on the delimiter character: a `Strong` inside an
-    /// `Emph` run is spelled `*a**b**c*`, which is exactly how
-    /// `<em>a<strong>b</strong>c</em>` is written and round-trips perfectly.
-    /// Splicing on the character alone would flatten it for no text gain.
+    /// The trade `splice_children`'s `Delim` rule pays on a shape that was
+    /// not broken, in the same spirit as
+    /// `fusing_adjacent_runs_costs_a_structural_boundary`. Before this task,
+    /// `Emph([Text("a "), Emph([Text("b")]), Text(" c")])` printed
+    /// `*a *b* c*`, and a real parser keeps the inner `<em>` intact: the
+    /// whitespace on both sides of the inner `*`s stops them from flanking
+    /// the way the outer pair does, so CommonMark pairs them with each
+    /// other, not with the run's own delimiters. `same_delim_to_splice` does
+    /// not reason about that — it splices any same-`Delim` container
+    /// regardless of whether nesting it would actually have collided — so
+    /// this now prints `*a b c*` and the inner `<em>` is gone on a shape
+    /// that used to round-trip structurally as well as textually.
+    ///
+    /// The alternative — check whether the inner delimiters would actually
+    /// flank and pair before splicing, and leave them alone when they
+    /// wouldn't collide — was rejected. That check is exactly the
+    /// hand-mirrored CommonMark delimiter-pairing logic design spec §7
+    /// approach A refuses, and which this run scan exists to retire rather
+    /// than reimplement one seam at a time (controller's ruling on this
+    /// task's brief). The invariant this item holds is text, not structure,
+    /// and the text survives here unchanged.
     #[test]
-    fn a_different_class_container_mid_buffer_is_still_left_alone() {
+    fn splicing_mid_buffer_costs_a_span_that_would_round_trip() {
         let inls = vec![Inline::Emph(vec![
-            Inline::Text("a".into()),
-            Inline::Strong(vec![Inline::Text("b".into())]),
-            Inline::Text("c".into()),
+            Inline::Text("a ".into()),
+            Inline::Emph(vec![Inline::Text("b".into())]),
+            Inline::Text(" c".into()),
         ])];
-        assert_eq!(para(inls.clone()), "*a**b**c*");
-        assert_eq!(recovered(inls), "abc");
+        assert_eq!(para(inls.clone()), "*a b c*");
+        assert_eq!(recovered(inls), "a b c");
     }
 }
