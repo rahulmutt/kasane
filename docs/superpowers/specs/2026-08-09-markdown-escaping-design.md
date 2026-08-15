@@ -553,9 +553,39 @@ here as a question rather than a defect.
   the same way and also present at base. `Emph([Emph([Text("a")])])` prints
   `**a**`, since the two pairs stack, but `escape::delim` classes it
   `Delim::Emph`; beside a real `Inline::Strong` the two `**` runs meet and the
-  text leaks. Fusing cannot fix it — the two are different classes and must
-  not merge — so the delimiter class would have to become a (character, length)
-  pair, which is a design question rather than an edit.
+  text leaks. Corrected 2026-08-15 in the fusion item's own review: this
+  bullet first said "fusing cannot fix it … the delimiter class would have to
+  become a (character, length) pair", and that was measured false. Splicing a
+  child that prints the run's own delimiter makes `Emph([Emph([Text("a")])])`
+  print `*a*`, so what it prints matches what its class names, and the leak
+  goes. The fusion item does splice that child — except when it is the run's
+  whole content, a carve-out that exists only to preserve the `*` count
+  `kasane-cli/tests/e2e.rs` counts to observe the EPUB adapter's inline-depth
+  bound through writer bytes. Move that assertion into `kasane-adapters`,
+  where it can read `Emph` nesting off the parsed IR, and the splice becomes
+  uniform and this bullet closes with it.
+- **An emphasis delimiter meeting the *other* class's delimiter at
+  `emphasize`'s wrap seam.** Found 2026-08-15 by the fusion item's
+  whole-branch review, which ran an exhaustive differential census — every
+  inline sequence of length 1-3 over an 18-element alphabet, ~5,800 shapes,
+  parsed text against `rendered_text`. That census is the number to beat:
+  1604 shapes corrupt at that item's base, 715 after it. **18 of the 715 were
+  correct at its base**, so this bullet records a regression, not a survival.
+  `emphasize` wraps an inner buffer whose edge already carries the other
+  class's delimiter, so a `*` meets a `**` and the parser mis-splits the run:
+  `<em>a</em><strong>b</strong><strong><em>c</em></strong>` printed
+  `*a***b*****c***` and recovered `abc` before that item, prints `*a***b*c***`
+  and recovers `abc**` after it. No exotic IR is needed and the EPUB path
+  produces it. It is the same §5 violation as the two bullets above and the
+  fusion item itself, at the third seam of the same function, and the three
+  should close together: the candidate rule is that `emphasize` separates the
+  delimiter it is about to add from an inner buffer that already starts or
+  ends with that character, the way it already separates edge whitespace.
+  Fusing cannot reach it — the two runs are different classes and must not
+  merge — which is why the fusion item, whose spec §3 puts `emphasize` out of
+  scope, deliberately left it rather than patching the run scan a third time.
+  Two attempts to close this family from the run scan each closed their named
+  shapes and introduced new ones.
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14 as well:

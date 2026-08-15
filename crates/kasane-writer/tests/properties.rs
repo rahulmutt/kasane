@@ -382,11 +382,22 @@ const P12_TEXTS: &[&str] = &[
 ///    what it prints is a `**` run while `escape::delim` classes it as
 ///    `Delim::Emph`. Beside a real `Strong` the two `**` runs meet and the text
 ///    leaks. Also identical at base, with no run and no fusion involved.
+///    Splicing this child into its run *does* fix it — it then prints `*a*` —
+///    and `emphasis_run` splices every other such child; the lone-content
+///    carve-out that exempts this one exists to hold `kasane-cli`'s
+///    inline-depth e2e assertion, which counts `*` in writer output. That
+///    assertion belongs in `kasane-adapters`, and moving it closes this.
 ///
 /// Widen the alphabet with `Emph(vec![Code(w)])` or
 /// `Emph(vec![Emph(vec![Text(w)])])` only together with a fix for the matching
 /// defect above, or this property goes red on something it was not written to
 /// find.
+///
+/// `Strong(vec![Emph(vec![Text(w)])])` is blocked by neither of those two, and
+/// is the widening to add first: it goes red within seconds on the third
+/// defect at this seam — `emphasize` wrapping an inner buffer whose edge
+/// already carries the other class's delimiter, so `*` meets `**` — which the
+/// escaping spec records as an open regression. Add it with that fix.
 const P13_WORDS: &[&str] = &["a", "bc", "xyz"];
 
 fn p13_inline() -> impl Strategy<Value = Inline> {
