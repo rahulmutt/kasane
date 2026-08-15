@@ -372,6 +372,20 @@ pub(crate) fn delim(i: &Inline) -> Option<Delim> {
 
 Insert directly below `inlines_to_md_at` (above `emphasize`):
 
+> **Corrected by Task 2's review (round 1 of 5).** The two code blocks below are
+> the *fixed* versions, not what Step 4 originally specified. The original
+> `renders_empty` had `_ => false` for `Inline::Link` unconditionally, which is
+> a false negative on an unresolved (non-`External`) link with empty
+> `inlines` — that shape prints nothing (the "unresolved -> text" arm emits no
+> brackets), so the old code left it able to break a run it should have been
+> swallowed by, reopening the exact collision this item exists to close. The
+> original `run_end` returned the position after the *last matching* member
+> (`end`) rather than the scan cursor (`k`), leaving any trailing
+> delimiter-bearing-but-vacuous tail for the outer loop to re-walk on its next
+> iteration — quadratic on a long vacuous run (`[Emph(vec![]); m]`) where the
+> loop it replaced was linear. A future reader implementing this plan from
+> scratch should write the code below, not the shape this note describes.
+
 ```rust
 /// Whether this inline prints nothing at all.
 ///
@@ -386,15 +400,25 @@ Insert directly below `inlines_to_md_at` (above `emphasize`):
 /// does print nothing — which is why this takes the caller's absolute `depth`
 /// rather than counting from zero.
 ///
+/// `Inline::Link` splits by target the same way the renderer does: an
+/// `External` link always prints its `[...](...)` brackets, so it is never
+/// vacuous even with empty `inlines` — but an unresolved link (any other
+/// target) renders as just its children with no brackets at all
+/// (`inlines_to_md_at`'s "unresolved -> text" arm), so it is a container like
+/// `Emph`/`Strong` and follows the same rule.
+///
 /// Everything else is non-vacuous by construction: `Code("")` prints
-/// `` ` ` ``, `Math("")` prints `$$`, a `Link` prints its brackets, a
-/// `FootnoteRef` prints `[^n]`.
+/// `` ` ` ``, `Math("")` prints `$$`, a `FootnoteRef` prints `[^n]`.
 fn renders_empty(i: &Inline, depth: usize) -> bool {
     match i {
         Inline::Text(t) => t.is_empty(),
         Inline::Emph(x) | Inline::Strong(x) => {
             depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
                 || x.iter().all(|c| renders_empty(c, depth + 1))
+        }
+        Inline::Link { target, inlines } if !matches!(target, RefTarget::External(_)) => {
+            depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
+                || inlines.iter().all(|c| renders_empty(c, depth + 1))
         }
         _ => false,
     }
@@ -406,25 +430,31 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
 /// character between the two delimiters, so the collision happens across it
 /// anyway. One inside a run is swallowed and never rendered, which is
 /// equivalent, because the only thing it would have contributed is the empty
-/// string. One *after* the last member is left for the outer loop, which
-/// renders it as the no-op it is.
+/// string.
+///
+/// A *trailing* vacuous tail — past the last member that actually matched the
+/// delimiter — is swallowed too, rather than left at `k` for the outer loop to
+/// walk again next iteration. That is output-identical, not merely
+/// convenient: every member in that tail failed the delimiter-match branch and
+/// was consumed by the vacuity branch instead, so `backtick_run_content`
+/// (which only ever appends a `Code`/`Math`) and `emphasis_run` (which only
+/// ever appends an `Emph`/`Strong`, and appends the empty string for a vacuous
+/// one) already treat it as contributing nothing, and `pos` does not move for
+/// a member that appends nothing either way. Returning the shorter "last real
+/// match" bound instead would leave that tail for the *next* call to re-walk
+/// from its own start — quadratic in the length of a long vacuous run (e.g.
+/// `[Emph(vec![]); m]`, where every element is both delimiter-bearing and
+/// vacuous) where the loop this replaced was linear.
 fn run_end(inls: &[Inline], start: usize, depth: usize) -> usize {
     let Some(d) = escape::delim(&inls[start]) else {
         return start + 1;
     };
-    let mut end = start + 1;
     let mut k = start + 1;
-    while k < inls.len() {
-        if renders_empty(&inls[k], depth) {
-            k += 1;
-        } else if escape::delim(&inls[k]) == Some(d) {
-            k += 1;
-            end = k;
-        } else {
-            break;
-        }
+    while k < inls.len() && (renders_empty(&inls[k], depth) || escape::delim(&inls[k]) == Some(d))
+    {
+        k += 1;
     }
-    end
+    k
 }
 
 /// The content one code span carries for a whole backtick run.

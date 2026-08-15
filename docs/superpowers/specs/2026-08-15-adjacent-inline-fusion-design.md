@@ -230,18 +230,35 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
             depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
                 || x.iter().all(|c| renders_empty(c, depth + 1))
         }
+        Inline::Link { target, inlines } if !matches!(target, RefTarget::External(_)) => {
+            depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
+                || inlines.iter().all(|c| renders_empty(c, depth + 1))
+        }
         _ => false,
     }
 }
 ```
 
-Three details, each of them a mirror of something already established:
+Four details, each of them a mirror of something already established:
 
 - `Text(t)` is vacuous exactly when `t` is empty, because `escape::text` never
   deletes (§1, "Confirmed").
 - `Emph`/`Strong` are vacuous exactly when every child is, because `emphasize`
   returns its inner string unchanged when that string is blank, and the inner
   string is the concatenation of the children's output.
+- `Link` splits by target the same way the renderer does. An `External` link
+  always emits its `[...](...)` brackets, so it is never vacuous even with
+  empty `inlines`. Any other target renders through the "unresolved -> text"
+  arm instead, which prints only `inlines_to_md_at(inlines, ...)` with no
+  brackets at all — a container exactly like `Emph`/`Strong`, and it follows
+  the same rule. This is reachable beyond hand-built IR: the shared EPUB
+  XHTML parser emits a bare empty anchor as `Inline::Link` with empty
+  `inlines`, stripped only on the mobi path — the epub adapter builds
+  `Internal`-target links from the same parser. Missing this arm was a false
+  negative caught in review: `renders_empty` reported `false` for every
+  `Link`, so `[Code("x"), Link{Internal(_), []}, Code("y")]` still broke the
+  run at an inline emitting zero characters and printed the exact fused
+  collision this item exists to close.
 - The depth term is not a safety bound bolted on; it is the mirror.
   `inlines_to_md_at` returns `String::new()` at `depth >= MAX_INLINE_DEPTH`, so
   a container whose children sit at or past the bound really does print
@@ -249,10 +266,10 @@ Three details, each of them a mirror of something already established:
   absolute `depth` for that reason, not a fresh counter.
 
 Everything else is non-vacuous by construction: `Code("")` prints `` ` ` ``,
-`Math("")` prints `$$`, a `Link` prints its brackets, a `FootnoteRef` prints
-`[^n]`. A whitespace-only inline is deliberately non-vacuous — it prints a
-space, which separates the neighbours it sits between, and treating it as
-transparent would fuse two spans a reader can see are apart.
+`Math("")` prints `$$`, a `FootnoteRef` prints `[^n]`. A whitespace-only
+inline is deliberately non-vacuous — it prints a space, which separates the
+neighbours it sits between, and treating it as transparent would fuse two
+spans a reader can see are apart.
 
 ### 2.4 What moves that was not broken
 

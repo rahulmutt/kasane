@@ -297,15 +297,30 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
 /// does print nothing — which is why this takes the caller's absolute `depth`
 /// rather than counting from zero.
 ///
+/// `Inline::Link` splits by target the same way the renderer does. An
+/// `External` link always emits its `[...](...)` brackets
+/// (`inlines_to_md_at`'s own arm for it), so it is never vacuous even with
+/// empty `inlines`. Any other target renders through the "unresolved -> text"
+/// arm instead, which prints *only* `inlines_to_md_at(inlines, ...)` with no
+/// brackets at all — a container exactly like `Emph`/`Strong`, and it follows
+/// the same rule. Reachable beyond hand-built IR: the shared EPUB XHTML parser
+/// emits a bare empty anchor as `Inline::Link` with empty `inlines`
+/// (`kasane-adapters/src/mobi/mod.rs` strips it only on the mobi path;
+/// `kasane-adapters/src/epub/mod.rs` builds `Internal`-target links from the
+/// same parser).
+///
 /// Everything else is non-vacuous by construction: `Code("")` prints
-/// `` ` ` ``, `Math("")` prints `$$`, a `Link` prints its brackets, a
-/// `FootnoteRef` prints `[^n]`.
+/// `` ` ` ``, `Math("")` prints `$$`, a `FootnoteRef` prints `[^n]`.
 fn renders_empty(i: &Inline, depth: usize) -> bool {
     match i {
         Inline::Text(t) => t.is_empty(),
         Inline::Emph(x) | Inline::Strong(x) => {
             depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
                 || x.iter().all(|c| renders_empty(c, depth + 1))
+        }
+        Inline::Link { target, inlines } if !matches!(target, RefTarget::External(_)) => {
+            depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
+                || inlines.iter().all(|c| renders_empty(c, depth + 1))
         }
         _ => false,
     }
@@ -317,25 +332,30 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
 /// character between the two delimiters, so the collision happens across it
 /// anyway. One inside a run is swallowed and never rendered, which is
 /// equivalent, because the only thing it would have contributed is the empty
-/// string. One *after* the last member is left for the outer loop, which
-/// renders it as the no-op it is.
+/// string.
+///
+/// A *trailing* vacuous tail — past the last member that actually matched the
+/// delimiter — is swallowed too, rather than left at `k` for the outer loop to
+/// walk again next iteration. That is output-identical, not merely
+/// convenient: every member in that tail failed the delimiter-match branch
+/// and was consumed by the vacuity branch instead, so `backtick_run_content`
+/// (which only ever appends a `Code`/`Math`) and `emphasis_run` (which only
+/// ever appends an `Emph`/`Strong`, and appends the empty string for a
+/// vacuous one) already treat it as contributing nothing, and `pos` does not
+/// move for a member that appends nothing either way. Returning the shorter
+/// "last real match" bound instead would leave that tail for the *next* call
+/// to re-walk from its own start — quadratic in the length of a long vacuous
+/// run (e.g. `[Emph(vec![]); m]`, where every element is both
+/// delimiter-bearing and vacuous) where the loop this replaced was linear.
 fn run_end(inls: &[Inline], start: usize, depth: usize) -> usize {
     let Some(d) = escape::delim(&inls[start]) else {
         return start + 1;
     };
-    let mut end = start + 1;
     let mut k = start + 1;
-    while k < inls.len() {
-        if renders_empty(&inls[k], depth) {
-            k += 1;
-        } else if escape::delim(&inls[k]) == Some(d) {
-            k += 1;
-            end = k;
-        } else {
-            break;
-        }
+    while k < inls.len() && (renders_empty(&inls[k], depth) || escape::delim(&inls[k]) == Some(d)) {
+        k += 1;
     }
-    end
+    k
 }
 
 /// The content one code span carries for a whole backtick run.
@@ -1399,5 +1419,79 @@ mod tests {
             ]),
             "*a b*"
         );
+    }
+
+    /// An unresolved link (any `RefTarget` other than `External`) with no
+    /// printing children renders through the "unresolved -> text" arm as
+    /// nothing at all — no brackets, no text — so it is vacuous like an empty
+    /// `Emph`, and must not break a run. Before this test's fix, `renders_empty`
+    /// reported `false` for every `Link`, so this exact shape still printed
+    /// `` `x``y` `` — the fusion bug reopened through a different inline.
+    #[test]
+    fn an_unresolved_link_with_no_printing_children_does_not_break_a_run() {
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Link {
+                    target: RefTarget::Internal(BlockId(0)),
+                    inlines: vec![],
+                },
+                Inline::Code("y".into()),
+            ]),
+            "`xy`"
+        );
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Link {
+                    target: RefTarget::Footnote(NoteId(1)),
+                    inlines: vec![],
+                },
+                Inline::Code("y".into()),
+            ]),
+            "`xy`"
+        );
+    }
+
+    /// The other direction: an unresolved link that DOES print something (its
+    /// children are non-vacuous) is not vacuous itself, and genuinely
+    /// separates two code spans — fusing across it would delete the text it
+    /// carries.
+    #[test]
+    fn an_unresolved_link_with_printing_children_separates_a_run() {
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Link {
+                    target: RefTarget::Internal(BlockId(0)),
+                    inlines: vec![Inline::Text("mid".into())],
+                },
+                Inline::Code("y".into()),
+            ]),
+            "`x`mid`y`"
+        );
+    }
+
+    /// `run_end` swallows a trailing run of vacuous inlines past the last real
+    /// match rather than leaving them for the next iteration (review finding:
+    /// leaving them made the scan quadratic on a long vacuous tail). Pinned
+    /// here as an output-identity claim: a code-span run followed by trailing
+    /// vacuous inlines must render exactly as the code-span run alone, with
+    /// nothing appended by the swallowed tail.
+    #[test]
+    fn a_trailing_vacuous_tail_after_a_run_renders_as_the_run_alone() {
+        let baseline = para(vec![Inline::Code("x".into()), Inline::Code("y".into())]);
+        let with_tail = para(vec![
+            Inline::Code("x".into()),
+            Inline::Code("y".into()),
+            Inline::Emph(vec![]),
+            Inline::Text(String::new()),
+            Inline::Link {
+                target: RefTarget::Internal(BlockId(0)),
+                inlines: vec![],
+            },
+        ]);
+        assert_eq!(with_tail, baseline);
+        assert_eq!(with_tail, "`xy`");
     }
 }
