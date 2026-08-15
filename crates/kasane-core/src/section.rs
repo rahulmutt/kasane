@@ -182,6 +182,18 @@ pub(crate) fn clone_inlines_at(inls: &[Inline], depth: usize) -> Vec<Inline> {
         .collect()
 }
 
+/// The engine's inline canonicalization, exposed for the property tier.
+///
+/// `#[doc(hidden)]` because it is a test seam, not API — the same convention
+/// `balance::est_tokens` uses, and for the same reason. P12 has to compare an
+/// anchor against the line the writer prints for the SAME inlines the engine
+/// anchored, and the engine anchors canonicalized ones. A copy of the rule in
+/// the test would pass against its own arithmetic while the engine's changed.
+#[doc(hidden)]
+pub fn canonicalize_inlines(inls: &[Inline]) -> Vec<Inline> {
+    clone_inlines_at(inls, 0)
+}
+
 fn clone_ref_target(t: &RefTarget) -> RefTarget {
     match t {
         RefTarget::Internal(id) => RefTarget::Internal(*id),

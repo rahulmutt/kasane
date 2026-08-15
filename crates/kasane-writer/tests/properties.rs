@@ -14,7 +14,7 @@
 mod generator;
 
 use generator::{Case, Expect};
-use kasane_core::{est_tokens, structure, FileNode};
+use kasane_core::{canonicalize_inlines, est_tokens, structure, FileNode};
 use kasane_gfm::{anchor_slug_of, anchors_for_headings};
 use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
 use proptest::prelude::*;
@@ -706,6 +706,48 @@ proptest! {
             rendered.first().map(String::as_str),
             Some(embedded.as_str()),
             "anchor/render divergence:\n{}", md
+        );
+    }
+
+    /// P12 — an empty inline code span in a heading anchors the space the
+    /// printed line actually contains (design spec
+    /// 2026-08-14-empty-code-span-anchor-design.md §2.3).
+    ///
+    /// CommonMark cannot express an empty code span, so `code_span` prints one
+    /// as `` ` ` ``. That padding space is real text in the rendered line, and
+    /// GitHub ids the heading from the rendered line. `rendered_text` read the
+    /// span's content verbatim and saw nothing there, so the engine embedded
+    /// an anchor one hyphen short — dead against GitHub's own render.
+    ///
+    /// The inlines go through `canonicalize_inlines` because that is what the
+    /// engine anchors: `structure` applies it to every inline before
+    /// `assign_paths` runs. Comparing against raw inlines would test a
+    /// pipeline that does not exist.
+    #[test]
+    fn p12_an_empty_code_span_in_a_heading_anchors_the_same(
+        lead in "[a-z]{1,4}",
+        tail in "[a-z]{1,4}",
+    ) {
+        let inlines = canonicalize_inlines(&[
+            Inline::Text(lead.clone()),
+            Inline::Code(String::new()),
+            Inline::Text(tail.clone()),
+        ]);
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: inlines.clone(),
+        }];
+        let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let rendered = anchors_for_headings(&parse_events(&md).headings);
+        let embedded = anchor_slug_of(&inlines);
+
+        prop_assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(embedded.as_str()),
+            "anchor/render divergence for an empty code span between {:?} and {:?}:\n{}",
+            lead, tail, md
         );
     }
 }
