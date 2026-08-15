@@ -222,34 +222,20 @@ type Flat<'a> = (&'a Inline, usize);
 /// the same insight at full strength, since the property that matters at a run
 /// boundary is transparency and not vacuity (design spec §2.3).
 ///
-/// `also` names a *second* transparency, used only from [`emphasis_run`]: inside
-/// a run printing that delimiter, a container printing the same one emits no
-/// delimiter a parser can tell apart from the run's own. `None` — every other
-/// caller — matches nothing, since [`escape::delim`] returns `Some` for both
-/// `Emph` and `Strong`.
-///
 /// **Only pointers are copied.** No `Inline` is cloned or rewritten, which is
 /// the constraint design spec §2.2 imposes: `Inline`'s derived `Clone` recurses
 /// once per nesting level, so a hand-built tree past the bound would overflow
 /// the stack inside the clone *before* the depth guard could discard it. That
 /// guard is the one below, applied while the view is built rather than after —
 /// children at or past `MAX_INLINE_DEPTH` print nothing, so they enter no view.
-fn flatten_into<'a>(
-    inls: &'a [Inline],
-    depth: usize,
-    also: Option<escape::Delim>,
-    out: &mut Vec<Flat<'a>>,
-) {
+fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return;
     }
     for i in inls {
         match i {
             Inline::Link { target, inlines } if !matches!(target, RefTarget::External(_)) => {
-                flatten_into(inlines, depth + 1, also, out)
-            }
-            Inline::Emph(x) | Inline::Strong(x) if escape::delim(i) == also => {
-                flatten_into(x, depth + 1, also, out)
+                flatten_into(inlines, depth + 1, out)
             }
             _ => out.push((i, depth)),
         }
@@ -261,7 +247,7 @@ fn flatten_into<'a>(
 /// at or past the bound.
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
     let mut view = Vec::new();
-    flatten_into(inls, depth, None, &mut view);
+    flatten_into(inls, depth, &mut view);
     inlines_to_md_flat(&view, ctx, pos)
 }
 
@@ -469,41 +455,75 @@ fn backtick_run_content(members: &[Flat<'_>]) -> String {
     content
 }
 
+/// The flattened view of every member's children, as one sequence.
+fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
+    let mut out = Vec::new();
+    for &(m, depth) in members {
+        if let Inline::Emph(x) | Inline::Strong(x) = m {
+            flatten_into(x, depth + 1, &mut out);
+        }
+    }
+    out
+}
+
+/// The index of a leading or trailing printing element that must be spliced,
+/// or `None` when neither edge collides.
+fn edge_to_splice(children: &[Flat<'_>], ch: char) -> Option<usize> {
+    let printing = |&&(i, d): &&Flat<'_>| !renders_empty(i, d);
+    let first = children.iter().position(|c| printing(&c));
+    let last = children.iter().rposition(|c| printing(&c));
+    [first, last]
+        .into_iter()
+        .flatten()
+        .find(|&idx| escape::delim(children[idx].0).map(escape::Delim::ch) == Some(ch))
+}
+
+/// Trim a run's children at both edges while the outermost printing element is
+/// a container whose delimiter shares a character with the run's own.
+///
+/// The edge is where a collision can happen and the only place it can:
+/// `emphasize` appends its delimiter immediately outside these children, so an
+/// edge container's own delimiter abuts it and the two merge into a longer run
+/// the parser splits somewhere else. A container *between* other content has
+/// content on both sides and collides with nothing, which is why this trims
+/// rather than splicing everywhere — over-trimming would flatten structure
+/// that is correct today for no text gain (design spec § Confirmed).
+///
+/// Splicing replaces a container with its own children, which may put another
+/// container at the edge, so the loop repeats. It terminates because each
+/// splice yields elements strictly deeper than the one it replaced and
+/// `flatten_into` yields nothing at `MAX_INLINE_DEPTH`.
+///
+/// Only pointers move: `flatten_into` borrows, and `Vec::splice` shuffles
+/// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
+fn trim_edges<'a>(mut children: Vec<Flat<'a>>, ch: char) -> Vec<Flat<'a>> {
+    while let Some(idx) = edge_to_splice(&children, ch) {
+        let (inline, depth) = children[idx];
+        let (Inline::Emph(x) | Inline::Strong(x)) = inline else {
+            // `edge_to_splice` only ever names a container: `escape::delim`
+            // returns `Emph`/`Strong` for those alone, and `Backtick` cannot
+            // match an emphasis run's `ch`.
+            debug_assert!(false, "edge_to_splice named a non-container");
+            return children;
+        };
+        let mut spliced = Vec::new();
+        flatten_into(x, depth + 1, &mut spliced);
+        children.splice(idx..idx + 1, spliced);
+    }
+    children
+}
+
 /// Render a run of adjacent `Emph` (or `Strong`) elements as one emphasized
-/// span over the concatenation of their children.
+/// span over the concatenation of their children, with both edges trimmed.
 ///
 /// The members' children are flattened into **one** view and scanned once, so a
 /// delimiter-bearing inline at the end of one member's children and one at the
 /// start of the next member's are neighbours to the scan exactly as they are to
-/// a parser. Rendering each member's children through its own
-/// `inlines_to_md_at` call — which is what design spec §2.2 originally asked
-/// for — reopened this item's own §1 defect at every member seam, one level
-/// down: `[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``.
+/// a parser.
 ///
-/// A child that prints the run's *own* delimiter is transparent here too,
-/// unless it is the run's whole printing content. The two cases really are
-/// different, and both were measured against `pulldown-cmark`:
-///
-/// - **Alone**, the two delimiter pairs stack with nothing between them on
-///   either side, and CommonMark reads the longer run as one nested span, so
-///   the text survives: `Emph([Emph([Text("a")])])` prints `**a**` and recovers
-///   `a`. Left exactly as it was — this is also the shape
-///   `kasane-cli/tests/e2e.rs` reads the EPUB adapter's inline-flattening bound
-///   through, one `*` per surviving `<em>` level.
-/// - **Beside anything else**, the stack is broken up on one side, the parser
-///   splits the run at the wrong place and the surplus delimiters leak into the
-///   visible text: `[Emph([Emph([Text("a")])]), Emph([Text("bc")])]` fuses to an
-///   inner buffer of `*a*bc`, prints `**a*bc*` and recovers `**abc`. Splicing
-///   the inner container into the run's view removes the collision at its
-///   source, and loses no structure that was ever expressible — CommonMark has
-///   no spelling for `Emph` directly inside `Emph`.
-///
-/// The second case is a regression this item introduced and this closes: at its
-/// base the pair printed `**a***bc*` and recovered `abc` intact.
-///
-/// There is no per-member `pos` bookkeeping any more: the scan below owns the
-/// four `Pos` rules, and one scan over one view applies them once per run
-/// member exactly as the outer loop does for any other neighbour.
+/// There is no per-member `pos` bookkeeping: the scan below owns the four `Pos`
+/// rules and applies them once per run member exactly as the outer loop does
+/// for any other neighbour.
 fn emphasis_run<'a>(
     members: &[Flat<'a>],
     want: escape::Delim,
@@ -511,35 +531,8 @@ fn emphasis_run<'a>(
     pos: Pos,
     markup: &str,
 ) -> String {
-    let children = run_children(members, None);
-    let children = if nests_alone(&children, want) {
-        children
-    } else {
-        run_children(members, Some(want))
-    };
+    let children = trim_edges(run_children(members), want.ch());
     emphasize(&inlines_to_md_flat(&children, ctx, pos), markup)
-}
-
-/// The flattened view of every member's children, as one sequence.
-fn run_children<'a>(members: &[Flat<'a>], also: Option<escape::Delim>) -> Vec<Flat<'a>> {
-    let mut out = Vec::new();
-    for &(m, depth) in members {
-        if let Inline::Emph(x) | Inline::Strong(x) = m {
-            flatten_into(x, depth + 1, also, &mut out);
-        }
-    }
-    out
-}
-
-/// Whether a run's whole printing content is a single container that prints the
-/// run's own delimiter — the one arrangement in which the two delimiter pairs
-/// stack cleanly instead of leaking. See [`emphasis_run`].
-fn nests_alone(children: &[Flat<'_>], want: escape::Delim) -> bool {
-    let mut printing = children.iter().filter(|&&(c, d)| !renders_empty(c, d));
-    match (printing.next(), printing.next()) {
-        (Some(&(only, _)), None) => escape::delim(only) == Some(want),
-        _ => false,
-    }
 }
 
 /// Wrap already-rendered inner content in an emphasis delimiter, with any
@@ -1689,9 +1682,16 @@ mod tests {
     /// `[Strong([Emph(a)]), Strong([Emph(b)])]` both recovered `ab` at this
     /// item's base — two independently rendered spans whose delimiters
     /// reassociated but kept every character — and recovered `ab**` once the
-    /// members' children were concatenated as strings. The flattened view fuses
-    /// the *inner* runs too, so one pair of delimiters is emitted where two
-    /// collided.
+    /// members' children were concatenated as strings.
+    ///
+    /// Both members' children sit at the run's own two edges (the run has
+    /// exactly two members, so each one's child is both a first and a last),
+    /// and both children's delimiter shares the `*` character with the run's
+    /// own (`Delim::ch`, not `Delim` equality — a `Strong` and an `Emph`
+    /// collide on the character even though they are different `Delim`s), so
+    /// Task 3's `trim_edges` splices both away. The run then prints with only
+    /// its own delimiter: one pair, not the nested two the base recovered
+    /// `ab` through, and still exactly `ab`.
     #[test]
     fn fusing_nested_emphasis_does_not_leak_its_delimiters() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
@@ -1705,11 +1705,11 @@ mod tests {
             ),
             (
                 vec![em(vec![st(vec![t("a")])]), em(vec![st(vec![t("b")])])],
-                "***ab***",
+                "*ab*",
             ),
             (
                 vec![st(vec![em(vec![t("a")])]), st(vec![em(vec![t("b")])])],
-                "***ab***",
+                "**ab**",
             ),
         ];
         for (inls, bytes) in cases {
@@ -1720,13 +1720,15 @@ mod tests {
     }
 
     /// A container printing the run's *own* delimiter is transparent inside it
-    /// — unless it is the run's whole printing content, where the two delimiter
-    /// pairs stack cleanly instead of leaking.
+    /// when it sits at an edge — trimmed away by Task 3's `trim_edges` — and
+    /// left alone in the middle, where content on both sides means nothing
+    /// abuts and nothing collides (`a_container_mid_buffer_is_left_alone`
+    /// pins that control on its own).
     ///
-    /// The leaking case is a regression this item introduced:
+    /// The leaking case was a regression the fusion item introduced:
     /// `[Emph([Emph(a)]), Emph([Text("bc")])]` printed `**a***bc*` at base and
     /// recovered `abc` intact, then printed `**a*bc*` once the members' children
-    /// were concatenated and recovered `**abc`. The flat cases below it were
+    /// were concatenated and recovered `**abc`. The three edge cases below were
     /// broken at base too, in the same shape and for the same reason, and close
     /// with it.
     #[test]
@@ -1738,35 +1740,50 @@ mod tests {
             vec![em(vec![em(vec![t("a")])]), em(vec![t("bc")])],
             vec![em(vec![t("a")]), em(vec![em(vec![t("bc")])])],
             vec![em(vec![em(vec![t("a")]), t("bc")])],
-            vec![em(vec![t("a"), em(vec![t("b")]), t("c")])],
         ] {
             assert_eq!(para(inls.clone()), "*abc*");
             assert_eq!(recovered(inls.clone()), "abc");
             assert_eq!(kasane_gfm::rendered_text(&inls), "abc");
         }
+
+        // Mid-buffer, not an edge: the nested emphasis has content on both
+        // sides, so `trim_edges` leaves it alone and it prints its own
+        // delimiters rather than joining the outer run's. Three spans where
+        // the edge cases above print one, and still exactly `abc`.
+        let mid = vec![em(vec![t("a"), em(vec![t("b")]), t("c")])];
+        assert_eq!(para(mid.clone()), "*a*b*c*");
+        assert_eq!(recovered(mid.clone()), "abc");
+        assert_eq!(kasane_gfm::rendered_text(&mid), "abc");
     }
 
-    /// The other side of that rule, pinned because something else depends on
-    /// it: a nested emphasis that is the run's *entire* content keeps its own
-    /// delimiters, one `*` per level. `kasane-cli/tests/e2e.rs` reads the EPUB
-    /// adapter's inline-flattening bound through exactly this — 5000 nested
-    /// `<em>` in, at most 64 `*` out — so splicing here uniformly would have
-    /// collapsed a 64-deep chain to a single pair and broken a check that has
-    /// nothing to do with fusion.
+    /// Before Task 3, a nested emphasis that was a run's *entire* content kept
+    /// its own delimiters, one `*` per level — `nests_alone`'s carve-out. It
+    /// existed only because `kasane-cli/tests/e2e.rs` counted `*` characters in
+    /// writer output to prove the EPUB adapter's inline-flattening bound
+    /// reached the writer: 5000 nested `<em>` in, at most 64 `*` out.
+    ///
+    /// Task 1 moved that assertion onto the parsed IR instead
+    /// (`kasane-adapters::epub::tests::the_inline_depth_bound_holds_on_a_real_epub`),
+    /// so nothing depends on the delimiter count any more. A run whose only
+    /// member is a nested container is a run whose one element is both the
+    /// first and the last, so `trim_edges` treats it exactly like any other
+    /// edge and it collapses all the way down to one delimiter pair, same as
+    /// `the_trim_repeats_until_neither_edge_is_a_container`. The text still
+    /// survives intact either way.
     #[test]
-    fn a_lone_nested_emphasis_keeps_its_own_delimiters() {
+    fn a_lone_nested_emphasis_collapses_to_one_delimiter_pair() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
         let t = |s: &str| Inline::Text(s.into());
 
-        assert_eq!(para(vec![em(vec![em(vec![t("a")])])]), "**a**");
-        assert_eq!(para(vec![em(vec![em(vec![em(vec![t("a")])])])]), "***a***");
+        assert_eq!(para(vec![em(vec![em(vec![t("a")])])]), "*a*");
+        assert_eq!(para(vec![em(vec![em(vec![em(vec![t("a")])])])]), "*a*");
         // Vacuous company is no company: the nested span is still alone.
         assert_eq!(
             para(vec![em(vec![
                 em(vec![t("a")]),
                 Inline::Text(String::new())
             ])]),
-            "**a**"
+            "*a*"
         );
     }
 
@@ -1827,5 +1844,71 @@ mod tests {
         ]);
         assert_eq!(with_tail, baseline);
         assert_eq!(with_tail, "`xy`");
+    }
+
+    /// A container at the *tail* of a run's children carries a delimiter that
+    /// abuts the one `emphasize` is about to append, so the two merge into a
+    /// longer run and the parser splits it in the wrong place. This shape
+    /// recovered `abc` before the fusion item and `abc**` after it — the
+    /// regression this task closes (design spec §1).
+    #[test]
+    fn a_container_at_a_runs_tail_is_trimmed_into_it() {
+        let em = |s: &str| Inline::Emph(vec![Inline::Text(s.into())]);
+        assert_eq!(
+            para(vec![
+                em("a"),
+                Inline::Strong(vec![Inline::Text("b".into())]),
+                Inline::Strong(vec![em("c")]),
+            ]),
+            "*a***bc**"
+        );
+    }
+
+    /// The same at the head of the run.
+    #[test]
+    fn a_container_at_a_runs_head_is_trimmed_into_it() {
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
+                Inline::Emph(vec![Inline::Text("bc".into())]),
+            ]),
+            "*abc*"
+        );
+    }
+
+    /// Splicing exposes a new edge, so the trim repeats. Three levels collapse
+    /// to one.
+    #[test]
+    fn the_trim_repeats_until_neither_edge_is_a_container() {
+        let inner = Inline::Emph(vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
+            "a".into(),
+        )])])]);
+        assert_eq!(para(vec![inner]), "*a*");
+    }
+
+    /// A container *between* other content contributes its delimiters with
+    /// content on both sides, so nothing abuts and nothing is trimmed. This is
+    /// the control: over-trimming here would flatten structure that is correct
+    /// today, for no text gain (design spec § Confirmed).
+    #[test]
+    fn a_container_mid_buffer_is_left_alone() {
+        assert_eq!(
+            para(vec![Inline::Emph(vec![
+                Inline::Text("a".into()),
+                Inline::Strong(vec![Inline::Text("b".into())]),
+                Inline::Text("c".into()),
+            ])]),
+            "*a**b**c*"
+        );
+    }
+
+    /// A backtick at an edge does not share a character with `*`, so it does
+    /// not collide and is not trimmed.
+    #[test]
+    fn a_code_span_at_an_edge_is_not_trimmed() {
+        assert_eq!(
+            para(vec![Inline::Emph(vec![Inline::Code("x".into())])]),
+            "*`x`*"
+        );
     }
 }

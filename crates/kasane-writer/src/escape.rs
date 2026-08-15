@@ -524,6 +524,24 @@ pub(crate) enum Delim {
     Strong,
 }
 
+impl Delim {
+    /// The character this delimiter is spelled with.
+    ///
+    /// Two delimiter runs collide when they share a character, not when they
+    /// are the same `Delim`: `*` and `**` are different classes that abut into
+    /// one `***` run a parser splits somewhere the writer did not intend, while
+    /// a backtick beside a `*` is simply two characters. Keying the rule on the
+    /// character is what states it as written rather than leaving it true by
+    /// the coincidence that this writer never spells emphasis with `_`
+    /// (design spec `2026-08-15-emphasis-seam-design.md` §2.1).
+    pub(crate) fn ch(self) -> char {
+        match self {
+            Delim::Backtick => '`',
+            Delim::Emph | Delim::Strong => '*',
+        }
+    }
+}
+
 /// Which delimiter this inline prints with, or `None` if it prints none that
 /// can collide with a neighbour's.
 ///
