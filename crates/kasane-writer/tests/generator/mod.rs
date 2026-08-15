@@ -254,11 +254,13 @@ fn shape() -> impl Strategy<Value = Shape> {
 /// Builds one block from a shape, stamping `payload` into the single position
 /// that renders, and reporting how many times it is expected to appear.
 ///
-/// `deco` is generated nested inline markup (depth <= 3) appended after the
-/// sentinel, so the engine's and the writer's inline walks are exercised on real
-/// nesting rather than only on flat text. It is appended, never wrapped around
-/// the payload, so the payload itself always renders as a bare run and the
-/// occurrence count stays exact.
+/// `deco` is generated nested inline markup (depth <= 3), one to three inlines
+/// appended after the sentinel, so the engine's and the writer's inline walks
+/// are exercised on real nesting and on real adjacency rather than only on
+/// flat text. It is appended, never wrapped around the payload, so the payload
+/// itself always renders as a bare run and the occurrence count stays exact --
+/// which is why widening it from one inline to three needed no change to
+/// `Expect`.
 ///
 /// Two shapes need no special handling despite carrying hostile text:
 /// `Shape::Code` puts the payload inside a code block, which is where
@@ -372,9 +374,18 @@ fn comment_note_alters(s: &str) -> bool {
 /// A generated case: document, options, assets, and the sentinel ledger.
 pub fn case() -> impl Strategy<Value = Case> {
     // Each entry pairs a block shape with generated nested inline markup, so
-    // nesting depth up to 3 is present throughout rather than only in flat runs.
+    // nesting depth up to 3 is present throughout rather than only in flat
+    // runs -- and one to three of them in a row, so neighbouring inlines exist
+    // at all. A single draw could never put two inlines of the same kind side
+    // by side, which is why six properties over this tier missed the
+    // adjacent-delimiter fusion entirely
+    // (`2026-08-15-adjacent-inline-fusion-design.md` §5.2).
     let shapes = proptest::collection::vec(
-        (shape(), inlines(3), proptest::sample::select(HOSTILE)),
+        (
+            shape(),
+            proptest::collection::vec(inlines(3), 1..=3).prop_map(|v| v.concat()),
+            proptest::sample::select(HOSTILE),
+        ),
         1..40,
     );
     let opts = (40usize..400, 5usize..40).prop_map(|(max_tokens, min_tokens)| Options {
