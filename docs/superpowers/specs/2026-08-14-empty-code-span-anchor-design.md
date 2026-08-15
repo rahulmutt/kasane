@@ -2,10 +2,16 @@
 
 **Date:** 2026-08-14
 **Status:** Implemented 2026-08-14. The anchor now matches GitHub's id for a
-heading containing an empty code span, pinned by P12 and by
+heading containing a *single* empty code span, pinned by P12 and by
 `a_body_heading_with_an_empty_code_span_anchors_the_space_the_line_prints`. The
 external oracle has not been re-run; §8's note about adding this case to the
-probe stands.
+probe stands. **Scope correction, same day:** two or more *adjacent* empty code
+spans are a different shape and still diverge — the writer fuses adjacent spans
+because CommonMark cannot express them, so the printed line carries neither
+space, and this item's canonicalization turned a shape that previously agreed
+by accident into a divergent one. Recorded as open in
+`2026-08-09-markdown-escaping-design.md` and in `kasane_gfm::slug`'s module doc;
+not fixed here, per § Non-goals' exclusion of the mismatch class.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open",
 the empty-inline-code-span bullet), carried forward by
 `2026-08-14-shared-gfm-text-model-design.md` (§ Non-goals, and the second
@@ -80,7 +86,10 @@ dead in the tree kasane itself produced.
 
 - **The `EMPTY_FALLBACK` empty-id divergence.** A choice, not a construction
   defect: an empty fragment is a dead link. It stays, and after this item it is
-  the only surviving entry in the module doc's list.
+  the only surviving entry in the module doc's list. **Corrected 2026-08-14:**
+  it is not the only one. Closing the single-span case turned the *adjacent*
+  empty-code-span shape from accidentally-agreeing into divergent, and that
+  shape is now the module doc's second entry. See the Status block.
 - **Math in a heading.** GitHub renders `$…$` through MathJax and what that
   does to the id is unmodelled. Untouched here; its own item if it is ever
   wanted.
@@ -121,16 +130,23 @@ depth bounding, is how the next reader deletes it.
 Rule 1 and Rule 2 emit the same three bytes for these two inputs (§1,
 "Confirmed"). The canonicalization therefore moves an `Inline::Code("")` from
 Rule 1 to Rule 2 and changes nothing a reader sees *of the span itself* —
-wherever a code span is printed as a code span, the page is byte-identical.
-This is load-bearing rather than incidental, and it is why §5.1 pins it with a
-test rather than a comment: if Rule 2 ever stopped matching Rule 1, this item
-would start rewriting documents.
+wherever a code span is printed as a code span, **the span's own bytes are
+identical**. This is load-bearing rather than incidental, and it is why §5.1
+pins it with a test rather than a comment: if Rule 2 ever stopped matching
+Rule 1, this item would start rewriting documents.
 
-It is not a claim that the whole output is unchanged. The one place a heading's
-inlines are printed *without* their markup is `file_to_markdown`'s title
-heading, which flattens through `title_text` — there the added space is
-visible, and the filename derived from it moves with it. §3 is the full
-account.
+It is not a claim that the whole output is unchanged, and — corrected
+2026-08-14 — not a claim that the *line* around the span is unchanged either.
+Two places move. The one this section originally named is
+`file_to_markdown`'s title heading, the one place a heading's inlines are
+printed *without* their markup: it flattens through `title_text`, so the added
+space is visible there and the filename derived from it moves with it. The
+other is the rendered heading line itself, when an empty span sits between two
+newline runs: `escape.rs`'s cross-inline newline fold treats an empty `Code` as
+transparent and a `Code(" ")` as a separator, so
+`[Text("a\n"), Code(""), Text("\nb")]` prints `` ## a ` `b `` before and
+`` ## a ` ` b `` after. §3's `fold_inline_newlines` entry is the full account
+of that one; §3 is the full account of both.
 
 ### 2.3 Why the anchor is then correct
 
@@ -147,8 +163,10 @@ cost.
 
 ## 3. Blast radius
 
-Four consumers read an `Inline::Code`'s content. All four are affected — two
-visibly, two below the noise floor:
+Five consumers read an `Inline::Code`'s content. All five are affected — three
+visibly, two below the noise floor. (The list said four until 2026-08-14; the
+fifth was found by the final review, and it is the one that actually moved a
+rendered line.)
 
 - **`title_text`** — the file's own title heading, the frontmatter `title`,
   breadcrumb entries, TOC link labels, library index rows, and the plain-text
@@ -165,6 +183,22 @@ visibly, two below the noise floor:
   It is narrow, reaching only documents with an empty code span in a heading
   that owns a file, but it is stated here plainly rather than left to be
   discovered, in the same spirit as `balance`'s `Part N` renumbering.
+- **`escape::fold_inline_newlines` / `fold_seq`** (`escape.rs:358`), the
+  writer's cross-inline newline fold — **the fifth consumer, added
+  2026-08-14**, and the only one that changes a printed *line*. `fold_seq`
+  threads a `pending` flag through every inline via `fold_leaf`
+  (`escape.rs:388`): an empty `Inline::Code` is transparent to it (folding
+  `""` neither pushes a newline nor clears the flag), while a `Code(" ")`
+  clears it. So a heading whose empty span sits between two newline runs
+  prints different bytes after canonicalization —
+  `[Text("a\n"), Code(""), Text("\nb")]` was `` ## a ` `b `` and is now
+  `` ## a ` ` b ``.
+  This is an **improvement**, and it is evidence the fix reaches further than
+  §2.2 originally claimed. The old line ided `a--b` while the engine anchored
+  `a-b`: a divergence of exactly the class this item exists to close. The new
+  line ids `a---b`, which is what the engine now anchors. Verified against
+  `pulldown-cmark` at this item's base and head. Drawn by P12 since the final
+  review widened its strategy (`"a\n"` and `"\na"` are in `P12_TEXTS`).
 - **`balance::est_tokens`** (`balance.rs:151`) — one byte where there were
   zero. Below the noise floor of a `max_tokens` decision.
 - **`inlines_to_html`** (`markdown.rs:177`), the merged-table fallback —
@@ -183,9 +217,25 @@ Rule 1 stays. `blocks_to_markdown` is public API over a public IR, so a caller
 who hand-builds `Inline::Code("")` and renders it without going through
 `structure` still reaches `code_span`, and CommonMark still has no way to spell
 an empty code span. What changes is its status: it stops being a divergence and
-becomes an ordinary rendering rule, because the only consumer that could
-disagree with it — the anchor — is now unreachable from the empty form. That
-caller has no anchor at all; `assign_paths` never ran for them.
+becomes an ordinary rendering rule, because for IR that went through
+`fold_sections` the only consumer that could disagree with it — the anchor —
+is now unreachable from the empty form. That caller has no anchor at all;
+`assign_paths` never ran for them.
+
+**Corrected 2026-08-14:** that is the reachability argument for one caller, not
+for every caller outside `structure`, and the original wording ("they bypass
+`assign_paths` entirely and have no anchor to diverge from") claimed a
+guarantee the API does not provide. A second path exists and does have anchors:
+`SectionTree` and `SectionNode` have all-`pub` fields, no `#[non_exhaustive]`
+and no private constructor, and `balance`/`assign_paths` are exported at the
+crate root, so an embedder can assemble a tree by hand and take anchors from
+un-canonicalized inlines. `balance`'s merge path clones through
+`clone_inlines_at` and therefore canonicalizes the titles it demotes, but an
+unmerged section title or a hand-placed body heading stays raw.
+`fold_sections` is the only entry point that establishes the invariant.
+Nothing in this repo takes the other path, so this is not a shipped bug — it is
+a limit on what the API guarantees, and neither this section nor Rule 1's
+comment claims more than that.
 
 Rule 1's comment is rewritten accordingly (§6). Keeping the current text, which
 describes a live dead-cross-reference defect, would leave the next reader

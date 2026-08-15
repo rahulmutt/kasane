@@ -11,7 +11,9 @@ cross-reference — was not among the probe's cases and survives too; unlike
 `EMPTY_FALLBACK` it is a real construction defect, not a choice (see
 `kasane_gfm::slug`'s module doc). Neither is a defect this item introduced.
 The empty-code-span divergence was closed on 2026-08-14 by its own item,
-`2026-08-14-empty-code-span-anchor-design.md`; `EMPTY_FALLBACK` remains, by
+`2026-08-14-empty-code-span-anchor-design.md`, for a heading carrying a
+*single* empty span — that item's own Status block records the adjacent-span
+shape it did not close, and left divergent. `EMPTY_FALLBACK` remains, by
 choice.
 See §8.1/§8.3 of `2026-08-08-slug-widening-design.md` for the method and the
 table.
@@ -387,7 +389,9 @@ becomes two exceptions, not one: implementation surfaced a second,
 pre-existing divergence this design did not know about (an empty inline code
 span in a heading), so `EMPTY_FALLBACK` does not end up alone. The
 empty-code-span divergence was closed on 2026-08-14 by its own item,
-`2026-08-14-empty-code-span-anchor-design.md`; `EMPTY_FALLBACK` remains, by
+`2026-08-14-empty-code-span-anchor-design.md`, for the single-span case only;
+README still reads "two exceptions", the second now being the adjacent-span
+shape that item left divergent. `EMPTY_FALLBACK` remains, by
 choice. The two removed bullets are not simply deleted — a reader
 converting a tree that an older build produced needs to know those anchors
 changed, so each gets a sentence saying what it was and that it is now correct.

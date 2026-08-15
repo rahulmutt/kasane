@@ -453,13 +453,27 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
     if content.is_empty() {
         // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
-        // No longer an anchor divergence: `kasane-core`'s `clone_inlines_at`
-        // canonicalizes `Inline::Code("")` to `Inline::Code(" ")` on the way
-        // into the engine, so anything that was structured reaches Rule 2 with
-        // the space already spelled, and the anchor sees it. Rule 1 still runs
-        // for a caller who hand-builds the empty form and calls
-        // `blocks_to_markdown` directly -- they bypass `assign_paths` entirely
-        // and have no anchor to diverge from.
+        // No longer an anchor divergence for anything the engine structured:
+        // `kasane-core`'s `clone_inlines_at` canonicalizes `Inline::Code("")`
+        // to `Inline::Code(" ")` on the way into the engine, so structured IR
+        // reaches Rule 2 with the space already spelled, and the anchor sees
+        // it. `fold_sections` is the only entry point that establishes that
+        // invariant.
+        //
+        // Rule 1 therefore still runs for a caller who renders hand-built IR
+        // through `blocks_to_markdown` -- no `assign_paths`, so no anchor to
+        // diverge from -- and for one who assembles a `SectionTree` themselves
+        // instead of going through `fold_sections`. That second caller *does*
+        // get anchors: `SectionTree`/`SectionNode` have all-`pub` fields, no
+        // `#[non_exhaustive]` and no private constructor, and `balance` and
+        // `assign_paths` are exported, so un-canonicalized inlines can reach
+        // the anchor rule that way (`balance`'s merge path clones through
+        // `clone_inlines_at` and so canonicalizes the titles it demotes, but an
+        // unmerged section title or a hand-placed body heading stays raw).
+        // Nothing in this repo takes that path, so it is not a shipped bug --
+        // but the API does not forbid it, and this comment does not claim it
+        // does.
+        //
         // Rule 1 and Rule 2 must keep printing the same bytes for that
         // canonicalization to stay invisible; see
         // `code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders`.
