@@ -15,7 +15,7 @@ mod generator;
 
 use generator::{Case, Expect};
 use kasane_core::{canonicalize_inlines, est_tokens, structure, FileNode};
-use kasane_gfm::{anchor_slug_of, anchors_for_headings};
+use kasane_gfm::{anchor_slug_of, anchors_for_headings, rendered_text};
 use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
 use proptest::prelude::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
@@ -333,6 +333,38 @@ const P12_TEXTS: &[&str] = &[
     "第",
     "می‌رود",
 ];
+
+/// P13's inline alphabet: adjacency, not hostility.
+///
+/// Every other property in this file draws hostile text on purpose. This one
+/// deliberately does not. It asserts an *equality* between the text a real
+/// parser recovers and `rendered_text`, and the newline fold, the escapes and
+/// the character references each legitimately move bytes between those two
+/// sides — with hostile text drawn, the property would fail on correct
+/// behaviour. Restricting the alphabet to plain words is what makes the
+/// equality exact; it is the move P12 made with `P12_TEXTS`, for the same
+/// reason. Widen it and you will get a mystery failure from the fold, not a
+/// bug.
+///
+/// `Inline::Code("")` is excluded specifically. `code_span`'s Rule 1 prints an
+/// empty span as `` ` ` `` — an acknowledged round-trip divergence — while
+/// `rendered_text` reads the IR's empty string. That divergence is unreachable
+/// for IR that went through `structure`, which canonicalizes it to a space,
+/// and is not what this property is about. An empty `Inline::Text` *is* drawn:
+/// it prints nothing, and an inline that prints nothing sitting between two
+/// spans is exactly the shape the run scan has to see through.
+const P13_WORDS: &[&str] = &["a", "bc", "xyz"];
+
+fn p13_inline() -> impl Strategy<Value = Inline> {
+    let word = || proptest::sample::select(P13_WORDS).prop_map(|w| w.to_string());
+    prop_oneof![
+        word().prop_map(Inline::Text),
+        word().prop_map(Inline::Code),
+        word().prop_map(|w| Inline::Emph(vec![Inline::Text(w)])),
+        word().prop_map(|w| Inline::Strong(vec![Inline::Text(w)])),
+        Just(Inline::Text(String::new())),
+    ]
+}
 
 proptest! {
     /// P1 — Conservation. No block lost, none duplicated.
@@ -793,6 +825,37 @@ proptest! {
             Some(embedded.as_str()),
             "anchor/render divergence for an empty code span between {:?} and {:?}:\n{}",
             lead, tail, md
+        );
+    }
+
+    /// P13 — inline text survives rendering, across inline boundaries.
+    ///
+    /// The invariant the escaping spec's §5 states — escaping must never change
+    /// what the Markdown renders to — held within one inline and not between two.
+    /// Two neighbours printing the same delimiter met with nothing between them,
+    /// and a parser read one span where the IR held two: the delimiters that
+    /// should have separated them became visible characters in the middle of the
+    /// text (design spec §1).
+    ///
+    /// Drawn as a flat sequence rather than through `generator::case()` because
+    /// that generator appends decoration after a payload run and this property
+    /// needs neighbours of the same kind next to each other, at a length the run
+    /// scan actually has to walk.
+    #[test]
+    fn p13_inline_text_survives_rendering(
+        inlines in proptest::collection::vec(p13_inline(), 1..6),
+    ) {
+        let md = kasane_writer::blocks_to_markdown(
+            &[Block::Para(inlines.clone())],
+            &AssetBag::default(),
+        );
+        let recovered = parse_events(&md).text;
+        let expected = rendered_text(&inlines);
+        prop_assert_eq!(
+            recovered.trim(),
+            expected.trim(),
+            "inline text changed under rendering:\n{}",
+            md
         );
     }
 }
