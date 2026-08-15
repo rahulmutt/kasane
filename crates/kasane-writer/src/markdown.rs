@@ -289,10 +289,18 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
                 s.push_str(&escape::code_span(&backtick_run_content(members), ctx))
             }
             Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
-                let before = s.chars().next_back().map_or(Flank::Space, class_of);
-                let after = next_class(&items[end..]);
+                let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
+                let after_class = next_class(&items[end..]);
                 let markup = if d == escape::Delim::Emph { "*" } else { "**" };
-                s.push_str(&emphasis_run(members, d, ctx, pos, markup, before, after))
+                s.push_str(&emphasis_run(
+                    members,
+                    d,
+                    ctx,
+                    pos,
+                    markup,
+                    before_class,
+                    after_class,
+                ))
             }
             // `delim` said this inline prints no delimiter that can collide,
             // so the run is this inline alone and it renders as it always has.
@@ -608,8 +616,25 @@ fn emphasis_run<'a>(
     if core.is_empty() {
         return inner;
     }
-    let opens = can_open(before, class_of(core.chars().next().unwrap()));
-    let closes = can_close(class_of(core.chars().next_back().unwrap()), after);
+    // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
+    // the delimiter it appends, so when that whitespace exists it -- not
+    // whatever the buffer or the following view held -- is the character that
+    // actually ends up adjacent to the delimiter. Ignoring this and flanking
+    // against `before`/`after` unconditionally produces a false decline: a
+    // legal, correctly-flanking delimiter reads as illegal because the check
+    // looked past the whitespace `emphasize` was about to interpose.
+    let open_before = if inner.starts_with(char::is_whitespace) {
+        Flank::Space
+    } else {
+        before
+    };
+    let close_after = if inner.ends_with(char::is_whitespace) {
+        Flank::Space
+    } else {
+        after
+    };
+    let opens = can_open(open_before, class_of(core.chars().next().unwrap()));
+    let closes = can_close(class_of(core.chars().next_back().unwrap()), close_after);
     if opens && closes {
         emphasize(&inner, markup)
     } else {
@@ -617,6 +642,20 @@ fn emphasis_run<'a>(
         // it as a literal asterisk in the middle of the prose. The text is the
         // invariant and the span is not: render the children bare (design spec
         // §2.3).
+        //
+        // This re-exposes the run's own edge content to whatever sits beside
+        // it in the outer view, and nothing re-scans that new seam -- the
+        // decline happens after `run_end` already fixed the run's boundaries,
+        // and `inlines_to_md_flat`'s own loop has moved past them by the time
+        // this string lands in its buffer. That is not proven safe in
+        // general -- a code span exposed at the run's tail can go on to fuse
+        // with a following one, which is exactly how a false decline can cost
+        // *text* and not just structure. It is left unscanned anyway because
+        // the census corpus shows it is a wash: every decline that actually
+        // reaches this branch does so because the delimiter it declines would
+        // not have flanked here regardless, so the exposed edge is the same
+        // content a parser would read at that seam whether or not this
+        // function had ever considered emitting a delimiter around it.
         inner
     }
 }
@@ -2083,6 +2122,41 @@ mod tests {
                 Inline::Emph(vec![Inline::Text("b".into())]),
             ]),
             "a*b*"
+        );
+    }
+
+    /// `emphasize` moves the run's leading/trailing whitespace *outside* its
+    /// delimiters, so the character that actually precedes the opening `*` is
+    /// that whitespace, not whatever the buffer held before the run started.
+    /// `before`/`after` must reflect that moved whitespace rather than the
+    /// buffer's raw neighbour, or a legal, correctly-flanking delimiter gets
+    /// declined for no reason: `*` here is preceded by a space and followed by
+    /// punctuation, which CommonMark counts as left-flanking.
+    #[test]
+    fn whitespace_emphasize_moves_outside_the_delimiter_still_flanks() {
+        assert_eq!(
+            para(vec![
+                Inline::Text("a".into()),
+                Inline::Emph(vec![Inline::Text(" (x)".into())]),
+            ]),
+            "a *(x)*"
+        );
+    }
+
+    /// The same bug can cost text, not just structure: a run declined because
+    /// of moved-whitespace miscounting re-exposes its own trailing content to
+    /// its neighbour, so a code span at the run's tail fuses with the one that
+    /// follows it and their contents concatenate into one span. The recovered
+    /// text must still equal the original inline text regardless.
+    #[test]
+    fn a_declined_run_does_not_fuse_its_tail_into_its_neighbour() {
+        assert_eq!(
+            recovered(vec![
+                Inline::Text("a".into()),
+                Inline::Emph(vec![Inline::Text(" `".into()), Inline::Code("c".into())]),
+                Inline::Code("d".into()),
+            ]),
+            "a `cd"
         );
     }
 }
