@@ -198,6 +198,73 @@ pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
     inlines_to_md_at(inls, 0, ctx, pos)
 }
 
+/// One element of the flattened view the run scan walks: an inline, and the
+/// depth at which it renders.
+///
+/// The depth travels *with* the element rather than being a single number for
+/// the whole slice, because the elements of one view do not all sit at the same
+/// level: a transparent link's children render one level below the link, and
+/// `kasane_ir::MAX_INLINE_DEPTH` has to keep falling exactly where it fell for
+/// them before. Flattening the depth away would silently move that boundary for
+/// everything nested through a link.
+type Flat<'a> = (&'a Inline, usize);
+
+/// Build the flattened view of an inline sequence: the stream a *parser* sees,
+/// rather than the IR's own sibling list.
+///
+/// An unresolved (non-`External`) `Link` prints as just its children, with no
+/// brackets at all, so in the printed line those children stand beside whatever
+/// stood beside the link. The run scan has to see them there or the collision
+/// this item exists to close reopens through a link:
+/// `[Code("x"), Link { Internal, [Code("y")] }]` otherwise prints two backtick
+/// spans in a row and comes back as one span reading ``` x``y ```.
+/// [`renders_empty`] already encoded this insight for the *empty* case; this is
+/// the same insight at full strength, since the property that matters at a run
+/// boundary is transparency and not vacuity (design spec §2.3).
+///
+/// `also` names a *second* transparency, used only from [`emphasis_run`]: inside
+/// a run printing that delimiter, a container printing the same one emits no
+/// delimiter a parser can tell apart from the run's own. `None` — every other
+/// caller — matches nothing, since [`escape::delim`] returns `Some` for both
+/// `Emph` and `Strong`.
+///
+/// **Only pointers are copied.** No `Inline` is cloned or rewritten, which is
+/// the constraint design spec §2.2 imposes: `Inline`'s derived `Clone` recurses
+/// once per nesting level, so a hand-built tree past the bound would overflow
+/// the stack inside the clone *before* the depth guard could discard it. That
+/// guard is the one below, applied while the view is built rather than after —
+/// children at or past `MAX_INLINE_DEPTH` print nothing, so they enter no view.
+fn flatten_into<'a>(
+    inls: &'a [Inline],
+    depth: usize,
+    also: Option<escape::Delim>,
+    out: &mut Vec<Flat<'a>>,
+) {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return;
+    }
+    for i in inls {
+        match i {
+            Inline::Link { target, inlines } if !matches!(target, RefTarget::External(_)) => {
+                flatten_into(inlines, depth + 1, also, out)
+            }
+            Inline::Emph(x) | Inline::Strong(x) if escape::delim(i) == also => {
+                flatten_into(x, depth + 1, also, out)
+            }
+            _ => out.push((i, depth)),
+        }
+    }
+}
+
+/// Render an inline sequence, building the flattened view [`inlines_to_md_flat`]
+/// scans. The depth guard lives in [`flatten_into`], which yields an empty view
+/// at or past the bound.
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
+    let mut view = Vec::new();
+    flatten_into(inls, depth, None, &mut view);
+    inlines_to_md_flat(&view, ctx, pos)
+}
+
 /// `pos` is threaded, not inferred: it names where the next character emitted
 /// lands (design spec §2). It starts as whatever the caller passed and is
 /// then recomputed after every arm, by four rules: an arm that appended
@@ -209,35 +276,45 @@ pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
 /// `Pos::AfterFootnoteRef`, so `escape::text` can tell a following `:` apart
 /// from an ordinary one (residuals spec §2); anything else yields `Pos::Mid`.
 ///
-/// The loop walks *runs*, not items: a maximal group of neighbouring inlines
+/// The loop walks *runs*, not items: a maximal group of neighbouring elements
 /// that print with the same delimiter renders as one span over their
 /// concatenated contents, because CommonMark cannot express two such spans in
 /// a row and the writer's two delimiter pairs would otherwise fuse into one
 /// span in the rendered line (design spec
 /// `2026-08-15-adjacent-inline-fusion-design.md` §2).
-fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
-    if depth >= kasane_ir::MAX_INLINE_DEPTH {
-        return String::new();
-    }
+///
+/// It walks the *flattened* view rather than the IR's own siblings because a
+/// parser sees the printed stream, in which a transparent link's children and a
+/// fused emphasis run's members' children are siblings too. Scanning IR
+/// siblings alone left the defect open one level down, at every container seam
+/// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
+fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
     let mut s = String::new();
     let mut pos = pos;
     let mut i = 0;
-    while i < inls.len() {
+    while i < items.len() {
+        let (inline, depth) = items[i];
         let before = pos;
         let len_before = s.len();
-        let end = run_end(inls, i, depth);
-        let members = &inls[i..end];
-        match escape::delim(&inls[i]) {
+        let end = run_end(items, i);
+        let members = &items[i..end];
+        match escape::delim(inline) {
             Some(escape::Delim::Backtick) => {
                 s.push_str(&escape::code_span(&backtick_run_content(members), ctx))
             }
-            Some(escape::Delim::Emph) => s.push_str(&emphasis_run(members, depth, ctx, pos, "*")),
-            Some(escape::Delim::Strong) => {
-                s.push_str(&emphasis_run(members, depth, ctx, pos, "**"))
+            Some(escape::Delim::Emph) => {
+                s.push_str(&emphasis_run(members, escape::Delim::Emph, ctx, pos, "*"))
             }
+            Some(escape::Delim::Strong) => s.push_str(&emphasis_run(
+                members,
+                escape::Delim::Strong,
+                ctx,
+                pos,
+                "**",
+            )),
             // `delim` said this inline prints no delimiter that can collide,
             // so the run is this inline alone and it renders as it always has.
-            None => match &inls[i] {
+            None => match inline {
                 // The only call to `escape::text` in the crate. Every other
                 // arm here and above emits markup the writer chose, which must
                 // not be escaped.
@@ -256,13 +333,28 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
                     )),
                     escape::dest_url(u)
                 )),
-                // unresolved -> text
+                Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
+                // Unreachable: `delim` returns `Some` for all three, so they
+                // are handled above. Asserted rather than merely commented --
+                // if `delim` ever narrows, the content would otherwise vanish
+                // in silence.
+                Inline::Code(_) | Inline::Emph(_) | Inline::Strong(_) => debug_assert!(
+                    escape::delim(inline).is_some(),
+                    "escape::delim narrowed; this inline's content would be dropped"
+                ),
+                // Unreachable: `flatten_into` splices a transparent link's
+                // children into the view in the link's own place, so no such
+                // link is ever an element. Rendered rather than dropped all
+                // the same, so that if the splice ever narrowed the output
+                // would degrade to what it was before the splice existed
+                // instead of losing the link's text outright.
                 Inline::Link { inlines, .. } => {
+                    debug_assert!(
+                        false,
+                        "a transparent link reached the emit loop; flatten_into must splice it"
+                    );
                     s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos))
                 }
-                Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
-                // Unreachable: `delim` returns `Some` for all three.
-                Inline::Code(_) | Inline::Emph(_) | Inline::Strong(_) => {}
             },
         }
         // Four rules (§2). An arm that appended nothing leaves the position
@@ -273,7 +365,7 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
         if s.len() != len_before {
             pos = if s.ends_with('\n') {
                 Pos::LineStart
-            } else if matches!(&inls[i], Inline::FootnoteRef(_)) && before == Pos::LineStart {
+            } else if matches!(inline, Inline::FootnoteRef(_)) && before == Pos::LineStart {
                 Pos::AfterFootnoteRef
             } else {
                 Pos::Mid
@@ -299,15 +391,12 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
 ///
 /// `Inline::Link` splits by target the same way the renderer does. An
 /// `External` link always emits its `[...](...)` brackets
-/// (`inlines_to_md_at`'s own arm for it), so it is never vacuous even with
-/// empty `inlines`. Any other target renders through the "unresolved -> text"
-/// arm instead, which prints *only* `inlines_to_md_at(inlines, ...)` with no
-/// brackets at all — a container exactly like `Emph`/`Strong`, and it follows
-/// the same rule. Reachable beyond hand-built IR: the shared EPUB XHTML parser
-/// emits a bare empty anchor as `Inline::Link` with empty `inlines`
-/// (`kasane-adapters/src/mobi/mod.rs` strips it only on the mobi path;
-/// `kasane-adapters/src/epub/mod.rs` builds `Internal`-target links from the
-/// same parser).
+/// (`inlines_to_md_flat`'s own arm for it), so it is never vacuous even with
+/// empty `inlines`. Any other target is transparent: [`flatten_into`] splices
+/// its children into the view in its place, so no such link is ever an element
+/// of a view and this arm answers only for one nested inside a container — an
+/// `Emph` whose sole child is an empty internal link prints nothing, and the
+/// scan has to know that.
 ///
 /// Everything else is non-vacuous by construction: `Code("")` prints
 /// `` ` ` ``, `Math("")` prints `$$`, a `FootnoteRef` prints `[^n]`.
@@ -340,19 +429,21 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
 /// convenient: every member in that tail failed the delimiter-match branch
 /// and was consumed by the vacuity branch instead, so `backtick_run_content`
 /// (which only ever appends a `Code`/`Math`) and `emphasis_run` (which only
-/// ever appends an `Emph`/`Strong`, and appends the empty string for a
-/// vacuous one) already treat it as contributing nothing, and `pos` does not
+/// ever appends an `Emph`/`Strong`, and contributes nothing for a vacuous one)
+/// already treat it as contributing nothing, and `pos` does not
 /// move for a member that appends nothing either way. Returning the shorter
 /// "last real match" bound instead would leave that tail for the *next* call
 /// to re-walk from its own start — quadratic in the length of a long vacuous
 /// run (e.g. `[Emph(vec![]); m]`, where every element is both
 /// delimiter-bearing and vacuous) where the loop this replaced was linear.
-fn run_end(inls: &[Inline], start: usize, depth: usize) -> usize {
-    let Some(d) = escape::delim(&inls[start]) else {
+fn run_end(items: &[Flat<'_>], start: usize) -> usize {
+    let Some(want) = escape::delim(items[start].0) else {
         return start + 1;
     };
     let mut k = start + 1;
-    while k < inls.len() && (renders_empty(&inls[k], depth) || escape::delim(&inls[k]) == Some(d)) {
+    while k < items.len()
+        && (renders_empty(items[k].0, items[k].1) || escape::delim(items[k].0) == Some(want))
+    {
         k += 1;
     }
     k
@@ -361,44 +452,94 @@ fn run_end(inls: &[Inline], start: usize, depth: usize) -> usize {
 /// The content one code span carries for a whole backtick run.
 ///
 /// A degrading `Inline::Math` contributes its raw LaTeX, which is exactly what
-/// `math_span` would have handed `code_span` on its own. Anything else in the
-/// slice is a vacuous inline `run_end` swallowed, and contributes nothing by
-/// definition.
-fn backtick_run_content(members: &[Inline]) -> String {
+/// `math_span` would have handed `code_span` on its own — and the guard is
+/// spelled here rather than left to `escape::delim`'s, so the invariant is
+/// local to this function instead of an argument spanning two. Anything else in
+/// the slice is a vacuous element `run_end` swallowed, and contributes nothing
+/// by definition.
+fn backtick_run_content(members: &[Flat<'_>]) -> String {
     let mut content = String::new();
-    for m in members {
-        if let Inline::Code(t) | Inline::Math(t) = m {
-            content.push_str(t);
+    for &(m, _) in members {
+        match m {
+            Inline::Code(t) => content.push_str(t),
+            Inline::Math(t) if escape::math_degrades(t) => content.push_str(t),
+            _ => {}
         }
     }
     content
 }
 
-/// Render a run of adjacent `Emph` (or `Strong`) inlines as one emphasized
+/// Render a run of adjacent `Emph` (or `Strong`) elements as one emphasized
 /// span over the concatenation of their children.
 ///
-/// `pos` is recomputed between members by the same rules the outer loop uses,
-/// so a member sees where its own first character lands rather than where the
-/// run opened. The first member still sees the run's opening `pos`, which is
-/// what keeps a run of one byte-identical to what it printed before.
-fn emphasis_run(members: &[Inline], depth: usize, ctx: Ctx, pos: Pos, markup: &str) -> String {
-    let mut inner = String::new();
-    let mut pos = pos;
-    for m in members {
-        let (Inline::Emph(x) | Inline::Strong(x)) = m else {
-            continue;
-        };
-        let len_before = inner.len();
-        inner.push_str(&inlines_to_md_at(x, depth + 1, ctx, pos));
-        if inner.len() != len_before {
-            pos = if inner.ends_with('\n') {
-                Pos::LineStart
-            } else {
-                Pos::Mid
-            };
+/// The members' children are flattened into **one** view and scanned once, so a
+/// delimiter-bearing inline at the end of one member's children and one at the
+/// start of the next member's are neighbours to the scan exactly as they are to
+/// a parser. Rendering each member's children through its own
+/// `inlines_to_md_at` call — which is what design spec §2.2 originally asked
+/// for — reopened this item's own §1 defect at every member seam, one level
+/// down: `[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``.
+///
+/// A child that prints the run's *own* delimiter is transparent here too,
+/// unless it is the run's whole printing content. The two cases really are
+/// different, and both were measured against `pulldown-cmark`:
+///
+/// - **Alone**, the two delimiter pairs stack with nothing between them on
+///   either side, and CommonMark reads the longer run as one nested span, so
+///   the text survives: `Emph([Emph([Text("a")])])` prints `**a**` and recovers
+///   `a`. Left exactly as it was — this is also the shape
+///   `kasane-cli/tests/e2e.rs` reads the EPUB adapter's inline-flattening bound
+///   through, one `*` per surviving `<em>` level.
+/// - **Beside anything else**, the stack is broken up on one side, the parser
+///   splits the run at the wrong place and the surplus delimiters leak into the
+///   visible text: `[Emph([Emph([Text("a")])]), Emph([Text("bc")])]` fuses to an
+///   inner buffer of `*a*bc`, prints `**a*bc*` and recovers `**abc`. Splicing
+///   the inner container into the run's view removes the collision at its
+///   source, and loses no structure that was ever expressible — CommonMark has
+///   no spelling for `Emph` directly inside `Emph`.
+///
+/// The second case is a regression this item introduced and this closes: at its
+/// base the pair printed `**a***bc*` and recovered `abc` intact.
+///
+/// There is no per-member `pos` bookkeeping any more: the scan below owns the
+/// four `Pos` rules, and one scan over one view applies them once per run
+/// member exactly as the outer loop does for any other neighbour.
+fn emphasis_run<'a>(
+    members: &[Flat<'a>],
+    want: escape::Delim,
+    ctx: Ctx,
+    pos: Pos,
+    markup: &str,
+) -> String {
+    let children = run_children(members, None);
+    let children = if nests_alone(&children, want) {
+        children
+    } else {
+        run_children(members, Some(want))
+    };
+    emphasize(&inlines_to_md_flat(&children, ctx, pos), markup)
+}
+
+/// The flattened view of every member's children, as one sequence.
+fn run_children<'a>(members: &[Flat<'a>], also: Option<escape::Delim>) -> Vec<Flat<'a>> {
+    let mut out = Vec::new();
+    for &(m, depth) in members {
+        if let Inline::Emph(x) | Inline::Strong(x) = m {
+            flatten_into(x, depth + 1, also, &mut out);
         }
     }
-    emphasize(&inner, markup)
+    out
+}
+
+/// Whether a run's whole printing content is a single container that prints the
+/// run's own delimiter — the one arrangement in which the two delimiter pairs
+/// stack cleanly instead of leaking. See [`emphasis_run`].
+fn nests_alone(children: &[Flat<'_>], want: escape::Delim) -> bool {
+    let mut printing = children.iter().filter(|&&(c, d)| !renders_empty(c, d));
+    match (printing.next(), printing.next()) {
+        (Some(&(only, _)), None) => escape::delim(only) == Some(want),
+        _ => false,
+    }
 }
 
 /// Wrap already-rendered inner content in an emphasis delimiter, with any
@@ -1251,6 +1392,29 @@ mod tests {
         md.trim_end().to_string()
     }
 
+    /// The text a real parser recovers from that same paragraph.
+    ///
+    /// The printed bytes are what these tests pin first, but bytes alone cannot
+    /// tell a fused span from a collided one — `` *`x``y`* `` and `` *`xy`* ``
+    /// differ by two characters and by the whole defect. This is the other half:
+    /// what a reader actually sees. It must equal `kasane_gfm::rendered_text` of
+    /// the same inlines, which is the equality P13 asserts over generated
+    /// sequences.
+    fn recovered(inls: Vec<Inline>) -> String {
+        use pulldown_cmark::{Event, Options, Parser};
+
+        let md = blocks_to_markdown(&[Block::Para(inls)], &AssetBag::default());
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_MATH);
+        let mut out = String::new();
+        for ev in Parser::new_ext(&md, opts) {
+            if let Event::Text(t) | Event::Code(t) = ev {
+                out.push_str(&t);
+            }
+        }
+        out
+    }
+
     /// Adjacent code spans render as one span over their concatenation.
     ///
     /// CommonMark cannot express two code spans in a row: the closing fence of
@@ -1469,6 +1633,176 @@ mod tests {
                 Inline::Code("y".into()),
             ]),
             "`x`mid`y`"
+        );
+    }
+
+    /// The run scan sees across a *member* seam, not only across an IR sibling
+    /// boundary.
+    ///
+    /// Rendering each member's children through its own `inlines_to_md_at` call
+    /// — which is what design spec §2.2 originally asked for — left this item's
+    /// own §1 defect open one level down: the last child of member *k* and the
+    /// first child of member *k+1* met with nothing between them, exactly as
+    /// the top-level pair did. `[Emph([Code("x")]), Emph([Code("y")])]` printed
+    /// `` *`x``y`* `` and came back reading ``x``y``, in ordinary paragraph
+    /// text. One flattened view over all the members' children closes it
+    /// (review finding).
+    #[test]
+    fn a_run_fuses_across_its_members_children_too() {
+        let cases = [
+            (
+                vec![
+                    Inline::Emph(vec![Inline::Code("x".into())]),
+                    Inline::Emph(vec![Inline::Code("y".into())]),
+                ],
+                "*`xy`*",
+                "xy",
+            ),
+            (
+                vec![
+                    Inline::Emph(vec![Inline::Text("a".into()), Inline::Code("x".into())]),
+                    Inline::Emph(vec![Inline::Code("y".into()), Inline::Text("b".into())]),
+                ],
+                "*a`xy`b*",
+                "axyb",
+            ),
+            (
+                vec![
+                    Inline::Strong(vec![Inline::Code("x".into())]),
+                    Inline::Strong(vec![Inline::Code("y".into())]),
+                ],
+                "**`xy`**",
+                "xy",
+            ),
+        ];
+        for (inls, bytes, text) in cases {
+            assert_eq!(para(inls.clone()), bytes);
+            assert_eq!(recovered(inls.clone()), text);
+            assert_eq!(kasane_gfm::rendered_text(&inls), text);
+        }
+    }
+
+    /// The same seam with an emphasis child rather than a code span, which is
+    /// where this item regressed text that had been intact before it.
+    ///
+    /// `[Emph([Strong(a)]), Emph([Strong(b)])]` and
+    /// `[Strong([Emph(a)]), Strong([Emph(b)])]` both recovered `ab` at this
+    /// item's base — two independently rendered spans whose delimiters
+    /// reassociated but kept every character — and recovered `ab**` once the
+    /// members' children were concatenated as strings. The flattened view fuses
+    /// the *inner* runs too, so one pair of delimiters is emitted where two
+    /// collided.
+    #[test]
+    fn fusing_nested_emphasis_does_not_leak_its_delimiters() {
+        let em = |x: Vec<Inline>| Inline::Emph(x);
+        let st = |x: Vec<Inline>| Inline::Strong(x);
+        let t = |s: &str| Inline::Text(s.into());
+
+        let cases = [
+            (
+                vec![em(vec![em(vec![t("a")])]), em(vec![em(vec![t("b")])])],
+                "*ab*",
+            ),
+            (
+                vec![em(vec![st(vec![t("a")])]), em(vec![st(vec![t("b")])])],
+                "***ab***",
+            ),
+            (
+                vec![st(vec![em(vec![t("a")])]), st(vec![em(vec![t("b")])])],
+                "***ab***",
+            ),
+        ];
+        for (inls, bytes) in cases {
+            assert_eq!(para(inls.clone()), bytes);
+            assert_eq!(recovered(inls.clone()), "ab", "printed {bytes}");
+            assert_eq!(kasane_gfm::rendered_text(&inls), "ab");
+        }
+    }
+
+    /// A container printing the run's *own* delimiter is transparent inside it
+    /// — unless it is the run's whole printing content, where the two delimiter
+    /// pairs stack cleanly instead of leaking.
+    ///
+    /// The leaking case is a regression this item introduced:
+    /// `[Emph([Emph(a)]), Emph([Text("bc")])]` printed `**a***bc*` at base and
+    /// recovered `abc` intact, then printed `**a*bc*` once the members' children
+    /// were concatenated and recovered `**abc`. The flat cases below it were
+    /// broken at base too, in the same shape and for the same reason, and close
+    /// with it.
+    #[test]
+    fn a_nested_emphasis_beside_other_content_joins_its_run() {
+        let em = |x: Vec<Inline>| Inline::Emph(x);
+        let t = |s: &str| Inline::Text(s.into());
+
+        for inls in [
+            vec![em(vec![em(vec![t("a")])]), em(vec![t("bc")])],
+            vec![em(vec![t("a")]), em(vec![em(vec![t("bc")])])],
+            vec![em(vec![em(vec![t("a")]), t("bc")])],
+            vec![em(vec![t("a"), em(vec![t("b")]), t("c")])],
+        ] {
+            assert_eq!(para(inls.clone()), "*abc*");
+            assert_eq!(recovered(inls.clone()), "abc");
+            assert_eq!(kasane_gfm::rendered_text(&inls), "abc");
+        }
+    }
+
+    /// The other side of that rule, pinned because something else depends on
+    /// it: a nested emphasis that is the run's *entire* content keeps its own
+    /// delimiters, one `*` per level. `kasane-cli/tests/e2e.rs` reads the EPUB
+    /// adapter's inline-flattening bound through exactly this — 5000 nested
+    /// `<em>` in, at most 64 `*` out — so splicing here uniformly would have
+    /// collapsed a 64-deep chain to a single pair and broken a check that has
+    /// nothing to do with fusion.
+    #[test]
+    fn a_lone_nested_emphasis_keeps_its_own_delimiters() {
+        let em = |x: Vec<Inline>| Inline::Emph(x);
+        let t = |s: &str| Inline::Text(s.into());
+
+        assert_eq!(para(vec![em(vec![em(vec![t("a")])])]), "**a**");
+        assert_eq!(para(vec![em(vec![em(vec![em(vec![t("a")])])])]), "***a***");
+        // Vacuous company is no company: the nested span is still alone.
+        assert_eq!(
+            para(vec![em(vec![
+                em(vec![t("a")]),
+                Inline::Text(String::new())
+            ])]),
+            "**a**"
+        );
+    }
+
+    /// An unresolved link renders as *just its children*, with no brackets, so
+    /// a parser sees those children standing beside the link's own neighbours.
+    /// The run scan has to see them there too: `renders_empty` already encoded
+    /// that insight for an empty link, and treating a non-empty one as an
+    /// opaque run-breaker left the collision open through it (review finding).
+    ///
+    /// Reachable from EPUB input like `<code>x</code><a
+    /// href="#foo"><code>y</code></a>`, and identical at this item's base — a
+    /// standing defect rather than a regression.
+    #[test]
+    fn a_transparent_link_does_not_hide_a_collision_from_the_run_scan() {
+        let link = |x: Vec<Inline>| Inline::Link {
+            target: RefTarget::Internal(BlockId(0)),
+            inlines: x,
+        };
+        let code = |s: &str| Inline::Code(s.into());
+
+        for inls in [
+            vec![code("x"), link(vec![code("y")])],
+            vec![link(vec![code("x")]), code("y")],
+            vec![link(vec![code("x")]), link(vec![code("y")])],
+        ] {
+            assert_eq!(para(inls.clone()), "`xy`");
+            assert_eq!(recovered(inls.clone()), "xy");
+            assert_eq!(kasane_gfm::rendered_text(&inls), "xy");
+        }
+
+        // The link's children carry the link's depth, not the run's, so a
+        // fused span made of them still renders one level down from where the
+        // link sat.
+        assert_eq!(
+            para(vec![Inline::Emph(vec![code("x"), link(vec![code("y")])])]),
+            "*`xy`*"
         );
     }
 

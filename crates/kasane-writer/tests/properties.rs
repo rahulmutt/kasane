@@ -353,6 +353,40 @@ const P12_TEXTS: &[&str] = &[
 /// and is not what this property is about. An empty `Inline::Text` *is* drawn:
 /// it prints nothing, and an inline that prints nothing sitting between two
 /// spans is exactly the shape the run scan has to see through.
+///
+/// The alphabet is narrow in a second way, and this one is a **known
+/// limitation, not a choice**: no drawn `Emph`/`Strong` holds a
+/// delimiter-bearing child. It should. The member seam — one member's last
+/// child meeting the next member's first — is exactly where the run scan had
+/// to be taught to look, and only a delimiter-bearing child reaches it. Two
+/// separate defects, both present at this item's base and neither about
+/// fusion, make the equality above fail on shapes that hold one, so the seam
+/// is pinned by unit assertions in `markdown.rs` instead
+/// (`a_run_fuses_across_its_members_children_too`,
+/// `fusing_nested_emphasis_does_not_leak_its_delimiters`,
+/// `a_nested_emphasis_beside_other_content_joins_its_run`,
+/// `a_lone_nested_emphasis_keeps_its_own_delimiters`,
+/// `a_transparent_link_does_not_hide_a_collision_from_the_run_scan`):
+///
+/// 1. **Emphasis flush against a word character with punctuation just inside
+///    it is not emphasis at all.** `emphasize` hoists edge *whitespace* outside
+///    the delimiters, which is what CommonMark's flanking rules ask for, but
+///    edge punctuation gets no such treatment: `[Text("a"), Emph([Code("a")])]`
+///    prints ``a*`a`*`` and recovers `a*a*`, with both asterisks visible in the
+///    prose. `[Emph([Text("a")]), Strong([Code("bc")])]` and
+///    `[Emph([Code("a")]), Text("a")]` fail the same way. Measured identical at
+///    this item's base; the writer has no way to know the character before its
+///    own delimiter today, so this needs its own item.
+/// 2. **A lone nested emphasis prints a delimiter its class does not name.**
+///    `Emph([Emph([Text("a")])])` prints `**a**` — the two pairs stack — so
+///    what it prints is a `**` run while `escape::delim` classes it as
+///    `Delim::Emph`. Beside a real `Strong` the two `**` runs meet and the text
+///    leaks. Also identical at base, with no run and no fusion involved.
+///
+/// Widen the alphabet with `Emph(vec![Code(w)])` or
+/// `Emph(vec![Emph(vec![Text(w)])])` only together with a fix for the matching
+/// defect above, or this property goes red on something it was not written to
+/// find.
 const P13_WORDS: &[&str] = &["a", "bc", "xyz"];
 
 fn p13_inline() -> impl Strategy<Value = Inline> {
