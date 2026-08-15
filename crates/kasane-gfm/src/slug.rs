@@ -62,38 +62,21 @@
 //! either: `kasane-core` canonicalizes `Inline::Code("")` to a single space
 //! before any anchor is computed, so this rule sees the padding space
 //! `kasane-writer::escape::code_span` was already printing. That is the whole
-//! of what closed — two or more empty spans *next to each other* are a
-//! different shape and still diverge; see the second bullet.
+//! of what closed. Two or more empty spans next to each other were a
+//! different shape and did diverge until 2026-08-15, when `kasane-writer`
+//! began rendering a run of adjacent same-delimiter inlines as one span
+//! (`2026-08-15-adjacent-inline-fusion-design.md`). That is a fourth
+//! mechanism, and the only one of the four that lives outside this crate: the
+//! rule here was never wrong for that shape, the printed line was.
 //!
-//! Two divergences are left, one a choice and one a defect:
+//! One divergence is left, and it is a choice rather than a construction
+//! defect:
 //!
 //! - **The empty id.** A title with no character in the class at all gets
 //!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty
 //!   fragment is a dead link. This one is a choice rather than a construction
 //!   defect: kasane could match GitHub exactly by emitting no id, and
 //!   deliberately doesn't.
-//! - **Adjacent empty code spans.** A heading holding two or more empty
-//!   `Inline::Code` inlines in a row anchors as though each printed its own
-//!   space — `[Text("a"), Code(""), Code(""), Text("b")]` anchors `a--b` —
-//!   while the line it prints ids as `ab`. A dead cross-reference, and this
-//!   rule is not where it is wrong: the writer is. CommonMark cannot express
-//!   two code spans in a row at all, so the `` ` ` `` runs
-//!   `kasane-writer::escape::code_span` emits **fuse** into one span when a
-//!   parser reads them back, and the printed line therefore carries neither
-//!   space. The anchor divergence is downstream of that fusion, not beside it.
-//!   Recorded honestly: before the canonicalization above, this shape agreed
-//!   by accident (both sides said `ab`), so closing the single-span case is
-//!   what turned it divergent — a trade, since the mixed shapes it closed in
-//!   the same move (`[Text("a"), Code(""), Code("x")]`) diverged before.
-//!   The fusion is **not only an anchor bug**: `Code("x")` beside `Code("y")`
-//!   in an ordinary paragraph renders as one span reading ``` x``y ```, which is
-//!   content corruption with no empty span and no heading involved. Fixing it
-//!   needs its own item and its own design — the escaping spec
-//!   (`2026-08-09-markdown-escaping-design.md`, "recorded as open") carries the
-//!   matching record, and
-//!   `kasane-writer/tests/properties.rs`'s
-//!   `adjacent_empty_code_spans_diverge_from_the_line_they_print` pins the
-//!   current behaviour so it is met deliberately.
 
 use crate::text::{fold_newlines, rendered_text, title_text};
 use kasane_ir::Inline;

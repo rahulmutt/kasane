@@ -474,6 +474,12 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
         // but the API does not forbid it, and this comment does not claim it
         // does.
         //
+        // Two adjacent empty spans are no longer a special case either: the
+        // run scan in `inlines_to_md_at` renders them as one span over their
+        // concatenated content, so `[Code(" "), Code(" ")]` prints `` `  ` ``
+        // and Rule 2 leaves both spaces intact. Rule 1 is reached only by a
+        // run whose whole concatenation is empty.
+        //
         // Rule 1 and Rule 2 must keep printing the same bytes for that
         // canonicalization to stay invisible; see
         // `code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders`.

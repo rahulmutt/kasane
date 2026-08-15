@@ -143,7 +143,7 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Heading anchors match GitHub's rule, with two exceptions. Anchors are
+- Heading anchors match GitHub's rule, with one exception. Anchors are
   computed the way GitHub computes them — Unicode-aware, punctuation removed
   rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
@@ -161,22 +161,14 @@ See AGENTS.md for the codebase map.
   numerals like `Ⅷ` and circled letters like `Ⓐ` are in — and narrower than
   "looks like one": parenthesized letters like `⒜` are out, as are all
   non-decimal numerals, so `## Fig ½` anchors as `#fig-` and `## ①はじめに`
-  as `#はじめに`. The two exceptions:
+  as `#はじめに`. The exception:
   - A heading with none of those characters at all (`## ***`, `## —`, `## ½`)
     gets an empty id from GitHub; kasane emits `#section`, because an empty
     anchor is a dead link. A heading that is *only* a zero-width non-joiner is
     not this case — it anchors to that invisible character, exactly as GitHub
     does.
-  - A heading containing two or more empty pairs of backticks *next to each
-    other* anchors as if each pair printed a space (`#a--b`), while a renderer
-    reads the line as `ab` — so a link into such a heading is dead. Markdown
-    cannot express two code spans in a row at all: the pairs kasane writes
-    fuse back into a single span, which is a fidelity problem in its own
-    right — two ordinary code spans side by side likewise come back as one —
-    and is tracked as an open bug rather than a deliberate choice. One empty
-    pair on its own is fine, and that is the case a real book produces.
 
-  Three anchors that used to diverge no longer do, which matters for a tree an
+  Four anchors that used to diverge no longer do, which matters for a tree an
   older build produced:
   - A heading carrying a footnote reference now anchors the way GitHub ids it
     (`#notes1`, not `#notes`).
@@ -185,6 +177,9 @@ See AGENTS.md for the codebase map.
   - A heading containing one empty pair of backticks now anchors the space that
     pair prints (`#a-b`, not `#ab`) — which also means such a heading's file is
     now named `a-b.md` rather than `ab.md`.
+  - Two or more empty pairs of backticks next to each other in a heading. They
+    now print as a single pair around the spaces they stand for, instead of
+    fusing into one span that swallowed the backticks between them.
 
   Filenames carry the title in any script, capped at 64 bytes of title per
   component; they drop the zero-width joiners an anchor keeps, since a

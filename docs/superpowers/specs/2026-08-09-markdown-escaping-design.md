@@ -460,10 +460,11 @@ and disarms the whole run, which made the "changes the line-start rules for
 every context at once" characterization an artifact of the mechanism rather
 than of the defect.
 
-Two cases remain open, narrower than what was closed. The three bullets below
+One case remains open, narrower than what was closed. The four bullets below
 are not the original two: the empty-inline-code-span case closed on 2026-08-14,
-and the item that closed it opened the third, which is recorded here beside
-them.
+the item that closed it opened a third — adjacent code spans — which closed in
+turn on 2026-08-15, and the fix that closed that one opened a fourth, recorded
+here as a question rather than a defect.
 
 - **Whitespace inside the merged-table HTML fallback.** Not reachable by
   escaping: an HTML renderer collapses whitespace runs whether they arrived
@@ -517,6 +518,21 @@ them.
   `adjacent_empty_code_spans_diverge_from_the_line_they_print`
   (`kasane-writer/tests/properties.rs`) and recorded in `kasane_gfm::slug`'s
   module doc alongside `EMPTY_FALLBACK`.
+  **Closed 2026-08-15** by `2026-08-15-adjacent-inline-fusion-design.md`. The
+  writer now renders a run of adjacent same-delimiter inlines as one span over
+  their concatenation, so the printed line moved onto the anchor and
+  `kasane-gfm` did not change. Wider than this bullet predicted in one
+  direction: the same collision hits two `Inline::Emph` and two
+  `Inline::Strong`, which print `*a**b*` and `**a****b**` and leak literal
+  asterisks into visible text — neither was recorded anywhere before that item
+  measured them. Narrower in another: adjacent `Inline::Math` does not collide
+  and is deliberately untouched, since `$xy$` would state a different equation.
+- **Adjacent `Inline::Math`, unverified.** `$x$$y$` parses as two inline maths
+  under `pulldown-cmark`, the oracle the property tier uses. GitHub's math
+  extension is a separate implementation and has not been checked. Recorded as
+  a question rather than a known defect, and deliberately not "fixed" — fusing
+  two equations into one would corrupt content rather than repair it
+  (`2026-08-15-adjacent-inline-fusion-design.md` §8).
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14 as well:
@@ -546,6 +562,11 @@ escape preserves that: `\*` renders as `*`, so the rendered text is unchanged
 and both sides still agree. An escaping scheme that instead replaced or dropped
 characters — mapping `[` to `(` the way `library.rs`'s `link_text` does, say —
 would break every in-book cross-reference to a heading containing one.
+
+Until 2026-08-15 this held *within* one inline and not between two: adjacent
+code spans, and adjacent emphasis, collided at the boundary and rendered as one
+span over text that was not the IR's. The run scan in `inlines_to_md_at` is
+what makes the invariant hold across an inline boundary.
 
 That is also why `link_text`'s bracket substitution does not survive the move:
 `escape::label` escapes rather than substitutes.

@@ -15,23 +15,18 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   prints), and both slug rules, `anchor_slug`/`path_slug`, over the shared
   `is_word` character class. `kasane-core` depends on it for `paths`/`nav`/
   `refs`/`balance` and does not re-export the slug seams; `kasane-writer`
-  depends on it directly for the fold. Of the four anchor divergences
-  `slug.rs`'s module doc has recorded as surviving, three are now closed — a
+  depends on it directly for the fold. Of the five anchor divergences
+  `slug.rs`'s module doc has recorded as surviving, four are now closed — a
   footnote reference's digits via `rendered_text`, a trailing `#` run via
   `kasane-writer::escape::atx_closing` escaping it before GitHub ever sees it,
   and a heading containing a **single** empty inline code span via
   `section::clone_inlines_at` canonicalizing `Inline::Code("")` to a single
-  space before any anchor is computed. Two survive. One is the empty-id
+  space before any anchor is computed. One survives. It is the empty-id
   fallback (`EMPTY_FALLBACK`), a deliberate choice rather than a construction
-  defect. The other, recorded 2026-08-14, is the shape that canonicalization
-  traded away: a heading holding two or more **adjacent** empty code spans
-  anchors `a--b` while its printed line ids `ab`, because CommonMark cannot
-  express two code spans in a row and the writer's two `` ` ` `` runs fuse
-  into one span when a parser reads them back. The anchor divergence is
-  downstream of that fusion, which is itself a content-fidelity bug —
-  `Code("x")` beside `Code("y")` renders as one span reading ``` x``y ``` in an
-  ordinary paragraph, no heading or empty span involved — and fixing it needs
-  its own item. The canonicalization invariant is established by
+  defect. That shape closed on 2026-08-15: `kasane-writer` now renders a run of
+  adjacent same-delimiter inlines as one span, so two empty code spans print
+  one span over both padding spaces and the line ids what the anchor says.
+  The canonicalization invariant is established by
   `fold_sections` and nowhere else: `SectionTree`/`SectionNode` have all-`pub`
   fields and `balance`/`assign_paths` are exported, so a hand-assembled tree
   can still anchor un-canonicalized inlines. Nothing in this repo does.
@@ -98,11 +93,8 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   written down — one divergence still survives there on purpose: the empty-id fallback.
   `rendered_text`, `escape::atx_closing`, and `section::clone_inlines_at`'s
   empty-code-span canonicalization closed the other three the table used to
-  record. The second divergence the `kasane-gfm` entry lists as surviving —
-  adjacent empty code spans — is deliberately not in this table and cannot be:
-  the slug rule computes correctly there, and it is the writer's printed line
-  that is wrong. That table pins kasane's *reading*
-  of the algorithm, not the algorithm, so it cannot catch a misreading. The
+  record. That table pins kasane's *reading* of the algorithm, not the
+  algorithm, so it cannot catch a misreading. The
   external check that can is recorded in design spec §8.1 (first run
   2026-08-09, 13/13 ids matching) and re-run at §8.3 on 2026-08-14 — 13 of 14
   ids identical, codepoints included, the empty-id fallback being the only
@@ -188,6 +180,11 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   seam, asserting postconditions (P7 in `tests/properties.rs` owns the round
   trip, because it can take `pulldown-cmark` as a dev-dependency and the
   library cannot).
+  Adjacent inlines that print with the same delimiter -- two code spans, two
+  `Emph`, two `Strong` -- render as one span over their concatenation, because
+  CommonMark cannot express two such spans in a row and the two delimiter pairs
+  would otherwise fuse into one span in the rendered line, leaking the
+  delimiters into the text as visible characters.
   `Block::Raw` is the one documented exception to that invariant, not another
   case where the rendered text happens not to matter: an HTML comment admits
   no escape mechanism at all, unlike flow text, cells, code spans, HTML and

@@ -1,7 +1,12 @@
 # kasane — Adjacent Inline Fusion Design Spec
 
 **Date:** 2026-08-15
-**Status:** Designed 2026-08-15. Not yet implemented.
+**Status:** Implemented 2026-08-15. Adjacent code spans, adjacent `Emph` and
+adjacent `Strong` each render as one span; pinned by the unit battery in
+`markdown.rs`, by P13, and by
+`adjacent_empty_code_spans_agree_with_the_line_they_print`. The external oracle
+has not been re-run; §8's note about the adjacent-code-span case and the
+adjacent-math question both stand.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open",
 the adjacent-code-spans bullet), which that bullet says "needs its own design".
 The bullet was opened by `2026-08-14-empty-code-span-anchor-design.md`, whose
