@@ -167,7 +167,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   all of a chosen alphabet instead of generated cases. It is what found the
   emphasis-seam defects three property rounds missed, because a property draws
   from an alphabet someone chose and a census draws from all of it; see
-  `census-known-corrupt.txt` above.
+  `census-known-corrupt.txt` below.
   `file_to_markdown` is what both the property suite and `write_tree_contents`
   render through, so what CI asserts is what a conversion writes.
   `escape.rs` is the only path from document text to an output buffer, and

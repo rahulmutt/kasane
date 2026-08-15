@@ -287,11 +287,10 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
         // The run's class comes from its first *printing* member, not its
         // first member outright: a vacuous leading `Emph` prints no
         // delimiter, so it must not dictate `*` over `**` for a `Strong`
-        // that actually prints (design spec `2026-08-15-emphasis-seam-design.md`
-        // §2.5; regression: `a_vacuous_leading_member_does_not_downgrade_the_run_class`
-        // below). A fully vacuous run has no printing member to defer to, so
-        // it falls back to `inline` — the class is unobservable either way,
-        // since the run prints nothing.
+        // that actually prints. A fully vacuous run has no printing member to
+        // defer to, so it falls back to `inline` — the class is unobservable
+        // either way, since the run prints nothing. Regression:
+        // `a_vacuous_leading_member_does_not_downgrade_the_run_class` below.
         let repr = members
             .iter()
             .find(|&&(el, d)| !renders_empty(el, d))
@@ -1802,16 +1801,16 @@ mod tests {
     }
 
     /// A vacuous leading member must not dictate the run's class. Before this
-    /// test's fix, both the emit loop's class match and `run_end`'s grouping
-    /// character were read off `items[i]` — the run's *first* member — rather
-    /// than its first *printing* one, so `[Emph([]), Strong([Text("a")])]`
-    /// downgraded a real `<strong>` to `<em>`: an empty `Emph` prints no
-    /// delimiter, so nothing about the fuse's own justification (a `Strong`
-    /// beside an `Emph` really would collide) applies here, and the text-only
-    /// census cannot see the loss because the recovered text is unaffected
-    /// either way. Reachable from real EPUB input: `<em></em><strong>a</strong>`
-    /// parses to exactly this IR and `kasane_core::canonicalize_inlines`
-    /// leaves empty inline elements alone.
+    /// test's fix, the emit loop's class match was read off `items[i]` — the
+    /// run's *first* member — rather than its first *printing* one, so
+    /// `[Emph([]), Strong([Text("a")])]` downgraded a real `<strong>` to
+    /// `<em>`: an empty `Emph` prints no delimiter, so nothing about the
+    /// fuse's own justification (a `Strong` beside an `Emph` really would
+    /// collide) applies here, and the text-only census cannot see the loss
+    /// because the recovered text is unaffected either way. Reachable from
+    /// real EPUB input: `<em></em><strong>a</strong>` parses to exactly this
+    /// IR and `kasane_core::canonicalize_inlines` leaves empty inline
+    /// elements alone.
     #[test]
     fn a_vacuous_leading_member_does_not_downgrade_the_run_class() {
         assert_eq!(
