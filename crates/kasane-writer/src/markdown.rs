@@ -478,8 +478,14 @@ fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
     out
 }
 
-/// The index of a leading or trailing printing element that must be spliced,
-/// or `None` when neither edge collides.
+/// The index of a leading or trailing printing element that collides at an
+/// edge, sharing a character with the run's own delimiter, or `None` when
+/// neither edge does.
+///
+/// One of two sources [`splice_children`] draws splice candidates from — see
+/// its doc for why this one is keyed on the character and stops at the
+/// edges, while [`same_delim_to_splice`] is keyed on the `Delim` and looks
+/// everywhere.
 fn edge_to_splice(children: &[Flat<'_>], ch: char) -> Option<usize> {
     let printing = |&&(i, d): &&Flat<'_>| !renders_empty(i, d);
     let first = children.iter().position(|c| printing(&c));
@@ -490,32 +496,70 @@ fn edge_to_splice(children: &[Flat<'_>], ch: char) -> Option<usize> {
         .find(|&idx| escape::delim(children[idx].0).map(escape::Delim::ch) == Some(ch))
 }
 
-/// Trim a run's children at both edges while the outermost printing element is
-/// a container whose delimiter shares a character with the run's own.
+/// The index of any element, anywhere in a run's children, whose own `Delim`
+/// equals the run's, or `None` when no such element exists.
 ///
-/// The edge is where a collision can happen and the only place it can:
-/// `emphasize` appends its delimiter immediately outside these children, so an
-/// edge container's own delimiter abuts it and the two merge into a longer run
-/// the parser splits somewhere else. A container *between* other content has
-/// content on both sides and collides with nothing, which is why this trims
-/// rather than splicing everywhere — over-trimming would flatten structure
-/// that is correct today for no text gain (design spec § Confirmed).
+/// The other of the two sources [`splice_children`] draws from. Unlike
+/// [`edge_to_splice`] this does not stop at the first and last printing
+/// element — position is irrelevant to the collision this closes, so every
+/// element is a candidate.
+fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<usize> {
+    children
+        .iter()
+        .position(|&(i, _)| escape::delim(i) == Some(want))
+}
+
+/// Splice a run's children wherever a container collides with the run's own
+/// delimiter, by two rules keyed on two different things, because they close
+/// two different collisions:
 ///
-/// Splicing replaces a container with its own children, which may put another
-/// container at the edge, so the loop repeats. It terminates because each
-/// splice yields elements strictly deeper than the one it replaced and
-/// `flatten_into` yields nothing at `MAX_INLINE_DEPTH`.
+/// - **At an edge, keyed on the delimiter *character*** ([`edge_to_splice`]).
+///   `emphasize` appends the run's own delimiter immediately outside these
+///   children, so an edge container whose delimiter shares that *character*
+///   abuts it and the two merge into a longer run a parser splits somewhere
+///   the writer did not intend — `*` and `**` collapse into `***`. A
+///   container *between* other content has nothing adjacent to abut, which is
+///   why this rule only ever looks at the first and last printing element
+///   (design spec § Confirmed).
+/// - **Anywhere, keyed on the *`Delim`* itself** ([`same_delim_to_splice`]).
+///   A container whose `Delim` equals the run's own cannot nest inside a span
+///   of that same length at all, wherever it sits: `*` inside `*...*` is not
+///   an arrangement CommonMark can express, so the delimiters pair against
+///   each other instead of against the ones the writer intended, and the
+///   leftovers survive into the visible text as literal asterisks. A
+///   container of a *different* length is unaffected and stays where it is —
+///   `*a**b**c*` is exactly how `<em>a<strong>b</strong>c</em>` is spelled and
+///   round-trips — which is why this rule is keyed on `Delim` and not on the
+///   character the edge rule uses.
+///
+/// These are two rules and not one rule with an inconsistent key: the
+/// character rule exists because two *different* classes abut into a run a
+/// parser re-splits; the `Delim` rule exists because two *same*-length
+/// delimiters can never nest at all, regardless of adjacency. Neither
+/// subsumes the other — dropping the edge rule would leave `*a***b*` (an
+/// `Emph` and a `Strong` abutting at the edge) unclosed, and dropping the
+/// `Delim` rule would leave this task's shapes unclosed.
+///
+/// Splicing replaces a container with its own children, which may expose a
+/// new collision — a new edge, or a new element the `Delim` rule can now see
+/// — so the loop repeats until neither rule finds anything. It terminates
+/// because each splice replaces one container with its own children, so the
+/// number of IR nodes the view spans strictly decreases, and `flatten_into`
+/// yields nothing at `MAX_INLINE_DEPTH`.
 ///
 /// Only pointers move: `flatten_into` borrows, and `Vec::splice` shuffles
 /// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
-fn trim_edges<'a>(mut children: Vec<Flat<'a>>, ch: char) -> Vec<Flat<'a>> {
-    while let Some(idx) = edge_to_splice(&children, ch) {
+fn splice_children<'a>(mut children: Vec<Flat<'a>>, want: escape::Delim) -> Vec<Flat<'a>> {
+    let ch = want.ch();
+    while let Some(idx) =
+        edge_to_splice(&children, ch).or_else(|| same_delim_to_splice(&children, want))
+    {
         let (inline, depth) = children[idx];
         let (Inline::Emph(x) | Inline::Strong(x)) = inline else {
-            // `edge_to_splice` only ever names a container: `escape::delim`
+            // Both sources only ever name a container: `escape::delim`
             // returns `Emph`/`Strong` for those alone, and `Backtick` cannot
-            // match an emphasis run's `ch`.
-            debug_assert!(false, "edge_to_splice named a non-container");
+            // match an emphasis run's `ch` or `Delim`.
+            debug_assert!(false, "a splice candidate named a non-container");
             return children;
         };
         let mut spliced = Vec::new();
@@ -607,7 +651,7 @@ fn emphasis_run<'a>(
     before: Flank,
     after: Flank,
 ) -> String {
-    let children = trim_edges(run_children(members), want.ch());
+    let children = splice_children(run_children(members), want);
     let inner = inlines_to_md_flat(&children, ctx, pos);
     let core = inner.trim();
     // An all-whitespace or empty inner buffer gets no delimiters anyway --
@@ -1857,7 +1901,7 @@ mod tests {
     /// and both children's delimiter shares the `*` character with the run's
     /// own (`Delim::ch`, not `Delim` equality — a `Strong` and an `Emph`
     /// collide on the character even though they are different `Delim`s), so
-    /// Task 3's `trim_edges` splices both away. The run then prints with only
+    /// `splice_children`'s edge rule splices both away. The run then prints with only
     /// its own delimiter: one pair, not the nested two the base recovered
     /// `ab` through, and still exactly `ab`.
     #[test]
@@ -1888,10 +1932,13 @@ mod tests {
     }
 
     /// A container printing the run's *own* delimiter is transparent inside it
-    /// when it sits at an edge — trimmed away by Task 3's `trim_edges` — and
-    /// left alone in the middle, where content on both sides means nothing
-    /// abuts and nothing collides (`a_container_mid_buffer_is_left_alone`
-    /// pins that control on its own).
+    /// when it sits at an edge — trimmed away by `splice_children`'s edge rule
+    /// (Task 3) — and left alone in the middle when its `Delim` differs from
+    /// the run's own, where content on both sides means nothing abuts
+    /// (`a_container_mid_buffer_is_left_alone` pins that control on its own;
+    /// a same-`Delim` container in the middle is a different case, closed by
+    /// this task's own rule and pinned by
+    /// `a_same_class_container_mid_buffer_is_spliced`).
     ///
     /// The leaking case was a regression the fusion item introduced:
     /// `[Emph([Emph(a)]), Emph([Text("bc")])]` printed `**a***bc*` at base and
@@ -1914,12 +1961,19 @@ mod tests {
             assert_eq!(kasane_gfm::rendered_text(&inls), "abc");
         }
 
-        // Mid-buffer, not an edge: the nested emphasis has content on both
-        // sides, so `trim_edges` leaves it alone and it prints its own
-        // delimiters rather than joining the outer run's. Three spans where
-        // the edge cases above print one, and still exactly `abc`.
+        // Mid-buffer, not an edge — and, before controller-authored task 5b,
+        // left alone here because the edge rule only looks at the first and
+        // last printing element. That used to print `*a*b*c*`, which is worse
+        // than it looks: a parser pairs delimiter 0 with 2 and 4 with 6, so
+        // "b" comes back in neither `<em>` at all, silently losing the
+        // emphasis the source put on it (nested `Emph` inside `Emph` is not
+        // an arrangement CommonMark can spell, so it was never really
+        // reachable through this printed form). Task 5b's `Delim`-keyed rule
+        // splices the inner `Emph` away wherever it sits, so this now joins
+        // the outer run exactly as the edge cases above do, and "b" comes
+        // back inside the one `<em>` that actually reaches it.
         let mid = vec![em(vec![t("a"), em(vec![t("b")]), t("c")])];
-        assert_eq!(para(mid.clone()), "*a*b*c*");
+        assert_eq!(para(mid.clone()), "*abc*");
         assert_eq!(recovered(mid.clone()), "abc");
         assert_eq!(kasane_gfm::rendered_text(&mid), "abc");
     }
@@ -1934,8 +1988,9 @@ mod tests {
     /// (`kasane-adapters::epub::tests::the_inline_depth_bound_holds_on_a_real_epub`),
     /// so nothing depends on the delimiter count any more. A run whose only
     /// member is a nested container is a run whose one element is both the
-    /// first and the last, so `trim_edges` treats it exactly like any other
-    /// edge and it collapses all the way down to one delimiter pair, same as
+    /// first and the last, so `splice_children`'s edge rule treats it exactly
+    /// like any other edge and it collapses all the way down to one delimiter
+    /// pair, same as
     /// `the_trim_repeats_until_neither_edge_is_a_container`. The text still
     /// survives intact either way.
     #[test]
@@ -2158,5 +2213,38 @@ mod tests {
             ]),
             "a `cd"
         );
+    }
+
+    /// A container of the run's own class sitting *between* other content is
+    /// spliced, not left alone: `*` inside `*...*` is not an arrangement
+    /// CommonMark can express, so the delimiters do not pair the way the
+    /// nesting intended and the leftovers survive into the visible text. This
+    /// shape printed `*a*a*`x`*` and recovered `aa*x*` before this task
+    /// (controller-authored task 5b; see the ledger's Task 4 rulings).
+    #[test]
+    fn a_same_class_container_mid_buffer_is_spliced() {
+        let inls = vec![
+            Inline::Emph(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
+            Inline::Strong(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
+            Inline::Strong(vec![Inline::Code("x".into())]),
+        ];
+        assert_eq!(para(inls.clone()), "*aa`x`*");
+        assert_eq!(recovered(inls), "aax");
+    }
+
+    /// The control that keeps this rule honest, and the reason it is keyed on
+    /// `Delim` rather than on the delimiter character: a `Strong` inside an
+    /// `Emph` run is spelled `*a**b**c*`, which is exactly how
+    /// `<em>a<strong>b</strong>c</em>` is written and round-trips perfectly.
+    /// Splicing on the character alone would flatten it for no text gain.
+    #[test]
+    fn a_different_class_container_mid_buffer_is_still_left_alone() {
+        let inls = vec![Inline::Emph(vec![
+            Inline::Text("a".into()),
+            Inline::Strong(vec![Inline::Text("b".into())]),
+            Inline::Text("c".into()),
+        ])];
+        assert_eq!(para(inls.clone()), "*a**b**c*");
+        assert_eq!(recovered(inls), "abc");
     }
 }
