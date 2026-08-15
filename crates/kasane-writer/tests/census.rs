@@ -23,7 +23,7 @@
 //!
 //! # Why this alphabet
 //!
-//! Eighteen elements, chosen to put every delimiter class next to every other:
+//! Nineteen elements, chosen to put every delimiter class next to every other:
 //! plain text, text that is itself a delimiter character, both code-span
 //! classes (`Code`, and a `Math` that degrades to backticks), a `Math` that
 //! does not degrade, each emphasis class alone and wrapping each of the
@@ -62,6 +62,7 @@ fn alphabet() -> Vec<Inline> {
         em(em(t("a"))),
         st(em(t("a"))),
         em(st(t("a"))),
+        st(st(t("a"))),
         Inline::Link {
             target: RefTarget::Internal(BlockId(0)),
             inlines: vec![Inline::Code("x".into())],
