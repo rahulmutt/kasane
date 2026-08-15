@@ -12,6 +12,11 @@ space, and this item's canonicalization turned a shape that previously agreed
 by accident into a divergent one. Recorded as open in
 `2026-08-09-markdown-escaping-design.md` and in `kasane_gfm::slug`'s module doc;
 not fixed here, per § Non-goals' exclusion of the mismatch class.
+**Closed 2026-08-15** by `2026-08-15-adjacent-inline-fusion-design.md`, in the
+writer rather than in this item's canonicalization: a run of adjacent
+same-delimiter inlines now renders as one span, so the two padding spaces this
+item created are both printed and the line ids `a--b`, which is what this item
+already anchored.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open",
 the empty-inline-code-span bullet), carried forward by
 `2026-08-14-shared-gfm-text-model-design.md` (§ Non-goals, and the second
@@ -90,6 +95,11 @@ dead in the tree kasane itself produced.
   it is not the only one. Closing the single-span case turned the *adjacent*
   empty-code-span shape from accidentally-agreeing into divergent, and that
   shape is now the module doc's second entry. See the Status block.
+  **Closed 2026-08-15** by `2026-08-15-adjacent-inline-fusion-design.md`, in the
+  writer rather than in this item's canonicalization: a run of adjacent
+  same-delimiter inlines now renders as one span, so the two padding spaces this
+  item created are both printed and the line ids `a--b`, which is what this item
+  already anchored.
 - **Math in a heading.** GitHub renders `$…$` through MathJax and what that
   does to the id is unmodelled. Untouched here; its own item if it is ever
   wanted.

@@ -15,7 +15,7 @@ mod generator;
 
 use generator::{Case, Expect};
 use kasane_core::{canonicalize_inlines, est_tokens, structure, FileNode};
-use kasane_gfm::{anchor_slug_of, anchors_for_headings};
+use kasane_gfm::{anchor_slug_of, anchors_for_headings, rendered_text};
 use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
 use proptest::prelude::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
@@ -333,6 +333,58 @@ const P12_TEXTS: &[&str] = &[
     "第",
     "می‌رود",
 ];
+
+/// P13's inline alphabet: adjacency, not hostility.
+///
+/// Every other property in this file draws hostile text on purpose. This one
+/// deliberately does not. It asserts an *equality* between the text a real
+/// parser recovers and `rendered_text`, and the newline fold, the escapes and
+/// the character references each legitimately move bytes between those two
+/// sides — with hostile text drawn, the property would fail on correct
+/// behaviour. Restricting the alphabet to plain words is what makes the
+/// equality exact; it is the move P12 made with `P12_TEXTS`, for the same
+/// reason. Widen it and you will get a mystery failure from the fold, not a
+/// bug.
+///
+/// `Inline::Code("")` is excluded specifically. `code_span`'s Rule 1 prints an
+/// empty span as `` ` ` `` — an acknowledged round-trip divergence — while
+/// `rendered_text` reads the IR's empty string. That divergence is unreachable
+/// for IR that went through `structure`, which canonicalizes it to a space,
+/// and is not what this property is about. An empty `Inline::Text` *is* drawn:
+/// it prints nothing, and an inline that prints nothing sitting between two
+/// spans is exactly the shape the run scan has to see through.
+///
+/// The alphabet draws two of the three delimiter-bearing children the parent
+/// spec named as blocked — `Emph([Emph([Text(w)])])` and
+/// `Strong([Emph([Text(w)])])` — because the seam between one member's last
+/// child and the next member's first is where the run scan had to be taught
+/// to look, and only such a child reaches it. Both were unblocked by
+/// `2026-08-15-emphasis-seam-design.md`.
+///
+/// `Emph(vec![Code(w)])` stays out. Not blocked by the old `emphasize`-seam
+/// defects that blocked the other two — a different one, now precisely
+/// known: `[Code("a"), Emph([Code("a")]), Text("a")]` prints `` `a``a`a ``
+/// and recovers `"a``aa"` against `rendered_text`'s `"aaa"`. The middle
+/// member declines its delimiters and prints its bare `Code` child, which
+/// then puts a backtick immediately after the previous code span's closing
+/// backtick; a parser reads that adjacent pair as one delimiter and the code
+/// span swallows past it. `tests/census.rs`'s allowlist already names this
+/// shape as one of the 32 it still tracks corrupt, and will fail the build
+/// the day someone closes it and leaves the entry stale.
+const P13_WORDS: &[&str] = &["a", "bc", "xyz"];
+
+fn p13_inline() -> impl Strategy<Value = Inline> {
+    let word = || proptest::sample::select(P13_WORDS).prop_map(|w| w.to_string());
+    prop_oneof![
+        word().prop_map(Inline::Text),
+        word().prop_map(Inline::Code),
+        word().prop_map(|w| Inline::Emph(vec![Inline::Text(w)])),
+        word().prop_map(|w| Inline::Strong(vec![Inline::Text(w)])),
+        Just(Inline::Text(String::new())),
+        word().prop_map(|w| Inline::Emph(vec![Inline::Emph(vec![Inline::Text(w)])])),
+        word().prop_map(|w| Inline::Strong(vec![Inline::Emph(vec![Inline::Text(w)])])),
+    ]
+}
 
 proptest! {
     /// P1 — Conservation. No block lost, none duplicated.
@@ -763,9 +815,11 @@ proptest! {
     ///
     /// Both text runs are drawn from [`P12_TEXTS`] — see that constant for why
     /// the original `[a-z]{1,4}` was not a guard. What this property still
-    /// cannot draw is a *second* code span beside the first: that shape
-    /// diverges rather than agreeing, and is pinned by
-    /// `adjacent_empty_code_spans_diverge_from_the_line_they_print` below.
+    /// cannot draw is a *second* code span beside the first: adjacent code
+    /// spans fuse into one, at whatever fence length their concatenation
+    /// forces, which is a shape this generator's single `Inline::Code` cannot
+    /// produce. That shape is pinned exactly, not generated, by
+    /// `adjacent_empty_code_spans_agree_with_the_line_they_print` below.
     #[test]
     fn p12_an_empty_code_span_in_a_heading_anchors_the_same(
         lead in proptest::sample::select(P12_TEXTS),
@@ -793,38 +847,64 @@ proptest! {
             lead, tail, md
         );
     }
+
+    /// P13 — inline text survives rendering, across inline boundaries.
+    ///
+    /// The invariant the escaping spec's §5 states — escaping must never change
+    /// what the Markdown renders to — held within one inline and not between two.
+    /// Two neighbours printing the same delimiter met with nothing between them,
+    /// and a parser read one span where the IR held two: the delimiters that
+    /// should have separated them became visible characters in the middle of the
+    /// text (design spec §1).
+    ///
+    /// Drawn as a flat sequence rather than through `generator::case()` because
+    /// that generator appends decoration after a payload run and this property
+    /// needs neighbours of the same kind next to each other, at a length the run
+    /// scan actually has to walk.
+    #[test]
+    fn p13_inline_text_survives_rendering(
+        inlines in proptest::collection::vec(p13_inline(), 1..6),
+    ) {
+        let md = kasane_writer::blocks_to_markdown(
+            &[Block::Para(inlines.clone())],
+            &AssetBag::default(),
+        );
+        let recovered = parse_events(&md).text;
+        let expected = rendered_text(&inlines);
+        prop_assert_eq!(
+            recovered.trim(),
+            expected.trim(),
+            "inline text changed under rendering:\n{}",
+            md
+        );
+    }
 }
 
-/// Two *adjacent* empty code spans in a heading still diverge — a record of a
-/// known-open bug, not an endorsement of the values it asserts.
+/// Two *adjacent* empty code spans in a heading agree with the line they
+/// print. Closed 2026-08-15 by
+/// `2026-08-15-adjacent-inline-fusion-design.md`; this test recorded the
+/// divergence before that, and its old body asserted `a--b` against a rendered
+/// `ab` on purpose.
 ///
-/// `a--b` is **wrong**. The line this heading prints ids as `ab` on GitHub, so
-/// a cross-reference kasane embeds into such a heading is dead. What is
-/// asserted below is what the code does today, pinned so the next person meets
-/// this deliberately instead of rediscovering it.
+/// What closed it is not an anchor change. CommonMark cannot express two code
+/// spans in a row: `` `x` `` beside `` `y` `` fuses into one span whose content
+/// is the pair of backticks that should have closed the first and opened the
+/// second. The writer now renders a run of adjacent code spans as one span
+/// over their concatenation, so the printed line moved onto the anchor rather
+/// than the other way round — `kasane-gfm` did not change.
 ///
-/// The cause is upstream of the anchor rule, in the writer. CommonMark cannot
-/// express two code spans in a row: ``` `x``y` ``` is *one* span whose content
-/// is ``` x``y ```, not two spans. The writer emits them anyway, so two
-/// `` ` ` `` runs
-/// fuse into a single span in the rendered line while the IR still holds two
-/// inlines. The empty-code-span canonicalization
-/// (`kasane_core::section::clone_inlines_at`) then lengthens the IR side to two
-/// spaces while the render side does not move at all — identical bytes at base
-/// and head, a different anchor. Before it the two sides agreed here by
-/// accident, both saying `ab`; this is the one shape that fix traded away, and
-/// it closed the mixed shapes in the same move
-/// (`[Text("a"), Code(""), Code("x")]` diverged before and agrees now).
+/// The empty-code-span canonicalization
+/// (`kasane_core::section::clone_inlines_at`) is what makes the two spaces
+/// real: it reaches the writer as `[Code(" "), Code(" ")]`, which fuses to one
+/// span over `"  "`, and `code_span`'s Rule 2 leaves an all-spaces content
+/// unpadded, so the line prints both spaces and ids `a--b`.
 ///
-/// The fusion is the real defect and it is not an anchor defect: `Code("x")`
-/// beside `Code("y")` in an ordinary paragraph renders as one span reading
-/// ``` x``y ```, which is visible content corruption with no empty span anywhere
-/// near it. That is asserted here too, so the record cannot be read as scoped
-/// to headings. Recorded as open in `kasane_gfm::slug`'s module doc and in
-/// `2026-08-09-markdown-escaping-design.md`'s open-case list; fixing it needs
-/// its own design, and this test is what should fail when that lands.
+/// The paragraph half is kept deliberately. The fusion was never only an
+/// anchor bug: `Code("x")` beside `Code("y")` in an ordinary paragraph came
+/// back as one span reading ``` x``y ```, content corruption with no empty
+/// span and no heading anywhere near it.
 #[test]
-fn adjacent_empty_code_spans_diverge_from_the_line_they_print() {
+fn adjacent_empty_code_spans_agree_with_the_line_they_print() {
     let inlines = canonicalize_inlines(&[
         Inline::Text("a".into()),
         Inline::Code(String::new()),
@@ -838,26 +918,24 @@ fn adjacent_empty_code_spans_diverge_from_the_line_they_print() {
     }];
     let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
 
-    // The two spans fused: a real parser recovers one code span whose content
-    // is the pair of backticks that should have closed the first and opened
-    // the second.
-    assert_eq!(md.trim_end(), "## a` `` `b");
+    // One span over both padding spaces, not two spans that fuse.
+    assert_eq!(md.trim_end(), "## a`  `b");
     let parsed = parse_events(&md);
-    assert_eq!(parsed.headings, vec!["a``b".to_string()]);
+    assert_eq!(parsed.headings, vec!["a  b".to_string()]);
 
-    // KNOWN DIVERGENT — deliberately not compared to each other. The first is
-    // the id a renderer computes from the printed line; the second is the
-    // anchor kasane embeds in every cross-reference to it.
+    // The id a renderer computes from the printed line, and the anchor kasane
+    // embeds in every cross-reference to it. Compared to each other, which is
+    // the point: they used to be held apart.
     assert_eq!(
         anchors_for_headings(&parsed.headings)
             .first()
             .map(String::as_str),
-        Some("ab"),
+        Some(anchor_slug_of(&inlines).as_str()),
     );
     assert_eq!(anchor_slug_of(&inlines), "a--b");
 
-    // The fusion itself, with no empty span involved and no heading involved:
-    // two ordinary code spans in a paragraph come back as one.
+    // The content half, with no empty span and no heading involved: two
+    // ordinary code spans side by side come back as the text they carried.
     let para = kasane_writer::blocks_to_markdown(
         &[Block::Para(vec![
             Inline::Code("x".into()),
@@ -865,8 +943,8 @@ fn adjacent_empty_code_spans_diverge_from_the_line_they_print() {
         ])],
         &AssetBag::default(),
     );
-    assert_eq!(para.trim_end(), "`x``y`");
-    assert_eq!(parse_events(&para).text.trim(), "x``y");
+    assert_eq!(para.trim_end(), "`xy`");
+    assert_eq!(parse_events(&para).text.trim(), "xy");
 }
 
 /// The merged-subsection anchor, pinned end to end and deterministically.

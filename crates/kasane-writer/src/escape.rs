@@ -474,6 +474,12 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
         // but the API does not forbid it, and this comment does not claim it
         // does.
         //
+        // Two adjacent empty spans are no longer a special case either: the
+        // run scan in `inlines_to_md_at` renders them as one span over their
+        // concatenated content, so `[Code(" "), Code(" ")]` prints `` `  ` ``
+        // and Rule 2 leaves both spaces intact. Rule 1 is reached only by a
+        // run whose whole concatenation is empty.
+        //
         // Rule 1 and Rule 2 must keep printing the same bytes for that
         // canonicalization to stay invisible; see
         // `code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders`.
@@ -490,6 +496,72 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     } else {
         // Plain content: no padding
         format!("{ticks}{content}{ticks}")
+    }
+}
+
+/// Whether [`math_span`] will degrade this content to a code span rather than
+/// print it as `$…$`.
+///
+/// Named rather than inlined into the branch below because
+/// [`delim`] has to ask the same question: a degrading `Inline::Math` prints
+/// with backticks, so it collides with a neighbouring code span exactly as a
+/// second `Inline::Code` would (design spec §2.1). With the rule in one place,
+/// widening what math degrades widens the delimiter class in the same edit and
+/// cannot silently fail to.
+pub(crate) fn math_degrades(s: &str) -> bool {
+    s.contains('$') || s.contains('\n') || s.contains('\r')
+}
+
+/// The delimiter an inline prints with, where two neighbours printing the same
+/// one would collide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Delim {
+    /// A code span: `` `…` ``, at whatever fence length its content forces.
+    Backtick,
+    /// `*…*`.
+    Emph,
+    /// `**…**`.
+    Strong,
+}
+
+impl Delim {
+    /// The character this delimiter is spelled with.
+    ///
+    /// Two delimiter runs collide when they share a character, not when they
+    /// are the same `Delim`: `*` and `**` are different classes that abut into
+    /// one `***` run a parser splits somewhere the writer did not intend, while
+    /// a backtick beside a `*` is simply two characters. Keying the rule on the
+    /// character is what states it as written rather than leaving it true by
+    /// the coincidence that this writer never spells emphasis with `_`
+    /// (design spec `2026-08-15-emphasis-seam-design.md` §2.1).
+    pub(crate) fn ch(self) -> char {
+        match self {
+            Delim::Backtick => '`',
+            Delim::Emph | Delim::Strong => '*',
+        }
+    }
+}
+
+/// Which delimiter this inline prints with, or `None` if it prints none that
+/// can collide with a neighbour's.
+///
+/// Keyed on what is **printed**, not on the `Inline` variant, and that is the
+/// whole reason this function exists rather than a `matches!` at the call
+/// site: [`math_span`] degrades unsafe content to a code span, so
+/// `[Code("x"), Math("a$b")]` prints two backtick spans and fuses exactly as
+/// two `Code` inlines would. A rule matching `Inline::Code` alone would look
+/// complete and leave that shape broken (design spec §2.1).
+///
+/// `Inline::Math` that does not degrade is `None` on purpose: `$x$$y$` is read
+/// as two inline maths, and the two spans could not be merged even if they did
+/// collide — `$xy$` states a different equation (design spec § Non-goals).
+pub(crate) fn delim(i: &Inline) -> Option<Delim> {
+    match i {
+        Inline::Code(_) => Some(Delim::Backtick),
+        Inline::Math(t) if math_degrades(t) => Some(Delim::Backtick),
+        Inline::Emph(_) => Some(Delim::Emph),
+        Inline::Strong(_) => Some(Delim::Strong),
+        _ => None,
     }
 }
 
@@ -529,7 +601,7 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
 /// by passing `ctx` down. The backslash is consumed by the table grammar
 /// before the math renderer sees it, so `$\|x\|$` recovers `InlineMath("|x|")`.
 pub(crate) fn math_span(s: &str, ctx: Ctx) -> String {
-    if s.contains('$') || s.contains('\n') || s.contains('\r') {
+    if math_degrades(s) {
         code_span(s, ctx)
     } else if ctx == Ctx::Cell {
         format!("${}$", s.replace('|', "\\|"))
@@ -1379,6 +1451,23 @@ mod tests {
                 !body.contains("-->"),
                 "note {note:?} closed the comment early: {wrapped}"
             );
+        }
+    }
+
+    /// `math_degrades` is `math_span`'s own branch condition, extracted so
+    /// `delim` can ask the same question (design spec §2.1). The two must agree
+    /// forever: this test asserts the predicate against `math_span`'s observable
+    /// output rather than against a second copy of the expression, so an edit to
+    /// either one that does not move the other fails here.
+    #[test]
+    fn math_degrades_agrees_with_what_math_span_prints() {
+        for s in ["a$b", "$", "a\nb", "a\rb"] {
+            assert!(math_degrades(s), "{s:?} should degrade");
+            assert_eq!(math_span(s, Ctx::Flow), code_span(s, Ctx::Flow), "{s:?}");
+        }
+        for s in ["x", "\\frac{1}{2}", "a b"] {
+            assert!(!math_degrades(s), "{s:?} should not degrade");
+            assert_eq!(math_span(s, Ctx::Flow), format!("${s}$"), "{s:?}");
         }
     }
 }

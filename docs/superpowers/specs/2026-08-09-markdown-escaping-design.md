@@ -460,10 +460,11 @@ and disarms the whole run, which made the "changes the line-start rules for
 every context at once" characterization an artifact of the mechanism rather
 than of the defect.
 
-Two cases remain open, narrower than what was closed. The three bullets below
+One case remains open, narrower than what was closed. The four bullets below
 are not the original two: the empty-inline-code-span case closed on 2026-08-14,
-and the item that closed it opened the third, which is recorded here beside
-them.
+the item that closed it opened a third — adjacent code spans — which closed in
+turn on 2026-08-15, and the fix that closed that one opened a fourth, recorded
+here as a question rather than a defect.
 
 - **Whitespace inside the merged-table HTML fallback.** Not reachable by
   escaping: an HTML renderer collapses whitespace runs whether they arrived
@@ -517,6 +518,118 @@ them.
   `adjacent_empty_code_spans_diverge_from_the_line_they_print`
   (`kasane-writer/tests/properties.rs`) and recorded in `kasane_gfm::slug`'s
   module doc alongside `EMPTY_FALLBACK`.
+  **Closed 2026-08-15** by `2026-08-15-adjacent-inline-fusion-design.md`. The
+  writer now renders a run of adjacent same-delimiter inlines as one span over
+  their concatenation, so the printed line moved onto the anchor and
+  `kasane-gfm` did not change. Wider than this bullet predicted in one
+  direction: the same collision hits two `Inline::Emph` and two
+  `Inline::Strong`, which print `*a**b*` and `**a****b**` and leak literal
+  asterisks into visible text — neither was recorded anywhere before that item
+  measured them. Narrower in another: adjacent `Inline::Math` does not collide
+  and is deliberately untouched, since `$xy$` would state a different equation.
+- **Adjacent `Inline::Math`, unverified.** `$x$$y$` parses as two inline maths
+  under `pulldown-cmark`, the oracle the property tier uses. GitHub's math
+  extension is a separate implementation and has not been checked. Recorded as
+  a question rather than a known defect, and deliberately not "fixed" — fusing
+  two equations into one would corrupt content rather than repair it
+  (`2026-08-15-adjacent-inline-fusion-design.md` §8).
+- **An emphasis delimiter flush against a word character, with punctuation
+  just inside it, is not a delimiter at all.** Found 2026-08-15 while widening
+  P13's alphabet in review, measured identical at that item's base, and
+  unrelated to the run scan. `emphasize` moves edge *whitespace* outside the
+  delimiters, which is what CommonMark's flanking rules ask for, but nothing
+  covers edge punctuation: `[Text("a"), Emph([Code("a")])]` prints
+  ``a*`a`*``, whose opening `*` is preceded by a letter and followed by a
+  backtick, so it is neither left- nor right-flanking and stays a literal
+  asterisk — the paragraph reads `a*a*`, with both asterisks visible.
+  `[Emph([Code("a")]), Text("a")]` and `[Emph([Text("a")]),
+  Strong([Code("bc")])]` fail the same way. This is a §5 violation of the same
+  kind the fusion item closed, at a different seam, and it is what stops the
+  property tier from drawing a delimiter-bearing emphasis child today
+  (`properties.rs`'s `P13_WORDS` doc comment states the block). The writer
+  cannot see the character before its own delimiter at the point `emphasize`
+  runs, so this needs its own design rather than a patch.
+  **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`'s flanking
+  decline (§2.3) — its own design, as this bullet said was needed, rather than
+  a patch to `emphasize`. Before wrapping a run, the scan in
+  `inlines_to_md_flat` checks whether the delimiter it is
+  about to add can both open and close where it lands — the character already
+  emitted before the run, and the first printing character the rest of the
+  view will emit after it — and renders the run's children bare when either
+  side fails. `emphasize` itself is unchanged; the scan decides whether to
+  call it with delimiters at all, rather than `emphasize` learning to look
+  outside its own buffer. Pinned by unit tests in `markdown.rs` (the
+  content-punctuation drop, in both the opening-side and closing-side orders)
+  and, exhaustively, by `kasane-writer/tests/census.rs`.
+- **A lone nested emphasis prints a delimiter its class does not name.** Found
+  the same way and also present at base. `Emph([Emph([Text("a")])])` prints
+  `**a**`, since the two pairs stack, but `escape::delim` classes it
+  `Delim::Emph`; beside a real `Inline::Strong` the two `**` runs meet and the
+  text leaks. Corrected 2026-08-15 in the fusion item's own review: this
+  bullet first said "fusing cannot fix it … the delimiter class would have to
+  become a (character, length) pair", and that was measured false. Splicing a
+  child that prints the run's own delimiter makes `Emph([Emph([Text("a")])])`
+  print `*a*`, so what it prints matches what its class names, and the leak
+  goes. The fusion item does splice that child — except when it is the run's
+  whole content, a carve-out that exists only to preserve the `*` count
+  `kasane-cli/tests/e2e.rs` counts to observe the EPUB adapter's inline-depth
+  bound through writer bytes. Move that assertion into `kasane-adapters`,
+  where it can read `Emph` nesting off the parsed IR, and the splice becomes
+  uniform and this bullet closes with it.
+  **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`'s edge trim
+  (§2.1, `edge_to_splice`/`splice_children` in `markdown.rs`), and not by the
+  `(character, length)` delimiter class this bullet's own 2026-08-14 correction
+  predicted. `edge_to_splice` needs no such class: it looks only at whether the
+  first or last *printing* child of a run is a container whose delimiter
+  shares the run's own delimiter *character*, and splices it in place, wherever
+  the edge lands. `Emph([Emph([Text("a")])])`'s inner `Emph` is both the first
+  and last printing child, so it is spliced and the run prints `*a*` — matching
+  what its class names, with no length bookkeeping at all. The `kasane-cli`
+  assertion this bullet named moved into `kasane-adapters` in the same item's
+  first task, exactly as predicted, which is what let the splice apply
+  uniformly with no carve-out. A second, separate rule — splicing a
+  same-`Delim` container *anywhere* in a run, not only at an edge — was added
+  later in the same item to close a family of regressions the edge rule alone
+  did not reach (`splice_children`'s doc comment in `markdown.rs` records both
+  rules and why each is keyed the way it is); that second rule is not what
+  closes this bullet's shape, which the edge rule alone already reaches.
+- **An emphasis delimiter meeting the *other* class's delimiter at
+  `emphasize`'s wrap seam.** Found 2026-08-15 by the fusion item's
+  whole-branch review, which ran an exhaustive differential census — every
+  inline sequence of length 1-3 over an 18-element alphabet, ~5,800 shapes,
+  parsed text against `rendered_text`. That census is the number to beat:
+  1604 shapes corrupt at that item's base, 715 after it. **18 of the 715 were
+  correct at its base**, so this bullet records a regression, not a survival.
+  `emphasize` wraps an inner buffer whose edge already carries the other
+  class's delimiter, so a `*` meets a `**` and the parser mis-splits the run:
+  `<em>a</em><strong>b</strong><strong><em>c</em></strong>` printed
+  `*a***b*****c***` and recovered `abc` before that item, prints `*a***b*c***`
+  and recovers `abc**` after it. No exotic IR is needed and the EPUB path
+  produces it. It is the same §5 violation as the two bullets above and the
+  fusion item itself, at the third seam of the same function, and the three
+  should close together: the candidate rule is that `emphasize` separates the
+  delimiter it is about to add from an inner buffer that already starts or
+  ends with that character, the way it already separates edge whitespace.
+  Fusing cannot reach it — the two runs are different classes and must not
+  merge — which is why the fusion item, whose spec §3 puts `emphasize` out of
+  scope, deliberately left it rather than patching the run scan a third time.
+  Two attempts to close this family from the run scan each closed their named
+  shapes and introduced new ones.
+  **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`, together with
+  the two bullets above — the three closed together, as this bullet predicted.
+  Not by the candidate rule named here, though: that rule lived inside
+  `emphasize`, separating the delimiter it is about to add from an inner
+  buffer that already starts or ends with that character. The rule that
+  actually shipped lives one level up, in the run scan (`inlines_to_md_flat`):
+  the edge trim (seam one, §2.1) removes an edge container whose delimiter
+  shares the run's own character before `emphasize` is ever called, and the
+  run fuse (seam two, §2.1) merges two adjacent runs that share a delimiter
+  character into one run before either is wrapped, so their delimiters never
+  abut in the first place. `emphasize` itself was not touched, exactly as
+  that spec's own §2.3 states. The census (`kasane-writer/tests/census.rs`) is the
+  committed successor to the throwaway probe this bullet's numbers came from;
+  its allowlist went from 686 corrupt shapes when first committed to 32 after
+  this item's fixes landed.
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14 as well:
@@ -546,6 +659,18 @@ escape preserves that: `\*` renders as `*`, so the rendered text is unchanged
 and both sides still agree. An escaping scheme that instead replaced or dropped
 characters — mapping `[` to `(` the way `library.rs`'s `link_text` does, say —
 would break every in-book cross-reference to a heading containing one.
+
+Until 2026-08-15 this held *within* one inline and not between two: adjacent
+code spans, and adjacent emphasis, collided at the boundary and rendered as one
+span over text that was not the IR's. The run scan in `inlines_to_md_at` is
+what makes the invariant hold across an inline boundary — over a flattened view
+of the *printed* stream rather than over IR siblings, because a transparent
+link's children and a fused run's members' children are neighbours to a parser
+too, and the first shape of the scan missed both seams (review finding,
+2026-08-15). It does not yet hold for an emphasis delimiter standing flush
+against a word character with punctuation just inside it, which CommonMark's
+flanking rules make not a delimiter at all; that shape is recorded in the open
+list below.
 
 That is also why `link_text`'s bracket substitution does not survive the move:
 `escape::label` escapes rather than substitutes.

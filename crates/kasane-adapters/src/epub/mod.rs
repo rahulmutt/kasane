@@ -1183,4 +1183,63 @@ mod tests {
             doc.nodes.get(ref_idx + 2).map(|n| &n.block)
         );
     }
+
+    /// The inline-flattening bound holds on a real EPUB read through the real
+    /// adapter, not only on a hand-built XML string.
+    ///
+    /// `fuzz/seeds/epub/deep-nesting.epub` nests `<em>` 5000 deep. The unit
+    /// test above covers `parse_blocks` on a 300-deep string; this one covers
+    /// the zip, the OPF, the spine and the XHTML parser together, which is
+    /// what the seed exists for.
+    ///
+    /// This assertion used to live in `kasane-cli/tests/e2e.rs`, where it
+    /// counted `*` characters in the *writer's* output. That coupled an
+    /// adapter bound to a writer spelling: it forced a carve-out into the
+    /// writer's central emphasis rule to keep 64 stacked `*` printing, a
+    /// spelling a parser reads as 32 nested `<strong>` — a structure the IR
+    /// never held (`2026-08-15-emphasis-seam-design.md` §2.4). Reading the
+    /// depth off the parsed IR asserts the property directly and leaves the
+    /// writer free to spell it however it likes.
+    #[test]
+    fn the_inline_depth_bound_holds_on_a_real_epub() {
+        fn depth_of(inls: &[Inline]) -> usize {
+            inls.iter()
+                .map(|i| match i {
+                    Inline::Emph(x) | Inline::Strong(x) => 1 + depth_of(x),
+                    Inline::Link { inlines, .. } => 1 + depth_of(inlines),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        }
+
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fuzz/seeds/epub/deep-nesting.epub"
+        ))
+        .expect("the deep-nesting seed must exist");
+        let (doc, _) = EpubAdapter
+            .parse(&bytes, "deep-nesting.epub")
+            .expect("the seed must parse");
+
+        let inls = doc
+            .nodes
+            .iter()
+            .find_map(|n| match &n.block {
+                Block::Para(i) => Some(i),
+                _ => None,
+            })
+            .expect("the chapter must survive as a paragraph, not be dropped");
+
+        let depth = depth_of(inls);
+        // `depth <= MAX_INLINE_DEPTH` alone would also pass if flattening
+        // clamped 5000 levels down to 2: it bounds from above only. The seed
+        // is 5000 deep and the bound is exactly `MAX_INLINE_DEPTH`, so the
+        // real property is equality, not merely an upper bound.
+        assert_eq!(
+            depth,
+            xhtml::MAX_INLINE_DEPTH,
+            "5000 nested <em> must flatten to exactly the bound, got {depth}"
+        );
+    }
 }

@@ -15,23 +15,19 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   prints), and both slug rules, `anchor_slug`/`path_slug`, over the shared
   `is_word` character class. `kasane-core` depends on it for `paths`/`nav`/
   `refs`/`balance` and does not re-export the slug seams; `kasane-writer`
-  depends on it directly for the fold. Of the four anchor divergences
-  `slug.rs`'s module doc has recorded as surviving, three are now closed — a
+  depends on it directly for the fold. Of the five anchor divergences
+  `slug.rs`'s module doc has recorded as surviving, four are now closed — a
   footnote reference's digits via `rendered_text`, a trailing `#` run via
   `kasane-writer::escape::atx_closing` escaping it before GitHub ever sees it,
-  and a heading containing a **single** empty inline code span via
+  a heading containing a **single** empty inline code span via
   `section::clone_inlines_at` canonicalizing `Inline::Code("")` to a single
-  space before any anchor is computed. Two survive. One is the empty-id
-  fallback (`EMPTY_FALLBACK`), a deliberate choice rather than a construction
-  defect. The other, recorded 2026-08-14, is the shape that canonicalization
-  traded away: a heading holding two or more **adjacent** empty code spans
-  anchors `a--b` while its printed line ids `ab`, because CommonMark cannot
-  express two code spans in a row and the writer's two `` ` ` `` runs fuse
-  into one span when a parser reads them back. The anchor divergence is
-  downstream of that fusion, which is itself a content-fidelity bug —
-  `Code("x")` beside `Code("y")` renders as one span reading ``` x``y ``` in an
-  ordinary paragraph, no heading or empty span involved — and fixing it needs
-  its own item. The canonicalization invariant is established by
+  space before any anchor is computed, and a heading containing **two or more
+  adjacent** empty code spans via `kasane-writer` rendering a run of adjacent
+  same-delimiter inlines as one span, so the pair prints one span over both
+  padding spaces and the line ids what the anchor says. One survives. It is
+  the empty-id fallback (`EMPTY_FALLBACK`), a deliberate choice rather than a
+  construction defect.
+  The canonicalization invariant is established by
   `fold_sections` and nowhere else: `SectionTree`/`SectionNode` have all-`pub`
   fields and `balance`/`assign_paths` are exported, so a hand-assembled tree
   can still anchor un-canonicalized inlines. Nothing in this repo does.
@@ -98,11 +94,8 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   written down — one divergence still survives there on purpose: the empty-id fallback.
   `rendered_text`, `escape::atx_closing`, and `section::clone_inlines_at`'s
   empty-code-span canonicalization closed the other three the table used to
-  record. The second divergence the `kasane-gfm` entry lists as surviving —
-  adjacent empty code spans — is deliberately not in this table and cannot be:
-  the slug rule computes correctly there, and it is the writer's printed line
-  that is wrong. That table pins kasane's *reading*
-  of the algorithm, not the algorithm, so it cannot catch a misreading. The
+  record. That table pins kasane's *reading* of the algorithm, not the
+  algorithm, so it cannot catch a misreading. The
   external check that can is recorded in design spec §8.1 (first run
   2026-08-09, 13/13 ids matching) and re-run at §8.3 on 2026-08-14 — 13 of 14
   ids identical, codepoints included, the empty-id fallback being the only
@@ -167,6 +160,14 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   prev/next chain, path well-formedness, determinism. It reaches the writer
   rather than stopping at `kasane-core` because §9's link invariant is about a
   real file *and a real anchor*, which only rendered text can answer.
+  `tests/census.rs` is a second, exhaustive tier alongside it rather than a
+  replacement: it renders every sequence of length 1-3 over a small inline
+  alphabet, parses the result, and checks the recovered text against
+  `kasane_gfm::rendered_text` — the same equality a property samples, run over
+  all of a chosen alphabet instead of generated cases. It is what found the
+  emphasis-seam defects three property rounds missed, because a property draws
+  from an alphabet someone chose and a census draws from all of it; see
+  `census-known-corrupt.txt` below.
   `file_to_markdown` is what both the property suite and `write_tree_contents`
   render through, so what CI asserts is what a conversion writes.
   `escape.rs` is the only path from document text to an output buffer, and
@@ -200,6 +201,29 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `epub/xhtml.rs` and `epub/mod.rs` both build a note via
   `format!("image unavailable: {src}")` from an `<img src>` attribute the
   source document supplied.
+  Delimiter runs that share a character never abut in the printed line, by four
+  rules: a container at the edge of an emphasis run whose delimiter shares the
+  run's own *character* is spliced into it; a container *anywhere* in a run
+  whose `Delim` equals the run's own is spliced too, even where the nesting it
+  replaces would sometimes have printed correctly; two adjacent runs spelled
+  with the same character are fused into one run; and a delimiter that would
+  fail to flank on either side where it lands is not emitted at all. CommonMark
+  can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
+  expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
+  container can nest safely when its own delimiters are one-sided-flanking (`*a
+  *b* c*` keeps its inner `<em>`) -- but telling that safe spelling apart from
+  one that corrupts (`*a*b*c*`) means reasoning about how a parser pairs
+  delimiters, the mirror this repo has refused three times. So the writer trades
+  the span boundary for the text -- which is the invariant -- uniformly rather
+  than case by case, and `kasane-writer/tests/census.rs` is the exhaustive check
+  that no such collision reaches the printed line regardless.
+  `markdown.rs` decides all of this on a flattened view of the *printed*
+  stream rather than on IR siblings, because the two are not the same list: an
+  unresolved link prints only its children, so those children stand beside the
+  link's own neighbours, and a fused run concatenates its members' children
+  into one span, so the last child of one member stands beside the first child
+  of the next. Scanning IR siblings alone left collisions open at both of
+  those seams.
   Math is the one inline the writer escapes nothing inside: `Inline::Math`
   and `Block::MathBlock` are both pushed verbatim — the inline form between
   `$…$`, the block form between `$$…$$` — on the strength of a contract that
@@ -277,6 +301,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 - A failing property writes `crates/kasane-writer/tests/properties.proptest-regressions`.
   Commit it, for the same reason a fuzz reproducer is committed: it is what makes
   the found case a permanent regression test.
+- `crates/kasane-writer/tests/census-known-corrupt.txt` is a ratchet, not a
+  todo list: `census.rs` fails the build if a shape is corrupt and unlisted,
+  *and* if a listed shape is no longer corrupt, so the file cannot grow
+  silently or rot into stale excuses. Regenerate it with
+  `KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census` and read
+  the diff — that diff is the exact evidence a reviewer wants, of what a
+  change fixed or broke.
 - Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
   (64) is a fidelity bound that flattens without losing content;
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
