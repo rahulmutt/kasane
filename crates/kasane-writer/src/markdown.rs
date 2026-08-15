@@ -208,61 +208,177 @@ pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
 /// in a newline); a `FootnoteRef` that fired at `Pos::LineStart` yields
 /// `Pos::AfterFootnoteRef`, so `escape::text` can tell a following `:` apart
 /// from an ordinary one (residuals spec §2); anything else yields `Pos::Mid`.
+///
+/// The loop walks *runs*, not items: a maximal group of neighbouring inlines
+/// that print with the same delimiter renders as one span over their
+/// concatenated contents, because CommonMark cannot express two such spans in
+/// a row and the writer's two delimiter pairs would otherwise fuse into one
+/// span in the rendered line (design spec
+/// `2026-08-15-adjacent-inline-fusion-design.md` §2).
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
     if depth >= kasane_ir::MAX_INLINE_DEPTH {
         return String::new();
     }
     let mut s = String::new();
     let mut pos = pos;
-    for i in inls {
+    let mut i = 0;
+    while i < inls.len() {
         let before = pos;
         let len_before = s.len();
-        match i {
-            // The only call to `escape::text` in the crate. Every other arm
-            // below emits markup the writer chose, which must not be escaped.
-            Inline::Text(t) => s.push_str(&escape::text(t, ctx, pos)),
-            Inline::Emph(x) => {
-                s.push_str(&emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "*"))
+        let end = run_end(inls, i, depth);
+        let members = &inls[i..end];
+        match escape::delim(&inls[i]) {
+            Some(escape::Delim::Backtick) => {
+                s.push_str(&escape::code_span(&backtick_run_content(members), ctx))
             }
-            Inline::Strong(x) => {
-                s.push_str(&emphasize(&inlines_to_md_at(x, depth + 1, ctx, pos), "**"))
+            Some(escape::Delim::Emph) => s.push_str(&emphasis_run(members, depth, ctx, pos, "*")),
+            Some(escape::Delim::Strong) => {
+                s.push_str(&emphasis_run(members, depth, ctx, pos, "**"))
             }
-            Inline::Code(t) => s.push_str(&escape::code_span(t, ctx)),
-            Inline::Math(t) => s.push_str(&escape::math_span(t, ctx)),
-            Inline::Link {
-                target: RefTarget::External(u),
-                inlines,
-            } => s.push_str(&format!(
-                "[{}]({})",
-                kasane_gfm::fold_newlines(&inlines_to_md_at(
-                    &escape::fold_inline_newlines(inlines),
-                    depth + 1,
-                    ctx,
-                    pos
+            // `delim` said this inline prints no delimiter that can collide,
+            // so the run is this inline alone and it renders as it always has.
+            None => match &inls[i] {
+                // The only call to `escape::text` in the crate. Every other
+                // arm here and above emits markup the writer chose, which must
+                // not be escaped.
+                Inline::Text(t) => s.push_str(&escape::text(t, ctx, pos)),
+                Inline::Math(t) => s.push_str(&escape::math_span(t, ctx)),
+                Inline::Link {
+                    target: RefTarget::External(u),
+                    inlines,
+                } => s.push_str(&format!(
+                    "[{}]({})",
+                    kasane_gfm::fold_newlines(&inlines_to_md_at(
+                        &escape::fold_inline_newlines(inlines),
+                        depth + 1,
+                        ctx,
+                        pos
+                    )),
+                    escape::dest_url(u)
                 )),
-                escape::dest_url(u)
-            )),
-            // unresolved -> text
-            Inline::Link { inlines, .. } => {
-                s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos))
-            }
-            Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
+                // unresolved -> text
+                Inline::Link { inlines, .. } => {
+                    s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos))
+                }
+                Inline::FootnoteRef(n) => s.push_str(&format!("[^{}]", n.0)),
+                // Unreachable: `delim` returns `Some` for all three.
+                Inline::Code(_) | Inline::Emph(_) | Inline::Strong(_) => {}
+            },
         }
         // Four rules (§2). An arm that appended nothing leaves the position
         // alone, so an empty text run between a reference and its colon does
         // not reset it. `Inline::FootnoteRef` always appends, so rule 3 is
-        // never blocked by the length check.
+        // never blocked by the length check. A run is one position step, not
+        // one per member: only the run's own output has landed.
         if s.len() != len_before {
             pos = if s.ends_with('\n') {
                 Pos::LineStart
-            } else if matches!(i, Inline::FootnoteRef(_)) && before == Pos::LineStart {
+            } else if matches!(&inls[i], Inline::FootnoteRef(_)) && before == Pos::LineStart {
                 Pos::AfterFootnoteRef
             } else {
                 Pos::Mid
             };
         }
+        i = end;
     }
     s
+}
+
+/// Whether this inline prints nothing at all.
+///
+/// Exact rather than conservative, and it has to be both ways: [`run_end`]
+/// steps over these, so a false positive drops content a reader can see and a
+/// false negative leaves a fused pair behind. Each arm mirrors the renderer
+/// above. `escape::text` never deletes, so a `Text` prints nothing exactly
+/// when it is empty. `emphasize` returns its inner string unchanged when that
+/// string is blank, so a container prints nothing exactly when every child
+/// does. And `inlines_to_md_at` returns the empty string at
+/// `MAX_INLINE_DEPTH`, so a container whose children sit at the bound really
+/// does print nothing — which is why this takes the caller's absolute `depth`
+/// rather than counting from zero.
+///
+/// Everything else is non-vacuous by construction: `Code("")` prints
+/// `` ` ` ``, `Math("")` prints `$$`, a `Link` prints its brackets, a
+/// `FootnoteRef` prints `[^n]`.
+fn renders_empty(i: &Inline, depth: usize) -> bool {
+    match i {
+        Inline::Text(t) => t.is_empty(),
+        Inline::Emph(x) | Inline::Strong(x) => {
+            depth + 1 >= kasane_ir::MAX_INLINE_DEPTH
+                || x.iter().all(|c| renders_empty(c, depth + 1))
+        }
+        _ => false,
+    }
+}
+
+/// The exclusive end of the run of same-delimiter inlines starting at `start`.
+///
+/// A vacuous inline is stepped over rather than ending the run: it puts no
+/// character between the two delimiters, so the collision happens across it
+/// anyway. One inside a run is swallowed and never rendered, which is
+/// equivalent, because the only thing it would have contributed is the empty
+/// string. One *after* the last member is left for the outer loop, which
+/// renders it as the no-op it is.
+fn run_end(inls: &[Inline], start: usize, depth: usize) -> usize {
+    let Some(d) = escape::delim(&inls[start]) else {
+        return start + 1;
+    };
+    let mut end = start + 1;
+    let mut k = start + 1;
+    while k < inls.len() {
+        if renders_empty(&inls[k], depth) {
+            k += 1;
+        } else if escape::delim(&inls[k]) == Some(d) {
+            k += 1;
+            end = k;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+/// The content one code span carries for a whole backtick run.
+///
+/// A degrading `Inline::Math` contributes its raw LaTeX, which is exactly what
+/// `math_span` would have handed `code_span` on its own. Anything else in the
+/// slice is a vacuous inline `run_end` swallowed, and contributes nothing by
+/// definition.
+fn backtick_run_content(members: &[Inline]) -> String {
+    let mut content = String::new();
+    for m in members {
+        if let Inline::Code(t) | Inline::Math(t) = m {
+            content.push_str(t);
+        }
+    }
+    content
+}
+
+/// Render a run of adjacent `Emph` (or `Strong`) inlines as one emphasized
+/// span over the concatenation of their children.
+///
+/// `pos` is recomputed between members by the same rules the outer loop uses,
+/// so a member sees where its own first character lands rather than where the
+/// run opened. The first member still sees the run's opening `pos`, which is
+/// what keeps a run of one byte-identical to what it printed before.
+fn emphasis_run(members: &[Inline], depth: usize, ctx: Ctx, pos: Pos, markup: &str) -> String {
+    let mut inner = String::new();
+    let mut pos = pos;
+    for m in members {
+        let (Inline::Emph(x) | Inline::Strong(x)) = m else {
+            continue;
+        };
+        let len_before = inner.len();
+        inner.push_str(&inlines_to_md_at(x, depth + 1, ctx, pos));
+        if inner.len() != len_before {
+            pos = if inner.ends_with('\n') {
+                Pos::LineStart
+            } else {
+                Pos::Mid
+            };
+        }
+    }
+    emphasize(&inner, markup)
 }
 
 /// Wrap already-rendered inner content in an emphasis delimiter, with any
@@ -1106,6 +1222,182 @@ mod tests {
         assert_eq!(
             strong_text, " ",
             "the preserved whitespace must round-trip:\n{md}"
+        );
+    }
+
+    /// Render one paragraph and return its line, without the trailing newline.
+    fn para(inls: Vec<Inline>) -> String {
+        let md = blocks_to_markdown(&[Block::Para(inls)], &AssetBag::default());
+        md.trim_end().to_string()
+    }
+
+    /// Adjacent code spans render as one span over their concatenation.
+    ///
+    /// CommonMark cannot express two code spans in a row: the closing fence of
+    /// the first and the opening fence of the second form a single backtick run,
+    /// so `` `x` `` beside `` `y` `` came back as one span reading ``` x``y ```
+    /// — visible content corruption (design spec §1).
+    #[test]
+    fn adjacent_code_spans_render_as_one_span() {
+        assert_eq!(
+            para(vec![Inline::Code("x".into()), Inline::Code("y".into())]),
+            "`xy`"
+        );
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Code("y".into()),
+                Inline::Code("z".into()),
+            ]),
+            "`xyz`"
+        );
+    }
+
+    /// The fence is computed from the concatenation, not from either member, so a
+    /// run whose members each carry a backtick still gets a fence that closes it.
+    #[test]
+    fn a_fused_code_run_gets_a_fence_long_enough_for_the_concatenation() {
+        assert_eq!(
+            para(vec![Inline::Code("a`".into()), Inline::Code("`b".into())]),
+            "``` a``b ```"
+        );
+    }
+
+    /// Adjacent emphasis renders as one span. Undocumented before this item and
+    /// worse than the code case: the collided delimiters came back as literal
+    /// asterisks in the visible text (`*a**b*` parses to one `<em>` reading
+    /// `a**b`).
+    #[test]
+    fn adjacent_emphasis_renders_as_one_span() {
+        let em = |s: &str| Inline::Emph(vec![Inline::Text(s.into())]);
+        assert_eq!(para(vec![em("a"), em("b")]), "*ab*");
+
+        let st = |s: &str| Inline::Strong(vec![Inline::Text(s.into())]);
+        assert_eq!(para(vec![st("a"), st("b")]), "**ab**");
+        assert_eq!(para(vec![st("a"), st("b"), st("c")]), "**abc**");
+    }
+
+    /// An inline that prints nothing does not break a run. It cannot: it puts no
+    /// character between the two delimiters, so the collision happens anyway
+    /// (design spec §2.3).
+    #[test]
+    fn an_inline_that_prints_nothing_does_not_break_a_run() {
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Text(String::new()),
+                Inline::Code("y".into()),
+            ]),
+            "`xy`"
+        );
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![Inline::Text("a".into())]),
+                Inline::Emph(vec![]),
+                Inline::Emph(vec![Inline::Text("b".into())]),
+            ]),
+            "*ab*"
+        );
+    }
+
+    /// A whitespace-only inline is *not* vacuous. `emphasize` prints it as a bare
+    /// space, which genuinely separates the two code spans, and fusing across it
+    /// would delete a character a reader can see.
+    #[test]
+    fn a_whitespace_only_inline_separates_a_run() {
+        assert_eq!(
+            para(vec![
+                Inline::Code("x".into()),
+                Inline::Emph(vec![Inline::Text(" ".into())]),
+                Inline::Code("y".into()),
+            ]),
+            "`x` `y`"
+        );
+    }
+
+    /// A `Math` inline whose content forces `math_span` to degrade prints with
+    /// backticks, so it joins the backtick class. Keying the class on
+    /// `Inline::Code` alone would leave every shape here broken (design spec
+    /// §2.1).
+    #[test]
+    fn a_degrading_math_span_joins_the_backtick_class() {
+        assert_eq!(
+            para(vec![Inline::Code("x".into()), Inline::Math("a$b".into())]),
+            "`xa$b`"
+        );
+        assert_eq!(
+            para(vec![Inline::Math("a$b".into()), Inline::Code("y".into())]),
+            "`a$by`"
+        );
+        assert_eq!(
+            para(vec![Inline::Math("$".into()), Inline::Math("$".into())]),
+            "`$$`"
+        );
+    }
+
+    /// The run scan reaches every nesting level, because every inline sequence in
+    /// the crate goes through `inlines_to_md_at`.
+    #[test]
+    fn a_run_nested_inside_emphasis_fuses_too() {
+        assert_eq!(
+            para(vec![Inline::Emph(vec![
+                Inline::Code("x".into()),
+                Inline::Code("y".into()),
+            ])]),
+            "*`xy`*"
+        );
+    }
+
+    /// `Ctx` is threaded unchanged, so a cell's `|` escaping applies across the
+    /// concatenation rather than per member.
+    #[test]
+    fn a_fused_run_in_a_table_cell_escapes_pipes_across_the_concatenation() {
+        let t = Table {
+            header: vec![vec![Inline::Text("H".into())]],
+            rows: vec![vec![vec![
+                Inline::Code("a|b".into()),
+                Inline::Code("c".into()),
+            ]]],
+            has_merged: false,
+        };
+        let md = blocks_to_markdown(&[Block::Table(t)], &AssetBag::default());
+        assert!(md.contains(r"| `a\|bc` |"), "{md}");
+    }
+
+    /// The shapes that must NOT fuse, so a later change that over-fuses fails
+    /// something. Each was measured against `pulldown-cmark` and recovers its
+    /// text intact today (design spec §1, "Confirmed").
+    #[test]
+    fn inlines_with_different_delimiters_are_left_alone() {
+        let em = |s: &str| Inline::Emph(vec![Inline::Text(s.into())]);
+        let st = |s: &str| Inline::Strong(vec![Inline::Text(s.into())]);
+
+        assert_eq!(para(vec![em("a"), st("b")]), "*a***b**");
+        assert_eq!(
+            para(vec![Inline::Code("x".into()), Inline::Math("y".into())]),
+            "`x`$y$"
+        );
+        assert_eq!(
+            para(vec![Inline::Math("x".into()), Inline::Math("y".into())]),
+            "$x$$y$"
+        );
+    }
+
+    /// The one output change this item makes to a shape that was already correct.
+    ///
+    /// `emphasize` hoists a trailing space outside the delimiters, so this pair
+    /// printed `*a* *b*` and parsed as two `<em>`s. The rule is uniform, so it
+    /// now prints one span. Same text, one element where there were two; the
+    /// alternative was a second copy of `emphasize`'s hoisting rule living in the
+    /// run scan (design spec §2.4).
+    #[test]
+    fn a_whitespace_separated_emphasis_pair_fuses_too() {
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![Inline::Text("a ".into())]),
+                Inline::Emph(vec![Inline::Text("b".into())]),
+            ]),
+            "*a b*"
         );
     }
 }

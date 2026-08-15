@@ -506,6 +506,41 @@ pub(crate) fn math_degrades(s: &str) -> bool {
     s.contains('$') || s.contains('\n') || s.contains('\r')
 }
 
+/// The delimiter an inline prints with, where two neighbours printing the same
+/// one would collide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Delim {
+    /// A code span: `` `…` ``, at whatever fence length its content forces.
+    Backtick,
+    /// `*…*`.
+    Emph,
+    /// `**…**`.
+    Strong,
+}
+
+/// Which delimiter this inline prints with, or `None` if it prints none that
+/// can collide with a neighbour's.
+///
+/// Keyed on what is **printed**, not on the `Inline` variant, and that is the
+/// whole reason this function exists rather than a `matches!` at the call
+/// site: [`math_span`] degrades unsafe content to a code span, so
+/// `[Code("x"), Math("a$b")]` prints two backtick spans and fuses exactly as
+/// two `Code` inlines would. A rule matching `Inline::Code` alone would look
+/// complete and leave that shape broken (design spec §2.1).
+///
+/// `Inline::Math` that does not degrade is `None` on purpose: `$x$$y$` is read
+/// as two inline maths, and the two spans could not be merged even if they did
+/// collide — `$xy$` states a different equation (design spec § Non-goals).
+pub(crate) fn delim(i: &Inline) -> Option<Delim> {
+    match i {
+        Inline::Code(_) => Some(Delim::Backtick),
+        Inline::Math(t) if math_degrades(t) => Some(Delim::Backtick),
+        Inline::Emph(_) => Some(Delim::Emph),
+        Inline::Strong(_) => Some(Delim::Strong),
+        _ => None,
+    }
+}
+
 /// Inline math: `$…$` around verbatim content, or a code span when that
 /// content would break out of the span.
 ///
