@@ -283,4 +283,31 @@ mod tests {
         let tree = fold_sections(&doc);
         assert_eq!(tree.root.body.len(), 1, "the deep para must still fold in");
     }
+
+    #[test]
+    fn an_empty_code_span_is_canonicalized_at_every_depth() {
+        // The arm is on the recursive walk, so it has to fire inside emphasis
+        // and inside a link label too -- a heading's inlines are not always
+        // flat. A non-empty span must come through untouched.
+        let got = clone_inlines_at(
+            &[
+                Inline::Code(String::new()),
+                Inline::Emph(vec![Inline::Code(String::new())]),
+                Inline::Link {
+                    target: RefTarget::External("http://x".into()),
+                    inlines: vec![Inline::Code(String::new())],
+                },
+                Inline::Code("kept".into()),
+            ],
+            0,
+        );
+        assert_eq!(got.len(), 4);
+        assert!(matches!(&got[0], Inline::Code(s) if s == " "));
+        assert!(matches!(&got[1], Inline::Emph(x) if matches!(&x[0], Inline::Code(s) if s == " ")));
+        assert!(matches!(
+            &got[2],
+            Inline::Link { inlines, .. } if matches!(&inlines[0], Inline::Code(s) if s == " ")
+        ));
+        assert!(matches!(&got[3], Inline::Code(s) if s == "kept"));
+    }
 }

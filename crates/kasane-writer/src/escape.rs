@@ -926,6 +926,23 @@ mod tests {
         assert_eq!(code_span("a\nb", Ctx::Flow), "`a b`");
     }
 
+    #[test]
+    fn code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders() {
+        // The load-bearing invariant of the empty-code-span anchor fix:
+        // `kasane-core` canonicalizes `Inline::Code("")` to `Inline::Code(" ")`
+        // BEFORE anchors are assigned, which is only invisible to a reader
+        // because Rule 1 and Rule 2 print the same bytes. If they ever stop
+        // agreeing, that canonicalization starts silently rewriting documents
+        // -- and the symptom is a changed page, not a failing render, so
+        // nothing else would catch it.
+        // Design spec 2026-08-14-empty-code-span-anchor-design.md §2.2.
+        assert_eq!(code_span("", Ctx::Flow), code_span(" ", Ctx::Flow));
+        assert_eq!(code_span("", Ctx::Cell), code_span(" ", Ctx::Cell));
+        // Spelled out, so a future edit that breaks BOTH sides equally still
+        // fails here rather than agreeing on something new.
+        assert_eq!(code_span("", Ctx::Flow), "` `");
+    }
+
     /// Adapter-produced math is emitted verbatim; content that would break out
     /// of the delimiter degrades to a construct that cannot.
     ///
