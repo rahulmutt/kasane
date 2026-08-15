@@ -550,8 +550,9 @@ here as a question rather than a defect.
   cannot see the character before its own delimiter at the point `emphasize`
   runs, so this needs its own design rather than a patch.
   **Closed 2026-08-15** by `2026-08-15-emphasis-seam-design.md`'s flanking
-  decline (§2.3), where this bullet predicted it would land: before wrapping a
-  run, the scan in `inlines_to_md_flat` checks whether the delimiter it is
+  decline (§2.3) — its own design, as this bullet said was needed, rather than
+  a patch to `emphasize`. Before wrapping a run, the scan in
+  `inlines_to_md_flat` checks whether the delimiter it is
   about to add can both open and close where it lands — the character already
   emitted before the run, and the first printing character the rest of the
   view will emit after it — and renders the run's children bare when either

@@ -1294,11 +1294,18 @@ Which approach?
 
 ## Amendments during execution
 
-- **Task 5b, inserted between Tasks 5 and 6.** Tasks 3-5 as written left 10
-  shapes regressed against the branch's base — a same-length delimiter pair
-  nesting mid-buffer, neither an edge collision nor a flanking failure. Task
-  5b added a fourth rule, a same-`Delim` splice applied anywhere in a run's
-  children, and closed all 10. Commits `6936036`, `ec95061`, `9033515`.
+- **Task 5b, inserted between Tasks 5 and 6.** Tasks 3-4 named 10 shapes in
+  the allowlist that Task 5's flanking decline did not close (measured: 8
+  survived Task 5, since the decline closed 2 as a side effect); of those 10,
+  7 were genuine regressions against the branch's base and 3 were shapes
+  already corrupt at base that Task 3 fixed and Task 4 re-broke. All were a
+  same-length delimiter pair nesting mid-buffer — neither an edge collision
+  nor a flanking failure. Task 5b added a fourth rule, a same-`Delim` splice
+  applied anywhere in a run's children, and closed the 8 that remained.
+  Commits `6936036`, `ec95061`, `9033515`. Numbers re-derived from
+  `census-known-corrupt.txt` at each commit with `comm`, not taken from
+  either task's own report on trust — see the design spec's §8 result note
+  for the full derivation.
 - **Task 6 landed two of three planned P13 widenings.** `Emph([Code(w)])`
   stayed out: drawing it hit a pre-existing census-allowlist shape, not a
   regression this item caused. Recorded in `P13_WORDS`'s doc comment.

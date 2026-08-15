@@ -4,8 +4,14 @@
 **Status:** Implemented 2026-08-15. The edge trim, the run fuse and the
 flanking decline each landed with unit coverage; the census
 (`kasane-writer/tests/census.rs`) is committed with its ratcheting allowlist,
-and P13 now draws delimiter-bearing emphasis children. The allowlist still
-names the shapes §8 records as out of this item's scope.
+and P13 now draws delimiter-bearing emphasis children. A fourth rule not in
+this design — a same-`Delim` splice applied anywhere in a run, not only at an
+edge — was added mid-execution to close 8 shapes still corrupt after the
+three rules above (5 of them regressions Tasks 3-4 introduced against this
+item's own base, 3 shapes that reverted to a base-corrupt state after being
+transiently fixed and then re-broken); see §8's result note and
+`splice_children`'s doc comment in `markdown.rs`. The allowlist still names
+the shapes §8 records as out of this item's scope.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open"),
 whose last three bullets this item closes together. Two of them were found by
 `2026-08-15-adjacent-inline-fusion-design.md`'s review while widening P13's
@@ -98,6 +104,24 @@ tests.
   text prints `**b**`, which a parser reads as a strong span: structure
   reassociates, text survives. The fusion item's blanket `also` splice was
   therefore buying nothing mid-buffer while flattening a level.
+
+  > **Corrected 2026-08-15, after implementation.** This bullet is true for
+  > *that* shape and false as a general claim. Task 3 regressed
+  > `[Emph([Emph([Text("a")])]), Emph([Emph([Text("a")])]), Emph([Code("x")])]`
+  > — a same-`Delim` container sitting mid-buffer, between two other members
+  > of the fused run — and it stayed corrupt through Task 5: the run fuse's
+  > flattening puts the second member's `Emph([Text("a")])` between the first
+  > member's already-spliced `a` and the third member's `` `x` ``, printed as
+  > `` *a*a*`x`* `` at that point, which a real parser reads as
+  > `Emphasis("a")` then a bare `a`, a literal `*`, `` `x` ``, and a second
+  > literal `*` — recovering `` aa*x* `` against `aax`, the delimiters
+  > leaking into visible text exactly as the other three families in §1 do.
+  > This and several
+  > shapes like it are what the same-`Delim` splice — not described anywhere
+  > in this file's §2.2 — was added to close (see `splice_children`'s doc
+  > comment in `markdown.rs`, and §8's result note below for the exact
+  > count). "Nothing mid-buffer" is what this section designed for; it is not
+  > what shipped.
 - **`[Emph(a), Strong(b)]` is correct today** — `*a***b**` recovers `ab` — and
   `[Emph(a), Strong([Code("bc")])]` is not. They differ only in what follows
   the second run's opening `**`. This pair is the whole argument for §7
@@ -192,6 +216,21 @@ call, and `nests_alone` is deleted.
 **This design removes more code than it adds.** That is worth stating because
 the item's headline is a new rule, and a new rule that shrinks the file is a
 different proposition from one that grows it.
+
+> **Corrected 2026-08-15, after implementation.** `also` and `nests_alone` did
+> both go, exactly as designed here. But "an edge rule needs no exception" did
+> not hold: mid-execution measurement found a family of shapes (§1's
+> corrected "same-class container mid-buffer" bullet above) where a
+> same-`Delim` container loses text if it is left mid-buffer, and closing
+> them meant restoring a rule shaped like `also` — splicing anywhere in a
+> run, not only at an edge — re-keyed on `Delim` instead of the character
+> `edge_to_splice` uses, and with no `nests_alone`-shaped exception, since the
+> assertion that exception protected had already moved to `kasane-adapters`.
+> `same_delim_to_splice` in `markdown.rs` is that rule; see
+> `splice_children`'s doc comment for why two differently-keyed rules exist
+> rather than one, and §8's result note for what it cost. "Removes more code
+> than it adds" was true of this task's own diff and is not true of the item
+> as a whole once the inserted task is counted.
 
 ### 2.3 The other collision: content punctuation
 
@@ -414,30 +453,67 @@ at least the 18 regressed shapes and the two older families, and must not grow
 by one. Converting `tests/fixtures/epub/rich.epub` must produce a tree
 identical to the fusion item's, since that fixture holds no colliding seam.
 
-> **Result, recorded 2026-08-15.** The committed census
-> (`kasane-writer/tests/census.rs`) is the authority for what this item
-> achieved, not the throwaway probe's ~5,800-shape, 715-corrupt count in §1
-> and § "Confirmed" — a different instrument, run at a different revision.
-> The committed allowlist went 686 (first bless, Task 2) → 602 (the edge
-> trim) → 290 (the run fuse) → 48 (the flanking decline) → **32**, where it
-> stands now — the line count never grew at any commit, so the letter of "must
-> not grow by one" held throughout. But the *set of named shapes* did churn in
-> a way this sentence did not anticipate: the edge-trim commit newly
-> corrupted 9 shapes that were correct at this item's own base while fixing
-> 93 others (net 686 → 602). The run-fuse commit's own `run_end` change closed
-> 4 of those 9 as a side effect while newly corrupting 5 different shapes and
-> fixing 317 more besides (net 602 → 290), leaving 10 distinct regressed
-> shapes outstanding (the 5 that survived the fuse, plus the fuse's own 5).
+> **Result, recorded 2026-08-15, re-derived from the committed artifacts
+> rather than taken on trust (see the derivation note at the end of this
+> block).** The committed census (`kasane-writer/tests/census.rs`) is the
+> authority for what this item achieved, not the throwaway probe's
+> ~5,800-shape, 715-corrupt count in §1 and § "Confirmed" — a different
+> instrument, run at a different revision. The committed allowlist went 686
+> (first bless, Task 2) → 602 (the edge trim) → 290 (the run fuse) → 48 (the
+> flanking decline) → **32**, where it stands now — the line count never grew
+> at any commit, so the letter of "must not grow by one" held throughout. But
+> the *set of named shapes* did churn in a way this sentence did not
+> anticipate. The edge-trim commit newly corrupted 9 shapes that were correct
+> at this item's own base while fixing 93 others (net 686 → 602). The
+> run-fuse commit fixed 317 shapes relative to the edge-trim state — a count
+> that *includes* 4 of the edge trim's 9 regressions, closed as a side effect
+> of `run_end`'s grouping change, not 317 in addition to them — while newly
+> corrupting 5 shapes of its own (net 602 → 290). That left 10 distinct
+> shapes named in the allowlist that neither rule closed: the edge trim's 5
+> surviving regressions, plus the run fuse's own 5. Of those 10, only 7 were
+> ever regressions against this item's own base (the edge trim's 5, and 2 of
+> the run fuse's 5); the other 3 of the run fuse's 5 were shapes already
+> corrupt at base, fixed transiently by the edge trim, and re-broken by the
+> run fuse — back to the base's own state, not a new regression against it.
 > None of this was the three-family scope this spec designs; it was landed
-> under controller ruling, gated on all 10 being gone before the item
-> finished. An inserted task between Tasks 5 and 6 closed them with a fourth
+> under controller ruling. The flanking decline closed 2 of the 10 as a side
+> effect, leaving 8 (5 genuine regressions, 3 reversions) still named after
+> Task 5. An inserted task between Tasks 5 and 6 closed all 8 with a fourth
 > rule (a same-`Delim` splice, `splice_children` in `markdown.rs`, not
 > designed here — see its doc comment) rather than by the flanking decline
 > alone. See the plan's "Amendments during execution" section for the
 > sequence; this spec's §2 was not revised to add the fourth rule, since the
 > rule's own doc comment is now the more current record of it.
+>
+> The fourth rule's own cost is not the fuse's structural-boundary trade
+> (below): it is applied *unconditionally*, splicing every same-`Delim`
+> mid-buffer container regardless of whether the nesting it replaces would
+> have round-tripped safely. `*a *b* c*` parses today as
+> `Emphasis["a ", Emphasis["b"], " c"]`, its inner `<em>` intact, because the
+> whitespace around the inner `*`s stops them from flanking the way the outer
+> pair does; the same-`Delim` splice flattens it to `*a b c*` anyway, losing a
+> nested `<em>` on a shape that was not broken. Telling that shape apart from
+> `*a*b*c*`, where the same nesting *does* corrupt, means reasoning about how
+> a parser pairs delimiters at splice time — design spec §7 approach A, which
+> this item exists to retire rather than reimplement — so the rule is
+> deliberately unconditional and pays the cost on shapes nobody measured as
+> broken. Pinned by
+> `splicing_mid_buffer_costs_a_span_that_would_round_trip` in
+> `crates/kasane-writer/src/markdown.rs`.
+>
+> **Derivation.** Ran
+> `git show <sha>:crates/kasane-writer/tests/census-known-corrupt.txt | sort`
+> for `2bef986`, `af8e53b`, `fb19772`, `ebf5cfd`, `d989fae` and `9033515`, and
+> compared consecutive and non-consecutive pairs with `comm`. `comm -13 A B`
+> names shapes new in `B`; `comm -23 A B` names shapes fixed between `A` and
+> `B`; `comm -12`/`comm -23` against `2bef986.txt` sorts a set into
+> "already corrupt at base" versus "not." The 9-, 93-, 5- and 317-shape counts
+> match the af8e53b and fb19772 commit messages exactly. The 10-shape
+> outstanding set, the 7-versus-3 base-regression split, the 2 the flanking
+> decline closed, and the 8 that reached Task 5b were computed, not asserted.
 
-Three residual risks, recorded rather than closed:
+Four residual risks, recorded rather than closed — the fourth added by the
+inserted task, see the result note above:
 
 - **The shapes the allowlist still names after this item.** It closes the
   three families in §1's table, plus a fourth this item found and closed
@@ -450,6 +526,14 @@ Three residual risks, recorded rather than closed:
   than a queue, which is why §5.1 makes a stale entry fail the build.
 - **The structural loss in §1.** `<em>a</em><strong>b</strong>` becomes one
   `<em>`. Deliberate, pinned by a unit test, and reversible only by approach A.
+- **The structural loss the same-`Delim` splice pays unconditionally.**
+  `*a *b* c*` — a nested `<em>` that round-trips correctly today, because the
+  inner delimiters are one-sided-flanking — is spliced to `*a b c*` anyway,
+  the same as a shape that would corrupt. Deliberate, for the same reason
+  approach A is rejected: telling the two apart means pairing delimiters like
+  a parser, at splice time. Pinned by
+  `splicing_mid_buffer_costs_a_span_that_would_round_trip`, and reversible
+  only by approach A, same as the bullet above.
 - **`Delim::ch()` invites a `_` spelling.** Nothing here adds one, and the
   intraword-`_` carve-out is why. If a later item wants `_`, the character
   accessor is where it starts and the flanking rules it would import are what

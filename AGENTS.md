@@ -193,13 +193,23 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `epub/xhtml.rs` and `epub/mod.rs` both build a note via
   `format!("image unavailable: {src}")` from an `<img src>` attribute the
   source document supplied.
-  Delimiter runs that share a character never abut in the printed line: a
-  container at the edge of an emphasis run is spliced into it, two adjacent
-  runs spelled with the same character are one run, and a delimiter that would
-  flank on neither side where it lands is not emitted at all. CommonMark cannot
-  express those arrangements, so the writer trades the span boundary for the
-  text -- which is the invariant -- and `kasane-writer/tests/census.rs` is the
-  exhaustive check that it does.
+  Delimiter runs that share a character never abut in the printed line, by
+  four rules: a container at the edge of an emphasis run whose delimiter
+  shares the run's own *character* is spliced into it; a container *anywhere*
+  in a run whose `Delim` equals the run's own is spliced too, even where the
+  nesting it replaces would sometimes have printed correctly; two adjacent
+  runs spelled with the same character are fused into one run; and a
+  delimiter that would flank on neither side where it lands is not emitted at
+  all. CommonMark can express some of what these rules give up --
+  `[Emph(a), Strong(b)]` is expressible as two spans (`*a***b**` recovers
+  `ab`) and a same-`Delim` container can nest safely when its own delimiters
+  are one-sided-flanking (`*a *b* c*` keeps its inner `<em>`) -- but telling
+  that safe spelling apart from one that corrupts (`*a*b*c*`) means reasoning
+  about how a parser pairs delimiters, the mirror this repo has refused three
+  times. So the writer
+  trades the span boundary for the text -- which is the invariant -- uniformly
+  rather than case by case, and `kasane-writer/tests/census.rs` is the
+  exhaustive check that no such collision reaches the printed line regardless.
   `markdown.rs` decides all of this on a flattened view of the *printed*
   stream rather than on IR siblings, because the two are not the same list: an
   unresolved link prints only its children, so those children stand beside the

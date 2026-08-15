@@ -196,7 +196,8 @@ renders byte-identically.
 > `Emph([Emph([Text("a")]), Text("bc")])` moved from `**a*bc*` to `*abc*`
 > under §2.2's `also` splice below, with no adjacent *pair* anywhere in the
 > IR — and it is falser now that the emphasis-seam item's edge trim and run
-> fuse also move bytes on shapes with no adjacent pair (§2.4 of that spec).
+> fuse also move bytes on shapes with no adjacent pair (§2.1 of that spec,
+> and its §1 "The trade this item makes, stated once").
 > The claim to make instead: a document with no *colliding* seam renders
 > byte-identically; a colliding one is what both this item and the
 > emphasis-seam item exist to change.
@@ -258,12 +259,19 @@ one behaves exactly as today.
 > *everywhere* in a run's children except when it was the run's entire
 > content (`nests_alone`), the exception existing only to preserve the `*`
 > count `kasane-cli/tests/e2e.rs` read through writer bytes. Both go with the
-> parameter: `2026-08-15-emphasis-seam-design.md` §2.1 replaces the blanket
-> splice with the edge trim, keyed on the delimiter *character* and applied
-> only at a run's edges, and its §2.4 moves the depth assertion into
-> `kasane-adapters` to read off the parsed IR instead, which is what releases
-> the carve-out. See that spec's §2.1 and §2.2 for the current rule and why it
-> is no longer this one.
+> parameter, but the blanket splice does not stay gone: `also` and
+> `nests_alone` are deleted, and `2026-08-15-emphasis-seam-design.md` §2.1
+> adds a genuinely new rule alongside them, the edge trim, keyed on the
+> delimiter *character* and applied only at a run's edges. Mid-execution that
+> item's own review found the edge trim alone left shapes regressed that a
+> blanket splice would have caught, and restored one — `same_delim_to_splice`
+> in `markdown.rs`, splicing *anywhere* in a run rather than only at an edge,
+> re-keyed on the delimiter's `Delim` rather than its character, and with no
+> `nests_alone`-shaped exception, since the assertion the exception protected
+> had already moved to `kasane-adapters`. See `splice_children`'s doc comment
+> in `markdown.rs` for both rules together and why each is keyed the way it
+> is; that doc comment, not this section, is the current record of what
+> splices a run's children.
 
 ### 2.3 What breaks a run
 
