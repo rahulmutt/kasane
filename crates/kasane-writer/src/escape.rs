@@ -493,6 +493,19 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     }
 }
 
+/// Whether [`math_span`] will degrade this content to a code span rather than
+/// print it as `$…$`.
+///
+/// Named rather than inlined into the branch below because
+/// [`delim`] has to ask the same question: a degrading `Inline::Math` prints
+/// with backticks, so it collides with a neighbouring code span exactly as a
+/// second `Inline::Code` would (design spec §2.1). With the rule in one place,
+/// widening what math degrades widens the delimiter class in the same edit and
+/// cannot silently fail to.
+pub(crate) fn math_degrades(s: &str) -> bool {
+    s.contains('$') || s.contains('\n') || s.contains('\r')
+}
+
 /// Inline math: `$…$` around verbatim content, or a code span when that
 /// content would break out of the span.
 ///
@@ -529,7 +542,7 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
 /// by passing `ctx` down. The backslash is consumed by the table grammar
 /// before the math renderer sees it, so `$\|x\|$` recovers `InlineMath("|x|")`.
 pub(crate) fn math_span(s: &str, ctx: Ctx) -> String {
-    if s.contains('$') || s.contains('\n') || s.contains('\r') {
+    if math_degrades(s) {
         code_span(s, ctx)
     } else if ctx == Ctx::Cell {
         format!("${}$", s.replace('|', "\\|"))
@@ -1379,6 +1392,23 @@ mod tests {
                 !body.contains("-->"),
                 "note {note:?} closed the comment early: {wrapped}"
             );
+        }
+    }
+
+    /// `math_degrades` is `math_span`'s own branch condition, extracted so
+    /// `delim` can ask the same question (design spec §2.1). The two must agree
+    /// forever: this test asserts the predicate against `math_span`'s observable
+    /// output rather than against a second copy of the expression, so an edit to
+    /// either one that does not move the other fails here.
+    #[test]
+    fn math_degrades_agrees_with_what_math_span_prints() {
+        for s in ["a$b", "$", "a\nb", "a\rb"] {
+            assert!(math_degrades(s), "{s:?} should degrade");
+            assert_eq!(math_span(s, Ctx::Flow), code_span(s, Ctx::Flow), "{s:?}");
+        }
+        for s in ["x", "\\frac{1}{2}", "a b"] {
+            assert!(!math_degrades(s), "{s:?} should not degrade");
+            assert_eq!(math_span(s, Ctx::Flow), format!("${s}$"), "{s:?}");
         }
     }
 }
