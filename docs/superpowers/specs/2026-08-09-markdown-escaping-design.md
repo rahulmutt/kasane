@@ -460,7 +460,10 @@ and disarms the whole run, which made the "changes the line-start rules for
 every context at once" characterization an artifact of the mechanism rather
 than of the defect.
 
-Two cases were recorded here as open, narrower than what was closed:
+Two cases remain open, narrower than what was closed. The three bullets below
+are not the original two: the empty-inline-code-span case closed on 2026-08-14,
+and the item that closed it opened the third, which is recorded here beside
+them.
 
 - **Whitespace inside the merged-table HTML fallback.** Not reachable by
   escaping: an HTML renderer collapses whitespace runs whether they arrived
@@ -483,7 +486,37 @@ Two cases were recorded here as open, narrower than what was closed:
   computed, so neither side learned anything about the other and the empty form
   simply stopped existing downstream. Rule 1 is unchanged and still prints
   `` ` ` ``; it is reachable now only by a caller who renders hand-built IR
-  without going through `structure`.
+  without going through `structure`, or by one who assembles a `SectionTree`
+  by hand instead of going through `fold_sections`.
+- **Adjacent code spans, which the writer fuses.** Added 2026-08-14, by the
+  item that closed the bullet above. CommonMark cannot express two code spans
+  in a row: ``` `x``y` ``` is one span whose content is ``` x``y ```, not two spans
+  reading `x` and `y`. `escape.rs` emits adjacent spans anyway, with no rule
+  covering the case and no record of it before this bullet.
+  The **content-fidelity** half is the larger one and has nothing to do with
+  headings or with empty spans: `[Code("x"), Code("y")]` in an ordinary
+  paragraph renders as a single span reading ``` x``y ```, so document text comes
+  back wrong — the §5 invariant, that escaping never changes what the Markdown
+  renders to, does not hold across an inline boundary here.
+  The **anchor** half is downstream of that fusion, and it is why this bullet
+  is dated to the empty-code-span item. A heading of
+  `[Text("a"), Code(""), Code(""), Text("b")]` prints the same bytes at that
+  item's base and head, and the fused line ids `ab` at both. Before the item,
+  the IR side also said `ab` and the two agreed *by accident*; after it, the
+  canonicalization gives the IR side two spaces and the anchor becomes `a--b`
+  — divergent, and a dead cross-reference in kasane's own tree. Stated plainly:
+  this branch turned this shape from accidentally-agreeing into divergent. It
+  is a trade rather than a net loss — the mixed shapes
+  (`[Text("a"), Code(""), Code("x")]`) diverged before the item and agree
+  after it — but the trade is recorded rather than netted out.
+  Not fixed here, and deliberately not folded into the empty-code-span item:
+  that item's § Non-goals excludes the write/anchor mismatch *class*, and the
+  fusion is a content bug for non-empty spans that needs its own design.
+  Whoever picks it up should read the anchor symptom as one consequence, not
+  as the problem. Pinned by
+  `adjacent_empty_code_spans_diverge_from_the_line_they_print`
+  (`kasane-writer/tests/properties.rs`) and recorded in `kasane_gfm::slug`'s
+  module doc alongside `EMPTY_FALLBACK`.
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14 as well:

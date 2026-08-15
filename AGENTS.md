@@ -15,14 +15,26 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   prints), and both slug rules, `anchor_slug`/`path_slug`, over the shared
   `is_word` character class. `kasane-core` depends on it for `paths`/`nav`/
   `refs`/`balance` and does not re-export the slug seams; `kasane-writer`
-  depends on it directly for the fold. Of the three anchor divergences
-  `slug.rs`'s module doc used to record as surviving on purpose, all three are now
-  closed — a footnote reference's digits via `rendered_text`, a trailing `#` run via
+  depends on it directly for the fold. Of the four anchor divergences
+  `slug.rs`'s module doc has recorded as surviving, three are now closed — a
+  footnote reference's digits via `rendered_text`, a trailing `#` run via
   `kasane-writer::escape::atx_closing` escaping it before GitHub ever sees it,
-  and a heading's empty inline code span via `section::clone_inlines_at`
-  canonicalizing `Inline::Code("")` to a single space before any anchor is
-  computed. What is left is the empty-id fallback (`EMPTY_FALLBACK`), a
-  deliberate choice rather than a construction defect.
+  and a heading containing a **single** empty inline code span via
+  `section::clone_inlines_at` canonicalizing `Inline::Code("")` to a single
+  space before any anchor is computed. Two survive. One is the empty-id
+  fallback (`EMPTY_FALLBACK`), a deliberate choice rather than a construction
+  defect. The other, recorded 2026-08-14, is the shape that canonicalization
+  traded away: a heading holding two or more **adjacent** empty code spans
+  anchors `a--b` while its printed line ids `ab`, because CommonMark cannot
+  express two code spans in a row and the writer's two `` ` ` `` runs fuse
+  into one span when a parser reads them back. The anchor divergence is
+  downstream of that fusion, which is itself a content-fidelity bug —
+  `Code("x")` beside `Code("y")` renders as one span reading ``` x``y ``` in an
+  ordinary paragraph, no heading or empty span involved — and fixing it needs
+  its own item. The canonicalization invariant is established by
+  `fold_sections` and nowhere else: `SectionTree`/`SectionNode` have all-`pub`
+  fields and `balance`/`assign_paths` are exported, so a hand-assembled tree
+  can still anchor un-canonicalized inlines. Nothing in this repo does.
 - `crates/kasane-adapters` Format detection + parsers (EPUB, PPTX, MOBI/AZW3, PDF, DjVu). Untrusted-input boundary; see `guard.rs` and `ziputil.rs` (every guarded zip read goes through it). The MOBI/AZW3 adapter (`mobi/`) normalizes HTML via html5ever and reuses the EPUB XHTML parser; fixtures are hand-built by `tests/fixtures/{mobi,azw3}/make_*.py`. The PDF adapter (`pdf/`) builds on `lopdf`: `content.rs` interprets content-stream text operators into positioned runs, `layout.rs` groups them into lines/paragraphs and infers headings by font size, `outline.rs` maps the `/Outlines` TOC to per-page headings behind a pre-flight over both graphs `get_toc` reads — the outline graph and the destination name tree (`catalog/Dests`, or `catalog/Names` then `Dests`). `outline_is_traversable` and `named_destinations_are_traversable` share one bounded-walk helper, `is_bounded_and_acyclic` (visited-set on `ObjectId`, plus depth and node caps), and each supplies its own per-node contents check. Topology is bounded because `lopdf`'s own walk follows the outline's `/First` recursively, `/Next` iteratively, and the destination tree's `/Kids`, all unbounded, so a cyclic or oversized graph would abort the process or hang. Contents are checked because `lopdf` then indexes and `unwrap`s those nodes unvalidated: an outline destination array shorter than two elements (`outlines.rs:100-101`), a name-tree entry with no `/D`, a short `/D`, or a non-string key (`destinations.rs:56-66`) each panic. Both checks mirror `lopdf` exactly, down to `/A`'s `/D` shadowing `/Dest` and the error paths `lopdf` takes before it indexes anything — validating more than `lopdf` touches would drop legitimate outlines. A rejected graph degrades to font-size inference; `outline_dup::title_line_mask` (crate root, shared with the DjVu adapter) then drops the page lines that merely reprint a spliced outline title, since an outline also suppresses size inference and the printed title would otherwise land in the body under its own heading — the line is a paragraph of its own or fused into the next depending on the page's leading, which is why the filter runs on lines rather than blocks. `has_text` is therefore read off the *unfiltered* lines: a chapter-opener page whose only line is its own title must not become a scanned page once that line goes. `get_toc` itself is additionally wrapped in `catch_unwind` as production-only defence in depth (it cannot help the fuzzer, whose panic hook aborts before unwinding), `image.rs` extracts embedded images; fixtures are hand-built by `tests/fixtures/pdf/make_pdf_fixtures.py`. The DjVu adapter (`djvu/`) builds on `djvu-rs`: `doc.rs` is the sole seam over the crate (container, hidden text layer, NAVM outline) with panic/bomb guards; `text.rs` turns the text-layer zone hierarchy into reading-order lines (multi-column safe, since it follows the zone tree's own order) and infers headings by line height when no outline is present; `outline.rs` maps NAVM bookmarks to per-page headings, deduplicated against the page's own text by the shared `outline_dup` filter described under the PDF adapter; DjVu's half of that filter also forwards a dropped line's `para_start` to the next kept line, or the text after the title merges into the paragraph before it. `image.rs` renders text-less pages to a page image — the JB2 mask as a 1-bit PNG, falling back to a full IW44 render — bounded by a decoded-pixel budget in `doc.rs` (`MAX_RENDER_PIXELS`); text-bearing pages remain text-only. The committed fixtures `tests/fixtures/djvu/{sample,scanned}.djvu` are generated by a committed pure-Rust generator, `cargo run -p kasane-adapters --example make_djvu_fixture` (not DjVuLibre, which is unavailable in this environment); see `tests/fixtures/djvu/README.md`. The OCR seam (`ocr/`) sits behind the PDF and DjVu adapters: the `TextExtractor` trait and its data types (`OcrLine`, `OcrOptions`) compile on every build, while `TesseractExtractor` (`tesseract.rs`) is gated behind the opt-in `-F ocr` feature and is the sole C dependency (Tesseract + Leptonica). `Adapter::parse` is the no-OCR convenience; `parse_with(.., &ParseOptions)` carries the optional extractor. Text-less pages are OCR'd text-first with the page image as a fallback; PDF OCR covers only decodable-raster pages (CCITT/JBIG2/JPX are not decoded). Build/lint the feature with `mise run test-ocr` / `mise run lint-ocr`. The math seam (`math/`) converts MathML (EPUB) and OMML (PPTX) equations to LaTeX behind two front-ends (`mathml.rs`, `omml.rs`) over a shared `MathNode` model (`ast.rs`) and one emitter (`latex.rs` with symbol lookups delegated to `symbols.rs`); adapters isolate a math island from their streaming parse via `capture_island` and parse it with `roxmltree`. Islands are re-parsed under a synthetic root binding the MathML default namespace, the `mml:` prefix, and the OMML `m:` prefix, with front-ends matching by local name; both prefixed and default-namespaced islands thus work. Islands are untrusted: `capture_island` bounds captured bytes and raw element nesting *while streaming* (roxmltree recurses per element level and has no nesting guard, so an over-deep island would abort the process on a stack overflow) and returns `Result<String, CaptureError>`; on any abnormal outcome it rewinds the reader to just past the island's start tag, so the markup it spanned is re-read as ordinary content instead of vanishing, and both adapters pair the degraded equation with a `Block::Raw` note naming the reason. Every other guard degrades to `\mathord{?}` placeholders rather than panicking. `Inline::Math`/`Block::MathBlock` are the only IR touchpoints.
   `fuzz_entry.rs` is a test seam, not API: one `fn(&[u8])` per fuzz target,
   living inside this crate so it can reach `pub(crate)` internals
@@ -86,7 +98,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   written down — one divergence still survives there on purpose: the empty-id fallback.
   `rendered_text`, `escape::atx_closing`, and `section::clone_inlines_at`'s
   empty-code-span canonicalization closed the other three the table used to
-  record. That table pins kasane's *reading*
+  record. The second divergence the `kasane-gfm` entry lists as surviving —
+  adjacent empty code spans — is deliberately not in this table and cannot be:
+  the slug rule computes correctly there, and it is the writer's printed line
+  that is wrong. That table pins kasane's *reading*
   of the algorithm, not the algorithm, so it cannot catch a misreading. The
   external check that can is recorded in design spec §8.1 (first run
   2026-08-09, 13/13 ids matching) and re-run at §8.3 on 2026-08-14 — 13 of 14
@@ -98,7 +113,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   ids, so they consume a suffix slot. `assign_paths` takes the document title
   because `index.md` renders *that* as its heading, not the (empty) root node
   title. `path_slug_of` and `anchors_for_headings` are `#[doc(hidden)] pub`
-  test seams, same convention as `est_tokens`.
+  test seams, same convention as `est_tokens`; so is
+  `section::canonicalize_inlines`, which exposes the engine's own inline
+  canonicalization because P12 must anchor the very inlines the engine anchors
+  and a copy of that rule in the test would drift.
 - `crates/kasane-writer`  IR -> GitHub-Flavored Markdown; atomic tree writing. Also emits the batch library index (`library.rs`).
   `file_to_markdown` opens every file with its frontmatter title as a heading.
   `escape.rs`'s `Pos` is the writer's escaping-position vocabulary: `LineStart`,

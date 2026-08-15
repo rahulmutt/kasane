@@ -47,7 +47,7 @@
 //! matched, codepoints included — and design spec §8.1 records the method and
 //! the cases. Re-run it when this table is next edited.
 //!
-//! # The one known divergence that survives on purpose
+//! # The known divergences that survive
 //!
 //! The anchor is computed from `rendered_text`, the projection of what the
 //! writer actually emits for a heading's line — not from the IR's inline text
@@ -58,18 +58,42 @@
 //! `escape::atx_closing` escapes that run before it ever reaches this rule,
 //! so the printed line still says `Intro ###` in full rather than the `Intro`
 //! a real parser would strip a bare closing sequence down to.
-//! An empty inline code span in a heading no longer diverges either:
-//! `kasane-core` canonicalizes `Inline::Code("")` to a single space before any
-//! anchor is computed, so this rule sees the padding space
-//! `kasane-writer::escape::code_span` was already printing.
+//! A heading containing **one** empty inline code span no longer diverges
+//! either: `kasane-core` canonicalizes `Inline::Code("")` to a single space
+//! before any anchor is computed, so this rule sees the padding space
+//! `kasane-writer::escape::code_span` was already printing. That is the whole
+//! of what closed — two or more empty spans *next to each other* are a
+//! different shape and still diverge; see the second bullet.
 //!
-//! One divergence is left:
+//! Two divergences are left, one a choice and one a defect:
 //!
 //! - **The empty id.** A title with no character in the class at all gets
 //!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty
 //!   fragment is a dead link. This one is a choice rather than a construction
 //!   defect: kasane could match GitHub exactly by emitting no id, and
 //!   deliberately doesn't.
+//! - **Adjacent empty code spans.** A heading holding two or more empty
+//!   `Inline::Code` inlines in a row anchors as though each printed its own
+//!   space — `[Text("a"), Code(""), Code(""), Text("b")]` anchors `a--b` —
+//!   while the line it prints ids as `ab`. A dead cross-reference, and this
+//!   rule is not where it is wrong: the writer is. CommonMark cannot express
+//!   two code spans in a row at all, so the `` ` ` `` runs
+//!   `kasane-writer::escape::code_span` emits **fuse** into one span when a
+//!   parser reads them back, and the printed line therefore carries neither
+//!   space. The anchor divergence is downstream of that fusion, not beside it.
+//!   Recorded honestly: before the canonicalization above, this shape agreed
+//!   by accident (both sides said `ab`), so closing the single-span case is
+//!   what turned it divergent — a trade, since the mixed shapes it closed in
+//!   the same move (`[Text("a"), Code(""), Code("x")]`) diverged before.
+//!   The fusion is **not only an anchor bug**: `Code("x")` beside `Code("y")`
+//!   in an ordinary paragraph renders as one span reading ``` x``y ```, which is
+//!   content corruption with no empty span and no heading involved. Fixing it
+//!   needs its own item and its own design — the escaping spec
+//!   (`2026-08-09-markdown-escaping-design.md`, "recorded as open") carries the
+//!   matching record, and
+//!   `kasane-writer/tests/properties.rs`'s
+//!   `adjacent_empty_code_spans_diverge_from_the_line_they_print` pins the
+//!   current behaviour so it is met deliberately.
 
 use crate::text::{fold_newlines, rendered_text, title_text};
 use kasane_ir::Inline;
@@ -89,8 +113,9 @@ pub(crate) const MAX_PATH_SLUG_BYTES: usize = 64;
 /// `## —`, `## ½`).
 ///
 /// GitHub gives such a heading an empty id. kasane cannot: an empty anchor is
-/// a dead link. This is the one documented divergence from GFM in the shared
-/// part of the two rules.
+/// a dead link. This is the one documented divergence from GFM inside the
+/// rules themselves; the other on the module doc's list is upstream of them,
+/// in what the writer prints.
 const EMPTY_FALLBACK: &str = "section";
 
 /// Ruby's `\p{Word}` **minus Join_Control**: the class both rules share.
