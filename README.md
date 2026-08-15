@@ -177,9 +177,12 @@ See AGENTS.md for the codebase map.
   - A heading containing one empty pair of backticks now anchors the space that
     pair prints (`#a-b`, not `#ab`) — which also means such a heading's file is
     now named `a-b.md` rather than `ab.md`.
-  - Two or more empty pairs of backticks next to each other in a heading. They
-    now print as a single pair around the spaces they stand for, instead of
-    fusing into one span that swallowed the backticks between them.
+  - Two or more empty pairs of backticks next to each other in a heading now
+    id the way kasane's own cross-references already spelled them (`#a--b`,
+    not `#ab`). They used to fuse into a single span that swallowed the spaces
+    they stand for and left the backticks themselves in the heading text, so
+    GitHub read the heading as `a``b`; they now print as one pair around both
+    spaces.
 
   Filenames carry the title in any script, capped at 64 bytes of title per
   component; they drop the zero-width joiners an anchor keeps, since a

@@ -386,6 +386,36 @@ Insert directly below `inlines_to_md_at` (above `emphasize`):
 > loop it replaced was linear. A future reader implementing this plan from
 > scratch should write the code below, not the shape this note describes.
 
+> **Superseded by the whole-branch review (round 2).** The code blocks in this
+> step and in Step 5 are kept as the record of what was written; they are
+> **not** what shipped, and re-implementing them would reopen the defect this
+> item exists to close. `crates/kasane-writer/src/markdown.rs` is the
+> authority, and design spec §2.2/§2.3 carry the corrected rules. Four changes:
+>
+> 1. **`emphasis_run` rendered each member's children through its own
+>    `inlines_to_md_at` call and concatenated the strings**, so the run scan
+>    never saw across a member boundary and the collision reopened one level
+>    down — `[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``,
+>    and `[Emph([Strong(a)]), Emph([Strong(b)])]` and
+>    `[Strong([Emph(a)]), Strong([Emph(b)])]` *regressed* text that was intact
+>    before this item. All the members' children now go into one flattened view
+>    that is scanned once, and the hand-rolled per-member `pos` bookkeeping is
+>    gone: the scan already owns those four rules.
+> 2. **`run_end` treated a non-empty unresolved `Link` as an opaque
+>    run-breaker.** Such a link prints only its children, with no brackets, so
+>    it is transparent to a parser: `[Code("x"), Link { Internal, [Code("y")] }]`
+>    printed `` `x``y` ``. The scan now walks a **depth-carrying flattened
+>    view** (`&[(&Inline, usize)]`) that splices a transparent link's children
+>    in its place at `depth + 1` — pointers only, never a clone, so §2.2's
+>    argument against an IR pre-pass stays intact, and the per-element depth is
+>    what keeps `MAX_INLINE_DEPTH` falling exactly where it fell before.
+> 3. **A same-delimiter child inside a run** is spliced too, unless it is the
+>    run's whole printing content — see §2.2's carve-out and
+>    `a_lone_nested_emphasis_keeps_its_own_delimiters`.
+> 4. **`backtick_run_content` matched `Inline::Math(t)` unguarded**, correct
+>    only because of an invariant living in `escape::delim`. It now spells
+>    `Inline::Math(t) if escape::math_degrades(t)` itself.
+
 ```rust
 /// Whether this inline prints nothing at all.
 ///

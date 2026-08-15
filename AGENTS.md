@@ -19,13 +19,14 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `slug.rs`'s module doc has recorded as surviving, four are now closed — a
   footnote reference's digits via `rendered_text`, a trailing `#` run via
   `kasane-writer::escape::atx_closing` escaping it before GitHub ever sees it,
-  and a heading containing a **single** empty inline code span via
+  a heading containing a **single** empty inline code span via
   `section::clone_inlines_at` canonicalizing `Inline::Code("")` to a single
-  space before any anchor is computed. One survives. It is the empty-id
-  fallback (`EMPTY_FALLBACK`), a deliberate choice rather than a construction
-  defect. That shape closed on 2026-08-15: `kasane-writer` now renders a run of
-  adjacent same-delimiter inlines as one span, so two empty code spans print
-  one span over both padding spaces and the line ids what the anchor says.
+  space before any anchor is computed, and a heading containing **two or more
+  adjacent** empty code spans via `kasane-writer` rendering a run of adjacent
+  same-delimiter inlines as one span, so the pair prints one span over both
+  padding spaces and the line ids what the anchor says. One survives. It is
+  the empty-id fallback (`EMPTY_FALLBACK`), a deliberate choice rather than a
+  construction defect.
   The canonicalization invariant is established by
   `fold_sections` and nowhere else: `SectionTree`/`SectionNode` have all-`pub`
   fields and `balance`/`assign_paths` are exported, so a hand-assembled tree
@@ -180,11 +181,6 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   seam, asserting postconditions (P7 in `tests/properties.rs` owns the round
   trip, because it can take `pulldown-cmark` as a dev-dependency and the
   library cannot).
-  Adjacent inlines that print with the same delimiter -- two code spans, two
-  `Emph`, two `Strong` -- render as one span over their concatenation, because
-  CommonMark cannot express two such spans in a row and the two delimiter pairs
-  would otherwise fuse into one span in the rendered line, leaking the
-  delimiters into the text as visible characters.
   `Block::Raw` is the one documented exception to that invariant, not another
   case where the rendered text happens not to matter: an HTML comment admits
   no escape mechanism at all, unlike flow text, cells, code spans, HTML and
@@ -197,6 +193,21 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `epub/xhtml.rs` and `epub/mod.rs` both build a note via
   `format!("image unavailable: {src}")` from an `<img src>` attribute the
   source document supplied.
+  Adjacent inlines that print with the same delimiter -- two code spans, two
+  `Emph`, two `Strong` -- render as one span over their concatenation, because
+  CommonMark cannot express two such spans in a row and the two delimiter pairs
+  would otherwise fuse into one span in the rendered line, leaking the
+  delimiters into the text as visible characters. `markdown.rs` decides that on
+  a flattened view of the *printed* stream rather than on IR siblings, because
+  the two are not the same list: an unresolved link prints only its children,
+  so those children stand beside the link's own neighbours, and a fused run
+  concatenates its members' children into one span, so the last child of one
+  member stands beside the first child of the next. Scanning IR siblings alone
+  left the collision open at both of those seams. Emphasis nested directly
+  inside emphasis is the one carve-out: alone it stacks into `**a**`, which
+  CommonMark reads back as one nested span, and `kasane-cli/tests/e2e.rs` reads
+  the EPUB adapter's inline-depth bound through exactly that; beside anything
+  else it leaks, and is spliced into the run instead.
   Math is the one inline the writer escapes nothing inside: `Inline::Math`
   and `Block::MathBlock` are both pushed verbatim — the inline form between
   `$…$`, the block form between `$$…$$` — on the strength of a contract that

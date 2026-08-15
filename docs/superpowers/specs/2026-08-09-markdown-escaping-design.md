@@ -533,6 +533,29 @@ here as a question rather than a defect.
   a question rather than a known defect, and deliberately not "fixed" — fusing
   two equations into one would corrupt content rather than repair it
   (`2026-08-15-adjacent-inline-fusion-design.md` §8).
+- **An emphasis delimiter flush against a word character, with punctuation
+  just inside it, is not a delimiter at all.** Found 2026-08-15 while widening
+  P13's alphabet in review, measured identical at that item's base, and
+  unrelated to the run scan. `emphasize` moves edge *whitespace* outside the
+  delimiters, which is what CommonMark's flanking rules ask for, but nothing
+  covers edge punctuation: `[Text("a"), Emph([Code("a")])]` prints
+  ``a*`a`*``, whose opening `*` is preceded by a letter and followed by a
+  backtick, so it is neither left- nor right-flanking and stays a literal
+  asterisk — the paragraph reads `a*a*`, with both asterisks visible.
+  `[Emph([Code("a")]), Text("a")]` and `[Emph([Text("a")]),
+  Strong([Code("bc")])]` fail the same way. This is a §5 violation of the same
+  kind the fusion item closed, at a different seam, and it is what stops the
+  property tier from drawing a delimiter-bearing emphasis child today
+  (`properties.rs`'s `P13_WORDS` doc comment states the block). The writer
+  cannot see the character before its own delimiter at the point `emphasize`
+  runs, so this needs its own design rather than a patch.
+- **A lone nested emphasis prints a delimiter its class does not name.** Found
+  the same way and also present at base. `Emph([Emph([Text("a")])])` prints
+  `**a**`, since the two pairs stack, but `escape::delim` classes it
+  `Delim::Emph`; beside a real `Inline::Strong` the two `**` runs meet and the
+  text leaks. Fusing cannot fix it — the two are different classes and must
+  not merge — so the delimiter class would have to become a (character, length)
+  pair, which is a design question rather than an edit.
 
 The other case recorded here as open, a newline run split across an
 `Inline::FootnoteRef`, closed 2026-08-14 as well:
@@ -566,7 +589,14 @@ would break every in-book cross-reference to a heading containing one.
 Until 2026-08-15 this held *within* one inline and not between two: adjacent
 code spans, and adjacent emphasis, collided at the boundary and rendered as one
 span over text that was not the IR's. The run scan in `inlines_to_md_at` is
-what makes the invariant hold across an inline boundary.
+what makes the invariant hold across an inline boundary — over a flattened view
+of the *printed* stream rather than over IR siblings, because a transparent
+link's children and a fused run's members' children are neighbours to a parser
+too, and the first shape of the scan missed both seams (review finding,
+2026-08-15). It does not yet hold for an emphasis delimiter standing flush
+against a word character with punctuation just inside it, which CommonMark's
+flanking rules make not a delimiter at all; that shape is recorded in the open
+list below.
 
 That is also why `link_text`'s bracket substitution does not survive the move:
 `escape::label` escapes rather than substitutes.

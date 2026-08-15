@@ -6,7 +6,15 @@ adjacent `Strong` each render as one span; pinned by the unit battery in
 `markdown.rs`, by P13, and by
 `adjacent_empty_code_spans_agree_with_the_line_they_print`. The external oracle
 has not been re-run; §8's note about the adjacent-code-span case and the
-adjacent-math question both stand.
+adjacent-math question both stand. Review round two (2026-08-15) corrected §2.2
+and widened §2.3 — see the notes there — and recorded two **pre-existing**
+`emphasize` defects it uncovered while widening P13's alphabet, in the parent
+spec's open list rather than here: an emphasis delimiter flush against a word
+character with punctuation just inside it is not a delimiter at all, and a lone
+nested emphasis prints a `**` run that `escape::delim` classes as `Delim::Emph`.
+Both are present at this item's base and neither is reachable by fusing;
+together they are why P13 still cannot draw a delimiter-bearing emphasis child,
+and why the member seam is pinned by unit assertions instead.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open",
 the adjacent-code-spans bullet), which that bullet says "needs its own design".
 The bullet was opened by `2026-08-14-empty-code-span-anchor-design.md`, whose
@@ -208,21 +216,70 @@ Emission-time grouping never clones an inline:
   `escape::code_span` once. `Ctx` threading is unchanged, so a run inside a
   table cell escapes `|` across the concatenation exactly as a single span
   does.
-- **An emphasis or strong run** renders each member's children through the
-  existing `inlines_to_md_at` recursion into one buffer, then calls
-  `emphasize` once with the run's delimiter.
+- **An emphasis or strong run** collects *all* its members' children into one
+  flattened view and scans that once, then calls `emphasize` once with the
+  run's delimiter.
+
+> **Corrected 2026-08-15, in review.** This bullet originally read "renders
+> each member's children through the existing `inlines_to_md_at` recursion into
+> one buffer". That sentence **is** the defect: a per-member call means the run
+> scan never sees across a member boundary, so a delimiter-bearing inline at
+> the end of member *k*'s children and one at the start of member *k+1*'s
+> collide exactly as the top-level pair did — this item's own §1 defect,
+> surviving one level down. `[Emph([Code("x")]), Emph([Code("y")])]` printed
+> `` *`x``y`* ``. Two shapes were worse than that: `[Emph([Strong(a)]),
+> Emph([Strong(b)])]` and `[Strong([Emph(a)]), Strong([Emph(b)])]` recovered
+> their text intact at this item's base and leaked `**` after it — a
+> regression, not a surviving defect. One view over every member's children
+> closes all of them, and deletes the per-member `pos` bookkeeping below with
+> it, since the scan already owns those four rules.
 
 `escape::code_span`, `escape::math_span` and `emphasize` are untouched. The
-depth guard, the `Ctx` argument and the four `Pos` rules stay where they are;
-`pos` is recomputed per member instead of per inline, by the same four rules,
-so a run of one behaves exactly as today. Members after the first in an
-emphasis run see the `pos` their predecessor's output produced rather than the
-run's opening `pos` — which matters only for a member whose predecessor printed
-nothing, and is what keeps the single-member case unchanged.
+depth guard, the `Ctx` argument and the four `Pos` rules stay where they are.
+The view carries a **depth per element**, not one depth for the slice: a
+transparent link's children render one level below the link and `renders_empty`
+already gives them `depth + 1`, so a flat depth would silently move the
+`MAX_INLINE_DEPTH` boundary for everything nested through a link. `pos` is
+recomputed per element by the same four rules the outer loop uses, so a run of
+one behaves exactly as today.
+
+One carve-out, measured rather than reasoned about. An `Emph` whose *whole*
+printing content is a nested `Emph` prints `**a**`, whose stacked delimiters
+CommonMark reads back as one nested span, so the text survives; beside anything
+else the stack is broken up on one side and the surplus delimiters leak
+(`**a*bc*` recovers `**abc`). A same-delimiter child is therefore transparent
+inside its run *except* when it is the run's entire content. The exception is
+load-bearing beyond aesthetics: `kasane-cli/tests/e2e.rs` reads the EPUB
+adapter's inline-depth bound through the `*` run a 64-deep `Emph` chain prints,
+one `*` per surviving level, and splicing uniformly would collapse it to one
+pair.
 
 ### 2.3 What breaks a run
 
-An inline that prints nothing must not break a run, or
+Nothing *transparent* breaks a run. Transparency, not emptiness, is the
+property that matters at a run boundary: the scan has to see the stream a
+parser sees, and an inline that contributes no delimiter of its own to that
+stream is not a boundary however much text it carries.
+
+> **Widened 2026-08-15, in review.** This section originally stated the rule as
+> vacuity alone — "an inline that prints nothing does not break a run" — which
+> is the right idea applied one case too narrowly. An unresolved (non-`External`)
+> `Link` prints *only its children*, with no brackets, so a **non-empty** one is
+> transparent to a parser and was opaque to the scan:
+> `[Code("x"), Link { Internal, [Code("y")] }]` printed `` `x``y` `` and came
+> back as one span reading ``x``y``, in both orders and with two links as well.
+> Reachable from EPUB input like `<code>x</code><a href="#foo"><code>y</code></a>`,
+> and identical at this item's base — a standing defect rather than a
+> regression. The vacuity rule below is kept in full; it is now the *second*
+> transparency rather than the only one, and it is still needed for `Text("")`
+> and for a container whose children all print nothing.
+
+Transparency is handled by flattening rather than by skipping: the view the
+scan walks splices a transparent link's children in the link's own place, at
+`depth + 1`, copying pointers only. Vacuity is handled by skipping, since a
+vacuous inline has nothing to splice.
+
+An inline that prints nothing must not break a run either, or
 `[Code("x"), Text(""), Code("y")]` stays fused (§1, "Confirmed"). The scan
 therefore skips vacuous inlines, decided by a predicate that mirrors the
 renderer exactly:
@@ -263,7 +320,11 @@ Four details, each of them a mirror of something already established:
   negative caught in review: `renders_empty` reported `false` for every
   `Link`, so `[Code("x"), Link{Internal(_), []}, Code("y")]` still broke the
   run at an inline emitting zero characters and printed the exact fused
-  collision this item exists to close.
+  collision this item exists to close. A second review round found the same
+  false negative for a **non-empty** unresolved link and closed it by
+  flattening rather than here (see the note above): this arm now answers only
+  for a link nested inside a container, since the view holds no transparent
+  link of its own.
 - The depth term is not a safety bound bolted on; it is the mirror.
   `inlines_to_md_at` returns `String::new()` at `depth >= MAX_INLINE_DEPTH`, so
   a container whose children sit at or past the bound really does print
@@ -302,7 +363,9 @@ text is what every option here preserves.
 
 ## 3. Blast radius
 
-- **`markdown.rs`'s `inlines_to_md_at`** — the loop becomes a run scan. Every
+- **`markdown.rs`'s `inlines_to_md_at`** — becomes a wrapper that builds a
+  borrowed, depth-carrying view (`&[(&Inline, usize)]`) over which the run scan
+  runs. Every
   Markdown inline sequence in the crate passes through it: paragraph and
   heading bodies, table cells, list-item content, `Emph`/`Strong` children,
   link labels, figure captions. One seam, all of them.
@@ -389,6 +452,20 @@ point is what a reader sees, the parsed result:
   `[Math(x), Math(y)]`, `[Emph("a "), Emph("b")]` — so a later change that
   over-fuses fails something. The last of these pins §2.4's deliberate
   byte change.
+
+Added by review round two, each asserting the printed bytes, the text a real
+parser recovers **and** `kasane_gfm::rendered_text` of the same inlines, so a
+byte change that keeps the collision cannot pass:
+
+- the member seam — `[Emph([Code]), Emph([Code])]`, the same with text on both
+  outer edges, and the `Strong` form;
+- the two regressed shapes, `[Emph([Strong]), Emph([Strong])]` and
+  `[Strong([Emph]), Strong([Emph])]`, plus `[Emph([Emph]), Emph([Emph])]`;
+- the same-delimiter carve-out, both sides: a lone nested emphasis keeps its
+  stacked delimiters (`**a**`, `***a***`, and with vacuous company), one beside
+  other content joins its run;
+- the three transparent-link shapes from §2.3's widening, plus one inside an
+  `Emph` so the spliced children's depth is exercised.
 
 In `escape.rs`'s test module: `math_degrades` agrees with `math_span`'s
 observable behaviour on the boundary inputs (`$`, `\n`, `\r`, and content with

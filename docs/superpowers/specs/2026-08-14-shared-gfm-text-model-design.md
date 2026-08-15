@@ -14,7 +14,8 @@ The empty-code-span divergence was closed on 2026-08-14 by its own item,
 `2026-08-14-empty-code-span-anchor-design.md`, for a heading carrying a
 *single* empty span — that item's own Status block records the adjacent-span
 shape it did not close, and left divergent. `EMPTY_FALLBACK` remains, by
-choice. **Closed 2026-08-15** by `2026-08-15-adjacent-inline-fusion-design.md`,
+choice. **The adjacent-span shape closed 2026-08-15** by
+`2026-08-15-adjacent-inline-fusion-design.md`,
 in the writer rather than in either canonicalization: a run of adjacent
 same-delimiter inlines now renders as one span, so the adjacent-span shape no
 longer diverges either, and `EMPTY_FALLBACK` is the only divergence this crate
