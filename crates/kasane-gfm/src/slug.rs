@@ -47,7 +47,7 @@
 //! matched, codepoints included — and design spec §8.1 records the method and
 //! the cases. Re-run it when this table is next edited.
 //!
-//! # The two known divergences that survive on purpose
+//! # The one known divergence that survives on purpose
 //!
 //! The anchor is computed from `rendered_text`, the projection of what the
 //! writer actually emits for a heading's line — not from the IR's inline text

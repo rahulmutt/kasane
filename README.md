@@ -143,7 +143,7 @@ See AGENTS.md for the codebase map.
 
 ## Known limitations (this build)
 
-- Heading anchors match GitHub's rule, with two exceptions. Anchors are
+- Heading anchors match GitHub's rule, with one exception. Anchors are
   computed the way GitHub computes them — Unicode-aware, punctuation removed
   rather than replaced, `_` kept, duplicates within a file suffixed `-1`,
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as

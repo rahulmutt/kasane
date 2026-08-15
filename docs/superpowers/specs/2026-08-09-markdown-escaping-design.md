@@ -460,7 +460,7 @@ and disarms the whole run, which made the "changes the line-start rules for
 every context at once" characterization an artifact of the mechanism rather
 than of the defect.
 
-Two cases remain open, narrower than what was closed:
+Two cases were recorded here as open, narrower than what was closed:
 
 - **Whitespace inside the merged-table HTML fallback.** Not reachable by
   escaping: an HTML renderer collapses whitespace runs whether they arrived
