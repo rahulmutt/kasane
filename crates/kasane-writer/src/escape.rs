@@ -453,11 +453,30 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
     if content.is_empty() {
         // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
-        // Inside a heading this space is not a curiosity: `rendered_text` takes an
-        // `Inline::Code`'s content verbatim, so it does not see this padding space,
-        // and a heading built around an empty code span slugs to an anchor GitHub's
-        // real render does not compute -- a dead cross-reference. See
-        // `kasane_gfm::slug`'s module doc for the shape and why it stays open.
+        // No longer an anchor divergence for anything the engine structured:
+        // `kasane-core`'s `clone_inlines_at` canonicalizes `Inline::Code("")`
+        // to `Inline::Code(" ")` on the way into the engine, so structured IR
+        // reaches Rule 2 with the space already spelled, and the anchor sees
+        // it. `fold_sections` is the only entry point that establishes that
+        // invariant.
+        //
+        // Rule 1 therefore still runs for a caller who renders hand-built IR
+        // through `blocks_to_markdown` -- no `assign_paths`, so no anchor to
+        // diverge from -- and for one who assembles a `SectionTree` themselves
+        // instead of going through `fold_sections`. That second caller *does*
+        // get anchors: `SectionTree`/`SectionNode` have all-`pub` fields, no
+        // `#[non_exhaustive]` and no private constructor, and `balance` and
+        // `assign_paths` are exported, so un-canonicalized inlines can reach
+        // the anchor rule that way (`balance`'s merge path clones through
+        // `clone_inlines_at` and so canonicalizes the titles it demotes, but an
+        // unmerged section title or a hand-placed body heading stays raw).
+        // Nothing in this repo takes that path, so it is not a shipped bug --
+        // but the API does not forbid it, and this comment does not claim it
+        // does.
+        //
+        // Rule 1 and Rule 2 must keep printing the same bytes for that
+        // canonicalization to stay invisible; see
+        // `code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders`.
         format!("{ticks} {ticks}")
     } else if content.chars().all(|c| c == ' ') {
         // Rule 2: All-spaces content pads not at all; CommonMark's carve-out means the
@@ -924,6 +943,23 @@ mod tests {
     fn code_span_folds_newlines_to_spaces() {
         // A blank line would end the enclosing paragraph.
         assert_eq!(code_span("a\nb", Ctx::Flow), "`a b`");
+    }
+
+    #[test]
+    fn code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders() {
+        // The load-bearing invariant of the empty-code-span anchor fix:
+        // `kasane-core` canonicalizes `Inline::Code("")` to `Inline::Code(" ")`
+        // BEFORE anchors are assigned, which is only invisible to a reader
+        // because Rule 1 and Rule 2 print the same bytes. If they ever stop
+        // agreeing, that canonicalization starts silently rewriting documents
+        // -- and the symptom is a changed page, not a failing render, so
+        // nothing else would catch it.
+        // Design spec 2026-08-14-empty-code-span-anchor-design.md §2.2.
+        assert_eq!(code_span("", Ctx::Flow), code_span(" ", Ctx::Flow));
+        assert_eq!(code_span("", Ctx::Cell), code_span(" ", Ctx::Cell));
+        // Spelled out, so a future edit that breaks BOTH sides equally still
+        // fails here rather than agreeing on something new.
+        assert_eq!(code_span("", Ctx::Flow), "` `");
     }
 
     /// Adapter-produced math is emitted verbatim; content that would break out

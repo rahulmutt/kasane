@@ -149,8 +149,9 @@ See AGENTS.md for the codebase map.
   `-2` — so `## Don't Panic` anchors as `#dont-panic` and `## 第二章` as
   `#第二章`, both of which resolve on GitHub. The rule was checked against a
   real GitHub render on 2026-08-14: 13 of 14 ids came back identical,
-  codepoints included, the one divergence being the empty-id case below; it
-  is still a mirror, so it can drift if GitHub's changes. Note that exact
+  codepoints included, the one divergence that run's cases reached being the
+  empty-id case below (the probe carried no code-span case); it is still a
+  mirror, so it can drift if GitHub's changes. Note that exact
   parity means some anchors look wrong and are not. `## Background & Notes`
   anchors as `#background--notes`, because GFM removes the `&` and turns each
   surviving space into a hyphen. And the character set is Ruby's `\p{Word}`,
@@ -166,18 +167,24 @@ See AGENTS.md for the codebase map.
     anchor is a dead link. A heading that is *only* a zero-width non-joiner is
     not this case — it anchors to that invisible character, exactly as GitHub
     does.
-  - A heading containing an empty inline code span (an empty pair of
-    backticks between two words) gets a cross-reference that does not
-    resolve: GitHub renders the empty span as one space and computes its id
-    from that rendered line, while kasane's anchor is computed from the code
-    span's (empty) content and does not see the space. Pre-existing, and
-    open — see `kasane_gfm::slug`'s module doc.
+  - A heading containing two or more empty pairs of backticks *next to each
+    other* anchors as if each pair printed a space (`#a--b`), while a renderer
+    reads the line as `ab` — so a link into such a heading is dead. Markdown
+    cannot express two code spans in a row at all: the pairs kasane writes
+    fuse back into a single span, which is a fidelity problem in its own
+    right — two ordinary code spans side by side likewise come back as one —
+    and is tracked as an open bug rather than a deliberate choice. One empty
+    pair on its own is fine, and that is the case a real book produces.
 
-  Two anchors that used to diverge no longer do, which matters for a tree an
-  older build produced: a heading carrying a footnote reference now anchors
-  the way GitHub ids it (`#notes1`, not `#notes`), and a heading ending in a
-  `#` run now renders the run, which is what makes its existing anchor
-  correct.
+  Three anchors that used to diverge no longer do, which matters for a tree an
+  older build produced:
+  - A heading carrying a footnote reference now anchors the way GitHub ids it
+    (`#notes1`, not `#notes`).
+  - A heading ending in a `#` run now renders the run, which is what makes its
+    existing anchor correct.
+  - A heading containing one empty pair of backticks now anchors the space that
+    pair prints (`#a-b`, not `#ab`) — which also means such a heading's file is
+    now named `a-b.md` rather than `ab.md`.
 
   Filenames carry the title in any script, capped at 64 bytes of title per
   component; they drop the zero-width joiners an anchor keeps, since a

@@ -14,7 +14,7 @@
 mod generator;
 
 use generator::{Case, Expect};
-use kasane_core::{est_tokens, structure, FileNode};
+use kasane_core::{canonicalize_inlines, est_tokens, structure, FileNode};
 use kasane_gfm::{anchor_slug_of, anchors_for_headings};
 use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
 use proptest::prelude::*;
@@ -296,6 +296,43 @@ fn heading_anchors(text: &str) -> HashSet<String> {
         .into_iter()
         .collect()
 }
+
+/// P12's text runs: the neighbours a heading really puts beside a code span.
+///
+/// P12 drew both runs from `[a-z]{1,4}` at first, which is one shape however
+/// many cases proptest runs — no punctuation, no newline abutting the span, no
+/// non-Latin text, no trailing `#`. It therefore could not reach a single case
+/// that later turned out to matter. These are the shapes the rest of this file
+/// found worth drawing, so the property guarding the empty code span draws
+/// from them too.
+const P12_TEXTS: &[&str] = &[
+    "a",
+    "ab",
+    // Nothing on that side at all: the heading is the span and one neighbour.
+    "",
+    // A newline abutting the span. `fold_inline_newlines` carries a pending
+    // run *across* inlines, and the canonicalized span's space is what stops
+    // it -- the one shape where canonicalizing moves the printed line's bytes
+    // (empty-code-span spec §3, the `fold_inline_newlines` consumer).
+    "a\n",
+    "\na",
+    // A space abutting the padding space, so the rendered line carries a run
+    // of two where the IR has two separate inlines.
+    "a ",
+    // Punctuation the anchor filter removes outright.
+    "a.",
+    // A trailing `#` run, which `escape::atx_closing` must escape before the
+    // line can be read as an ATX closing sequence (P11's shape, next to this
+    // one).
+    "a#",
+    // A backtick in the neighbouring *text*, which `escape::text` backslashes
+    // right up against the span's own fence.
+    "a`b",
+    // Non-Latin, and ZWNJ inside an ordinary Persian word -- which the anchor
+    // rule keeps and the path slug drops.
+    "第",
+    "می‌رود",
+];
 
 proptest! {
     /// P1 — Conservation. No block lost, none duplicated.
@@ -708,6 +745,128 @@ proptest! {
             "anchor/render divergence:\n{}", md
         );
     }
+
+    /// P12 — an empty inline code span in a heading anchors the space the
+    /// printed line actually contains (design spec
+    /// 2026-08-14-empty-code-span-anchor-design.md §2.3).
+    ///
+    /// CommonMark cannot express an empty code span, so `code_span` prints one
+    /// as `` ` ` ``. That padding space is real text in the rendered line, and
+    /// GitHub ids the heading from the rendered line. `rendered_text` read the
+    /// span's content verbatim and saw nothing there, so the engine embedded
+    /// an anchor one hyphen short — dead against GitHub's own render.
+    ///
+    /// The inlines go through `canonicalize_inlines` because that is what the
+    /// engine anchors: `structure` applies it to every inline before
+    /// `assign_paths` runs. Comparing against raw inlines would test a
+    /// pipeline that does not exist.
+    ///
+    /// Both text runs are drawn from [`P12_TEXTS`] — see that constant for why
+    /// the original `[a-z]{1,4}` was not a guard. What this property still
+    /// cannot draw is a *second* code span beside the first: that shape
+    /// diverges rather than agreeing, and is pinned by
+    /// `adjacent_empty_code_spans_diverge_from_the_line_they_print` below.
+    #[test]
+    fn p12_an_empty_code_span_in_a_heading_anchors_the_same(
+        lead in proptest::sample::select(P12_TEXTS),
+        tail in proptest::sample::select(P12_TEXTS),
+    ) {
+        let inlines = canonicalize_inlines(&[
+            Inline::Text(lead.to_string()),
+            Inline::Code(String::new()),
+            Inline::Text(tail.to_string()),
+        ]);
+        let blocks = vec![Block::Heading {
+            level: 2,
+            id: BlockId(0),
+            inlines: inlines.clone(),
+        }];
+        let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+
+        let rendered = anchors_for_headings(&parse_events(&md).headings);
+        let embedded = anchor_slug_of(&inlines);
+
+        prop_assert_eq!(
+            rendered.first().map(String::as_str),
+            Some(embedded.as_str()),
+            "anchor/render divergence for an empty code span between {:?} and {:?}:\n{}",
+            lead, tail, md
+        );
+    }
+}
+
+/// Two *adjacent* empty code spans in a heading still diverge — a record of a
+/// known-open bug, not an endorsement of the values it asserts.
+///
+/// `a--b` is **wrong**. The line this heading prints ids as `ab` on GitHub, so
+/// a cross-reference kasane embeds into such a heading is dead. What is
+/// asserted below is what the code does today, pinned so the next person meets
+/// this deliberately instead of rediscovering it.
+///
+/// The cause is upstream of the anchor rule, in the writer. CommonMark cannot
+/// express two code spans in a row: ``` `x``y` ``` is *one* span whose content
+/// is ``` x``y ```, not two spans. The writer emits them anyway, so two
+/// `` ` ` `` runs
+/// fuse into a single span in the rendered line while the IR still holds two
+/// inlines. The empty-code-span canonicalization
+/// (`kasane_core::section::clone_inlines_at`) then lengthens the IR side to two
+/// spaces while the render side does not move at all — identical bytes at base
+/// and head, a different anchor. Before it the two sides agreed here by
+/// accident, both saying `ab`; this is the one shape that fix traded away, and
+/// it closed the mixed shapes in the same move
+/// (`[Text("a"), Code(""), Code("x")]` diverged before and agrees now).
+///
+/// The fusion is the real defect and it is not an anchor defect: `Code("x")`
+/// beside `Code("y")` in an ordinary paragraph renders as one span reading
+/// ``` x``y ```, which is visible content corruption with no empty span anywhere
+/// near it. That is asserted here too, so the record cannot be read as scoped
+/// to headings. Recorded as open in `kasane_gfm::slug`'s module doc and in
+/// `2026-08-09-markdown-escaping-design.md`'s open-case list; fixing it needs
+/// its own design, and this test is what should fail when that lands.
+#[test]
+fn adjacent_empty_code_spans_diverge_from_the_line_they_print() {
+    let inlines = canonicalize_inlines(&[
+        Inline::Text("a".into()),
+        Inline::Code(String::new()),
+        Inline::Code(String::new()),
+        Inline::Text("b".into()),
+    ]);
+    let blocks = vec![Block::Heading {
+        level: 2,
+        id: BlockId(0),
+        inlines: inlines.clone(),
+    }];
+    let md = kasane_writer::blocks_to_markdown(&blocks, &AssetBag::default());
+
+    // The two spans fused: a real parser recovers one code span whose content
+    // is the pair of backticks that should have closed the first and opened
+    // the second.
+    assert_eq!(md.trim_end(), "## a` `` `b");
+    let parsed = parse_events(&md);
+    assert_eq!(parsed.headings, vec!["a``b".to_string()]);
+
+    // KNOWN DIVERGENT — deliberately not compared to each other. The first is
+    // the id a renderer computes from the printed line; the second is the
+    // anchor kasane embeds in every cross-reference to it.
+    assert_eq!(
+        anchors_for_headings(&parsed.headings)
+            .first()
+            .map(String::as_str),
+        Some("ab"),
+    );
+    assert_eq!(anchor_slug_of(&inlines), "a--b");
+
+    // The fusion itself, with no empty span involved and no heading involved:
+    // two ordinary code spans in a paragraph come back as one.
+    let para = kasane_writer::blocks_to_markdown(
+        &[Block::Para(vec![
+            Inline::Code("x".into()),
+            Inline::Code("y".into()),
+        ])],
+        &AssetBag::default(),
+    );
+    assert_eq!(para.trim_end(), "`x``y`");
+    assert_eq!(parse_events(&para).text.trim(), "x``y");
 }
 
 /// The merged-subsection anchor, pinned end to end and deterministically.

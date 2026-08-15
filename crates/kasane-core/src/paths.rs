@@ -501,4 +501,40 @@ mod tests {
             "expected the printed-title anchor, got {anchor}"
         );
     }
+
+    #[test]
+    fn a_body_heading_with_an_empty_code_span_anchors_the_space_the_line_prints() {
+        // `escape::code_span` prints an empty span as `` ` ` `` -- a real
+        // space in the rendered line -- so GitHub ids `## a` `b` as `a-b`.
+        // `rendered_text` took `Inline::Code("")` verbatim and this rule
+        // computed `ab`: a cross-reference dead against GitHub's own render.
+        // Design spec 2026-08-14-empty-code-span-anchor-design.md §2.3.
+        //
+        // Built through `fold_sections` and `balance` rather than as a literal
+        // `SectionTree` like `body_headings_get_anchors_too` above: the
+        // canonicalization lives in `fold_sections`' bounded clone, so a test
+        // that hand-builds the tree would skip the code it is checking.
+        let doc = doc(vec![
+            h(1, 0, "Parent"),
+            Node {
+                block: Block::Heading {
+                    level: 2,
+                    id: BlockId(1),
+                    inlines: vec![
+                        Inline::Text("a".into()),
+                        Inline::Code(String::new()),
+                        Inline::Text("b".into()),
+                    ],
+                },
+                prov: Provenance::default(),
+            },
+        ]);
+        let mut tree = fold_sections(&doc);
+        // The H2 is childless with an empty body, so MERGE demotes its heading
+        // into the H1's body, where `count_headings` anchors it from
+        // `rendered_text`.
+        crate::balance(&mut tree, &crate::Options::default());
+        let placed = assign_paths(tree, "B");
+        assert_eq!(placed.anchors[&BlockId(1)], "01-parent.md#a-b");
+    }
 }
