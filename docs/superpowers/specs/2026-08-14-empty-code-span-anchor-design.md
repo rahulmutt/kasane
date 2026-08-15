@@ -1,7 +1,11 @@
 # kasane — Empty Code Span Anchor Design Spec
 
 **Date:** 2026-08-14
-**Status:** Designed, not implemented.
+**Status:** Implemented 2026-08-14. The anchor now matches GitHub's id for a
+heading containing an empty code span, pinned by P12 and by
+`a_body_heading_with_an_empty_code_span_anchors_the_space_the_line_prints`. The
+external oracle has not been re-run; §8's note about adding this case to the
+probe stands.
 **Parent spec:** `2026-08-09-markdown-escaping-design.md` (§ "Recorded as open",
 the empty-inline-code-span bullet), carried forward by
 `2026-08-14-shared-gfm-text-model-design.md` (§ Non-goals, and the second

@@ -475,9 +475,18 @@ Two cases remain open, narrower than what was closed:
   GitHub's real render computes `a-b`: a dead cross-reference. Recorded in
   full, including why it stays open, in `kasane_gfm::slug`'s module doc and
   in `escape::code_span`'s Rule 1 comment.
+  **Closed 2026-08-14** by `2026-08-14-empty-code-span-anchor-design.md`, and
+  not where this bullet predicted. It says the fix is "not fixable by escaping
+  either", which is right, and implies the anchor rule must learn about the
+  padding — but `kasane-core`'s `section::clone_inlines_at` instead
+  canonicalizes `Inline::Code("")` to `Inline::Code(" ")` before any anchor is
+  computed, so neither side learned anything about the other and the empty form
+  simply stopped existing downstream. Rule 1 is unchanged and still prints
+  `` ` ` ``; it is reachable now only by a caller who renders hand-built IR
+  without going through `structure`.
 
 The other case recorded here as open, a newline run split across an
-`Inline::FootnoteRef`, closed 2026-08-14:
+`Inline::FootnoteRef`, closed 2026-08-14 as well:
 
 - **A newline run split across an `Inline::FootnoteRef`.** Closed — not by a
   fold change, which is what this bullet originally predicted, but by

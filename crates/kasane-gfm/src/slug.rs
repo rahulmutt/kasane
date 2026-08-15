@@ -58,29 +58,18 @@
 //! `escape::atx_closing` escapes that run before it ever reaches this rule,
 //! so the printed line still says `Intro ###` in full rather than the `Intro`
 //! a real parser would strip a bare closing sequence down to.
+//! An empty inline code span in a heading no longer diverges either:
+//! `kasane-core` canonicalizes `Inline::Code("")` to a single space before any
+//! anchor is computed, so this rule sees the padding space
+//! `kasane-writer::escape::code_span` was already printing.
 //!
-//! Two divergences are left:
+//! One divergence is left:
 //!
 //! - **The empty id.** A title with no character in the class at all gets
 //!   [`EMPTY_FALLBACK`] rather than GitHub's empty id, because an empty
 //!   fragment is a dead link. This one is a choice rather than a construction
 //!   defect: kasane could match GitHub exactly by emitting no id, and
 //!   deliberately doesn't.
-//! - **An empty inline code span inside a heading.** Given
-//!   `[Inline::Text("a"), Inline::Code(""), Inline::Text("b")]` in a
-//!   `Block::Heading`, `kasane-writer::escape::code_span` renders the empty
-//!   span as `` ` ` `` — a single padding space, CommonMark's only way to
-//!   express an empty code span — so the printed line is `` a` `b `` and a
-//!   real parser reads its text as `a b`, with GitHub computing the id
-//!   `a-b`. `rendered_text` does not model that padding space (it takes an
-//!   `Inline::Code`'s content verbatim), so this rule computes `ab` and
-//!   `anchor_slug` embeds `ab` — a dead cross-reference against GitHub's
-//!   own render. This is a real construction defect, not a choice, and it
-//!   pre-dates this crate: the old `inline_text` produced the same `ab`.
-//!   It is documented rather than fixed here because the only fix is a
-//!   change to `code_span`'s output, which has its own callers and its own
-//!   fuzz postconditions and belongs to its own item, not this one. See
-//!   `escape::code_span`'s Rule 1 comment for the writer side.
 
 use crate::text::{fold_newlines, rendered_text, title_text};
 use kasane_ir::Inline;

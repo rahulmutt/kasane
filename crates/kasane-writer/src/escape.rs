@@ -453,11 +453,16 @@ pub(crate) fn code_span(s: &str, ctx: Ctx) -> String {
     let ticks = "`".repeat(longest_backtick_run(&content) + 1);
     if content.is_empty() {
         // Rule 1: Empty content gets a single space (only acknowledged divergence from round-trip).
-        // Inside a heading this space is not a curiosity: `rendered_text` takes an
-        // `Inline::Code`'s content verbatim, so it does not see this padding space,
-        // and a heading built around an empty code span slugs to an anchor GitHub's
-        // real render does not compute -- a dead cross-reference. See
-        // `kasane_gfm::slug`'s module doc for the shape and why it stays open.
+        // No longer an anchor divergence: `kasane-core`'s `clone_inlines_at`
+        // canonicalizes `Inline::Code("")` to `Inline::Code(" ")` on the way
+        // into the engine, so anything that was structured reaches Rule 2 with
+        // the space already spelled, and the anchor sees it. Rule 1 still runs
+        // for a caller who hand-builds the empty form and calls
+        // `blocks_to_markdown` directly -- they bypass `assign_paths` entirely
+        // and have no anchor to diverge from.
+        // Rule 1 and Rule 2 must keep printing the same bytes for that
+        // canonicalization to stay invisible; see
+        // `code_span_pads_an_empty_span_to_exactly_what_a_single_space_renders`.
         format!("{ticks} {ticks}")
     } else if content.chars().all(|c| c == ' ') {
         // Rule 2: All-spaces content pads not at all; CommonMark's carve-out means the
