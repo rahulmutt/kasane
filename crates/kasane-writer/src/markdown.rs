@@ -284,7 +284,19 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
         let len_before = s.len();
         let end = run_end(items, i);
         let members = &items[i..end];
-        match escape::delim(inline) {
+        // The run's class comes from its first *printing* member, not its
+        // first member outright: a vacuous leading `Emph` prints no
+        // delimiter, so it must not dictate `*` over `**` for a `Strong`
+        // that actually prints (design spec `2026-08-15-emphasis-seam-design.md`
+        // §2.5; regression: `a_vacuous_leading_member_does_not_downgrade_the_run_class`
+        // below). A fully vacuous run has no printing member to defer to, so
+        // it falls back to `inline` — the class is unobservable either way,
+        // since the run prints nothing.
+        let repr = members
+            .iter()
+            .find(|&&(el, d)| !renders_empty(el, d))
+            .map_or(inline, |&(el, _)| el);
+        match escape::delim(repr) {
             Some(escape::Delim::Backtick) => {
                 s.push_str(&escape::code_span(&backtick_run_content(members), ctx))
             }
@@ -430,8 +442,16 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
 /// A run is grouped by the delimiter's **character**, not by its `Delim`: `*`
 /// and `**` abut into one `***` run that a parser splits somewhere the writer
 /// did not intend, so two adjacent emphasis runs of different classes are one
-/// run. The first member's class wins, which is what the emit loop already
-/// reads from `items[i]` (design spec §2.1, seam two).
+/// run (design spec §2.1, seam two). Grouping only needs the character, and
+/// `items[start]`'s is always the right one to seed with even when
+/// `items[start]` is itself vacuous: `Delim::ch()` maps both `Emph` and
+/// `Strong` to `*` regardless of a container's contents, so no vacuous
+/// element can seed the wrong character. The run's *class* — which of
+/// `Emph`/`Strong` actually gets spelled — is a different question, and the
+/// emit loop answers it from the run's first *printing* member rather than
+/// from `items[i]`, because vacuity does bite there: an empty leading `Emph`
+/// must not downgrade a real trailing `Strong`
+/// (`a_vacuous_leading_member_does_not_downgrade_the_run_class`).
 fn run_end(items: &[Flat<'_>], start: usize) -> usize {
     let Some(d) = escape::delim(items[start].0) else {
         return start + 1;
@@ -487,9 +507,9 @@ fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
 /// edges, while [`same_delim_to_splice`] is keyed on the `Delim` and looks
 /// everywhere.
 fn edge_to_splice(children: &[Flat<'_>], ch: char) -> Option<usize> {
-    let printing = |&&(i, d): &&Flat<'_>| !renders_empty(i, d);
-    let first = children.iter().position(|c| printing(&c));
-    let last = children.iter().rposition(|c| printing(&c));
+    let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
+    let first = children.iter().position(printing);
+    let last = children.iter().rposition(printing);
     [first, last]
         .into_iter()
         .flatten()
@@ -709,12 +729,19 @@ fn emphasis_run<'a>(
         // this string lands in its buffer. That is not proven safe in
         // general -- a code span exposed at the run's tail can go on to fuse
         // with a following one, which is exactly how a false decline can cost
-        // *text* and not just structure. It is left unscanned anyway because
-        // the census corpus shows it is a wash: every decline that actually
-        // reaches this branch does so because the delimiter it declines would
-        // not have flanked here regardless, so the exposed edge is the same
-        // content a parser would read at that seam whether or not this
-        // function had ever considered emitting a delimiter around it.
+        // *text* and not just structure. It is left unscanned anyway on a
+        // measured claim, not an architectural one: no shape in the census
+        // corpus is corrupt *only* because of this decline. For
+        // `[Code("x"), Emph([Code("x")]), Text("a")]` the two seams do differ
+        // -- with a delimiter the line is `` `x`*`x`*a `` (the asterisks
+        // don't flank either, so they survive as literal text: `x*x*a`);
+        // declined, it's `` `x``x`a `` (the backticks fuse instead: `x``xa`)
+        // -- but every shape whose exposed seam fuses this way was already
+        // corrupt before this decline existed, by a different mechanism, not
+        // a new corruption this branch introduces. This is the residual
+        // 32-shape family the census allowlist still names (design spec §8's
+        // residual-risk bullets); a future shape corrupt only through this
+        // seam would not be caught by anything here.
         inner
     }
 }
@@ -1774,6 +1801,28 @@ mod tests {
         );
     }
 
+    /// A vacuous leading member must not dictate the run's class. Before this
+    /// test's fix, both the emit loop's class match and `run_end`'s grouping
+    /// character were read off `items[i]` — the run's *first* member — rather
+    /// than its first *printing* one, so `[Emph([]), Strong([Text("a")])]`
+    /// downgraded a real `<strong>` to `<em>`: an empty `Emph` prints no
+    /// delimiter, so nothing about the fuse's own justification (a `Strong`
+    /// beside an `Emph` really would collide) applies here, and the text-only
+    /// census cannot see the loss because the recovered text is unaffected
+    /// either way. Reachable from real EPUB input: `<em></em><strong>a</strong>`
+    /// parses to exactly this IR and `kasane_core::canonicalize_inlines`
+    /// leaves empty inline elements alone.
+    #[test]
+    fn a_vacuous_leading_member_does_not_downgrade_the_run_class() {
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![]),
+                Inline::Strong(vec![Inline::Text("a".into())]),
+            ]),
+            "**a**"
+        );
+    }
+
     /// A backtick run beside an emphasis run shares no character, so the two
     /// stay separate. The control against over-fusing.
     #[test]
@@ -2006,10 +2055,9 @@ mod tests {
     /// so nothing depends on the delimiter count any more. A run whose only
     /// member is a nested container is a run whose one element is both the
     /// first and the last, so `splice_children`'s edge rule treats it exactly
-    /// like any other edge and it collapses all the way down to one
-    /// delimiter pair, same as
-    /// `splicing_repeats_until_neither_rule_finds_anything`. The text still
-    /// survives intact either way.
+    /// like any other edge and it collapses all the way down to one delimiter
+    /// pair, same as `splicing_repeats_until_neither_rule_finds_anything`. The
+    /// text still survives intact either way.
     #[test]
     fn a_lone_nested_emphasis_collapses_to_one_delimiter_pair() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
@@ -2252,8 +2300,10 @@ mod tests {
     /// `*a*a*`x`*`: the opener at index 0 pairs with the inner span's own
     /// opener at index 2, so the delimiters at 4 and 8 are left with no
     /// opener to pair with and survive into the visible text as literal
-    /// asterisks -- recovering `aa*x*` instead of `aax`
-    /// (controller-authored task 5b; see the ledger's Task 4 rulings).
+    /// asterisks -- recovering `aa*x*` instead of `aax` (added mid-execution
+    /// as Task 5b; see the plan's "Amendments during execution" section,
+    /// `docs/superpowers/plans/2026-08-15-emphasis-seam.md`, and the design
+    /// spec's §8 result note, `2026-08-15-emphasis-seam-design.md`).
     ///
     /// The splice happens even though not every same-`Delim` nest would
     /// actually corrupt this way — see
@@ -2289,9 +2339,11 @@ mod tests {
     /// wouldn't collide — was rejected. That check is exactly the
     /// hand-mirrored CommonMark delimiter-pairing logic design spec §7
     /// approach A refuses, and which this run scan exists to retire rather
-    /// than reimplement one seam at a time (controller's ruling on this
-    /// task's brief). The invariant this item holds is text, not structure,
-    /// and the text survives here unchanged.
+    /// than reimplement one seam at a time (see the design spec's §8 result
+    /// note, `2026-08-15-emphasis-seam-design.md`, and the plan's
+    /// "Amendments during execution" section for the ruling that inserted
+    /// Task 5b rather than reopening Task 5). The invariant this item holds
+    /// is text, not structure, and the text survives here unchanged.
     #[test]
     fn splicing_mid_buffer_costs_a_span_that_would_round_trip() {
         let inls = vec![Inline::Emph(vec![
