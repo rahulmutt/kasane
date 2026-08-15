@@ -288,16 +288,12 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
             Some(escape::Delim::Backtick) => {
                 s.push_str(&escape::code_span(&backtick_run_content(members), ctx))
             }
-            Some(escape::Delim::Emph) => {
-                s.push_str(&emphasis_run(members, escape::Delim::Emph, ctx, pos, "*"))
+            Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
+                let before = s.chars().next_back().map_or(Flank::Space, class_of);
+                let after = next_class(&items[end..]);
+                let markup = if d == escape::Delim::Emph { "*" } else { "**" };
+                s.push_str(&emphasis_run(members, d, ctx, pos, markup, before, after))
             }
-            Some(escape::Delim::Strong) => s.push_str(&emphasis_run(
-                members,
-                escape::Delim::Strong,
-                ctx,
-                pos,
-                "**",
-            )),
             // `delim` said this inline prints no delimiter that can collide,
             // so the run is this inline alone and it renders as it always has.
             None => match inline {
@@ -521,6 +517,68 @@ fn trim_edges<'a>(mut children: Vec<Flat<'a>>, ch: char) -> Vec<Flat<'a>> {
     children
 }
 
+/// CommonMark's three character classes for the flanking rules.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flank {
+    Space,
+    Punct,
+    Other,
+}
+
+/// Which class a character falls in.
+///
+/// Everything that is neither whitespace nor alphanumeric counts as
+/// punctuation, which is a superset of Unicode's `P*` categories and matches
+/// what CommonMark 0.30 and later fold in as symbols. The classes are used
+/// only to decide whether the writer's *own* delimiter can flank, so erring
+/// wide costs at most an emphasis span the writer declines to spell, never
+/// corrupt text.
+fn class_of(c: char) -> Flank {
+    if c.is_whitespace() {
+        Flank::Space
+    } else if c.is_alphanumeric() {
+        Flank::Other
+    } else {
+        Flank::Punct
+    }
+}
+
+/// The class of the first character the rest of the view will print.
+///
+/// Computed without rendering anything twice: every element except `Text`
+/// begins with markup the writer chose, and every one of those characters is
+/// punctuation — a backtick for a code span or a degrading `Math`, `$` for one
+/// that does not degrade, `*` for a container, `[` for a footnote reference or
+/// an external link. A `Text` begins with its own first character, and stays
+/// punctuation if `escape::text` prefixes a backslash, since a backslash is
+/// punctuation and so is anything it escapes. An exhausted view is the end of
+/// the line, which CommonMark counts as whitespace.
+fn next_class(rest: &[Flat<'_>]) -> Flank {
+    for &(i, d) in rest {
+        if renders_empty(i, d) {
+            continue;
+        }
+        return match i {
+            Inline::Text(t) => t.chars().next().map_or(Flank::Space, class_of),
+            _ => Flank::Punct,
+        };
+    }
+    Flank::Space
+}
+
+/// Whether a delimiter run can open emphasis here, by CommonMark's
+/// left-flanking rule: not followed by whitespace, and either not followed by
+/// punctuation or preceded by whitespace or punctuation.
+fn can_open(before: Flank, after: Flank) -> bool {
+    after != Flank::Space && (after != Flank::Punct || before != Flank::Other)
+}
+
+/// Whether a delimiter run can close emphasis here — the right-flanking rule,
+/// which is the mirror of [`can_open`].
+fn can_close(before: Flank, after: Flank) -> bool {
+    before != Flank::Space && (before != Flank::Punct || after != Flank::Other)
+}
+
 /// Render a run of adjacent `Emph` (or `Strong`) elements as one emphasized
 /// span over the concatenation of their children, with both edges trimmed.
 ///
@@ -538,9 +596,29 @@ fn emphasis_run<'a>(
     ctx: Ctx,
     pos: Pos,
     markup: &str,
+    before: Flank,
+    after: Flank,
 ) -> String {
     let children = trim_edges(run_children(members), want.ch());
-    emphasize(&inlines_to_md_flat(&children, ctx, pos), markup)
+    let inner = inlines_to_md_flat(&children, ctx, pos);
+    let core = inner.trim();
+    // An all-whitespace or empty inner buffer gets no delimiters anyway --
+    // `emphasize` says so itself -- and has no first or last character to
+    // classify, so the flanking question does not arise.
+    if core.is_empty() {
+        return inner;
+    }
+    let opens = can_open(before, class_of(core.chars().next().unwrap()));
+    let closes = can_close(class_of(core.chars().next_back().unwrap()), after);
+    if opens && closes {
+        emphasize(&inner, markup)
+    } else {
+        // The delimiter would not flank where it lands, so a parser would read
+        // it as a literal asterisk in the middle of the prose. The text is the
+        // invariant and the span is not: render the children bare (design spec
+        // §2.3).
+        inner
+    }
 }
 
 /// Wrap already-rendered inner content in an emphasis delimiter, with any
@@ -1961,6 +2039,50 @@ mod tests {
         assert_eq!(
             para(vec![Inline::Emph(vec![Inline::Code("x".into())])]),
             "*`x`*"
+        );
+    }
+
+    /// An opening delimiter preceded by a word character and followed by the
+    /// content's own punctuation flanks on neither side, so CommonMark leaves
+    /// it as a literal asterisk: `` a*`a`* `` reads `a*a*`, with both
+    /// asterisks visible in the prose. Nothing here can be fused with — the
+    /// collision is with content, not with markup — so the run renders its
+    /// children bare (design spec §2.3).
+    #[test]
+    fn an_unspellable_opening_delimiter_is_not_emitted() {
+        assert_eq!(
+            para(vec![
+                Inline::Text("a".into()),
+                Inline::Emph(vec![Inline::Code("a".into())]),
+            ]),
+            "a`a`"
+        );
+    }
+
+    /// The same failure on the closing side, which is why the decision cannot
+    /// live in `emphasize`: the character after the closing delimiter is the
+    /// next element in the stream, which `emphasize` never sees.
+    #[test]
+    fn an_unspellable_closing_delimiter_is_not_emitted() {
+        assert_eq!(
+            para(vec![
+                Inline::Emph(vec![Inline::Code("a".into())]),
+                Inline::Text("a".into()),
+            ]),
+            "`a`a"
+        );
+    }
+
+    /// The control: the same emphasis with a word character inside flanks on
+    /// both sides and keeps its delimiters.
+    #[test]
+    fn a_spellable_delimiter_is_still_emitted() {
+        assert_eq!(
+            para(vec![
+                Inline::Text("a".into()),
+                Inline::Emph(vec![Inline::Text("b".into())]),
+            ]),
+            "a*b*"
         );
     }
 }
