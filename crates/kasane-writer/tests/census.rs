@@ -331,3 +331,185 @@ fn inline_text_survives_rendering_for_every_short_sequence() {
             .collect::<String>()
     );
 }
+
+const STRUCTURE_ALLOWLIST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/census-known-structure-corrupt.txt"
+);
+
+const INEXPRESSIBLE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/census-inexpressible.txt"
+);
+
+/// How one shape's structure survived rendering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Structure {
+    /// Structure preserved — or text already corrupt, in which case structure
+    /// is not evaluated (design spec §2, "Gate").
+    Clean,
+    /// A real, fixable loss. Belongs in the queue.
+    Corrupt,
+    /// Markdown cannot express this shape at any level. Permanent.
+    Inexpressible,
+}
+
+/// Whether `seq` holds a container whose **sole** child is a container of the
+/// same class — `Emph[Emph[…]]` or `Strong[Strong[…]]`.
+///
+/// Condition 1 of the inexpressible split (design spec §4), and the one that
+/// does the work. `<em><em>x</em></em>` has no CommonMark spelling: `**x**` is
+/// strong, not nested emphasis. Only *direct* nesting is inexpressible —
+/// `Emph[a, Emph[b], c]` round-trips correctly today, so filing it as permanent
+/// on the strength of condition 2 alone would bury a real regression if it ever
+/// broke.
+fn nests_same_class_directly(seq: &[Inline]) -> bool {
+    seq.iter().any(|i| match i {
+        Inline::Emph(x) => {
+            matches!(x.as_slice(), [Inline::Emph(_)]) || nests_same_class_directly(x)
+        }
+        Inline::Strong(x) => {
+            matches!(x.as_slice(), [Inline::Strong(_)]) || nests_same_class_directly(x)
+        }
+        Inline::Link { inlines, .. } => nests_same_class_directly(inlines),
+        _ => false,
+    })
+}
+
+/// Whether every difference between the two walks disappears once adjacent
+/// identical classes are collapsed. Condition 2 of the split (design spec §4).
+fn differs_only_by_collapse(ir: &[(char, Vec<Emphasis>)], got: &[(char, Vec<Emphasis>)]) -> bool {
+    fn collapse(v: &[Emphasis]) -> Vec<Emphasis> {
+        let mut out: Vec<Emphasis> = Vec::new();
+        for &e in v {
+            if out.last() != Some(&e) {
+                out.push(e);
+            }
+        }
+        out
+    }
+    ir.iter()
+        .zip(got)
+        .all(|(x, y)| collapse(&x.1) == collapse(&y.1))
+}
+
+/// The relation, for one shape (design spec §2).
+fn classify(seq: &[Inline]) -> Structure {
+    let md = kasane_writer::blocks_to_markdown(&[Block::Para(seq.to_vec())], &AssetBag::default());
+    let expected = kasane_gfm::rendered_text(seq);
+    if parsed_text(&md).trim() != expected.trim() {
+        return Structure::Clean;
+    }
+
+    let mut ir = Vec::new();
+    ir_context(seq, 0, &mut Vec::new(), &mut ir);
+    let ir = trim_whitespace(&ir);
+    let got = parsed_context(&md);
+    let got = trim_whitespace(&got);
+
+    if ir.iter().zip(got).all(|(x, y)| x.1 == y.1) {
+        return Structure::Clean;
+    }
+    if nests_same_class_directly(seq) && differs_only_by_collapse(ir, got) {
+        return Structure::Inexpressible;
+    }
+    Structure::Corrupt
+}
+
+/// Bless or check one ratchet file, two-directionally: a shape that is in
+/// `found` but not the file fails, and a shape in the file but not `found`
+/// fails too, so the file can neither grow silently nor rot into stale
+/// excuses.
+///
+/// `#`-prefixed lines are comments, which is how the permanent file carries its
+/// header. The text allowlist keeps its own copy of this logic for now — it is
+/// the instrument two other items depend on, and re-pointing it is Task 4's
+/// step, gated separately.
+fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str>) {
+    if std::env::var_os("KASANE_CENSUS_BLESS").is_some() {
+        let mut body = header.unwrap_or("").to_string();
+        body.extend(found.iter().map(|l| format!("{l}\n")));
+        std::fs::write(path, body).expect("writing the allowlist");
+        return;
+    }
+
+    let known: BTreeSet<String> = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("{path} must exist -- bless it with KASANE_CENSUS_BLESS=1"))
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+
+    let new: Vec<&String> = found.difference(&known).collect();
+    let gone: Vec<&String> = known.difference(found).collect();
+
+    assert!(
+        new.is_empty(),
+        "{} shape(s) newly {noun}:\n{}",
+        new.len(),
+        new.iter()
+            .take(10)
+            .map(|s| format!("  {s}\n"))
+            .collect::<String>()
+    );
+    assert!(
+        gone.is_empty(),
+        "{} listed shape(s) are no longer {noun} -- delete them from {path} \
+         (KASANE_CENSUS_BLESS=1 does it for you):\n{}",
+        gone.len(),
+        gone.iter()
+            .take(10)
+            .map(|s| format!("  {s}\n"))
+            .collect::<String>()
+    );
+}
+
+const INEXPRESSIBLE_HEADER: &str = "\
+# Shapes whose structure Markdown cannot express, at any level.
+#
+# `<em><em>x</em></em>` has no CommonMark spelling: `**x**` is strong, not
+# nested emphasis. No writer change can close these, which is why they are not
+# in the queue (`census-known-structure-corrupt.txt`) -- 1,236 unclosable
+# entries there would make \"shrink to zero\" meaningless.
+#
+# COMPUTED, never hand-edited. A shape lands here only if it BOTH contains a
+# container whose sole child is a same-class container AND differs from the IR
+# only by collapsing adjacent identical classes. Stop satisfying either and it
+# moves back to the queue on the next bless. See
+# `docs/superpowers/specs/2026-08-16-structural-census-design.md` §4.
+#
+# Regenerate: KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census
+";
+
+/// The structural tier: does the emphasis structure a parser recovers match the
+/// structure the IR held?
+///
+/// Runs only where the text assertion already passes — structure is meaningless
+/// where the text is scrambled, and per-character alignment presupposes equal
+/// strings. As the text allowlist drains, its shapes graduate into this check
+/// without anyone editing this test.
+#[test]
+fn inline_structure_survives_rendering_for_every_short_sequence() {
+    let mut corrupt = BTreeSet::new();
+    let mut inexpressible = BTreeSet::new();
+
+    for seq in shapes() {
+        match classify(&seq) {
+            Structure::Clean => {}
+            Structure::Corrupt => {
+                corrupt.insert(format!("{seq:?}"));
+            }
+            Structure::Inexpressible => {
+                inexpressible.insert(format!("{seq:?}"));
+            }
+        }
+    }
+
+    ratchet(STRUCTURE_ALLOWLIST, &corrupt, "structurally corrupt", None);
+    ratchet(
+        INEXPRESSIBLE,
+        &inexpressible,
+        "inexpressible",
+        Some(INEXPRESSIBLE_HEADER),
+    );
+}
