@@ -499,20 +499,55 @@ fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
 
 /// The index of a leading or trailing printing element that collides at an
 /// edge, sharing a character with the run's own delimiter, or `None` when
-/// neither edge does.
+/// neither edge does — or when the one edge that would collide is the
+/// canonical nesting [`sole_child_nests_canonically`] exempts.
+///
+/// Takes the run's `Delim` rather than its bare character even though the
+/// collision *test* is still on the character. The exemption is the reason:
+/// `*` and `**` abut identically, and only the class tells the shape that
+/// round-trips from the one that does not.
 ///
 /// One of two sources [`splice_children`] draws splice candidates from — see
-/// its doc for why this one is keyed on the character and stops at the
-/// edges, while [`same_delim_to_splice`] is keyed on the `Delim` and looks
-/// everywhere.
-fn edge_to_splice(children: &[Flat<'_>], ch: char) -> Option<usize> {
+/// its doc for why this one tests the character and stops at the edges, while
+/// [`same_delim_to_splice`] is keyed on the `Delim` and looks everywhere.
+fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<usize> {
+    let ch = want.ch();
     let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
     let first = children.iter().position(printing);
     let last = children.iter().rposition(printing);
-    [first, last]
-        .into_iter()
-        .flatten()
-        .find(|&idx| escape::delim(children[idx].0).map(escape::Delim::ch) == Some(ch))
+    [first, last].into_iter().flatten().find(|&idx| {
+        escape::delim(children[idx].0).map(escape::Delim::ch) == Some(ch)
+            && !sole_child_nests_canonically(children, idx, want)
+    })
+}
+
+/// Whether the edge candidate at `idx` is the run's entire content and nests
+/// the one way `*` alone can spell.
+///
+/// `Emph` wrapping nothing but a `Strong` prints `***x***`, and a parser
+/// splitting that run resolves it em-outermost — which is what the IR meant, so
+/// splicing would destroy a shape that round-trips. The converse does not hold:
+/// `Strong` wrapping nothing but an `Emph` prints the same `***x***` and
+/// resolves the same way, *against* the IR, so it keeps splicing and the census
+/// files it inexpressible.
+///
+/// All three conditions are load-bearing. Without the class check this would
+/// also decline for `Emph[Emph[x]]`, where the behaviour would stay correct
+/// only because `same_delim_to_splice` catches that shape a moment later —
+/// true by the ordering of two other rules rather than by construction. The
+/// single-printing-child check is what keeps this to the configuration the
+/// census can prove: the wider single-edge cases (`*a**b***`) also round-trip,
+/// but most of what that would license is unreachable by the census alphabet,
+/// so it is deliberately left out (design spec §3.2 and §3.4).
+fn sole_child_nests_canonically(children: &[Flat<'_>], idx: usize, want: escape::Delim) -> bool {
+    if want != escape::Delim::Emph || escape::delim(children[idx].0) == Some(want) {
+        return false;
+    }
+    let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
+    children
+        .iter()
+        .enumerate()
+        .all(|(i, c)| i == idx || !printing(c))
 }
 
 /// The index of any element, anywhere in a run's children, whose own `Delim`
@@ -540,6 +575,15 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 ///   container *between* other content has nothing adjacent to abut, which is
 ///   why this rule only ever looks at the first and last printing element
 ///   (design spec § Confirmed).
+///   One configuration is exempt: an `Emph` run whose *entire* content is a
+///   single `Strong` prints `***x***`, which is the canonical spelling of
+///   that nesting and round-trips — the merged run's tie-break resolves
+///   em-outermost, which is what the IR meant. See
+///   [`sole_child_nests_canonically`], and
+///   `2026-08-16-cross-class-edge-splice-design.md` §2 for the measurements
+///   that draw the boundary. The exemption is directional: `Strong` over
+///   `Emph` prints the same bytes and the same tie-break destroys it, so it
+///   keeps splicing.
 /// - **Anywhere, keyed on the *`Delim`* itself** ([`same_delim_to_splice`]).
 ///   A container whose `Delim` equals the run's own is spliced wherever it
 ///   sits, even though same-`Delim` nesting is sometimes expressible:
@@ -571,6 +615,10 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 /// reimplement. Neither subsumes the other — dropping the edge rule would
 /// leave `*a***b*` (an `Emph` and a `Strong` abutting at the edge) unclosed,
 /// and dropping the `Delim` rule would leave this task's shapes unclosed.
+/// The edge rule now takes a `Delim` too, which does not merge the two: it
+/// still *tests* the character, and takes the class only to recognise the one
+/// shape where an abutting `*` and `**` are the correct spelling rather than a
+/// collision.
 ///
 /// Splicing replaces a container with its own children, which may expose a
 /// new collision — a new edge, or a new element the `Delim` rule can now see
@@ -584,9 +632,8 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 /// Only pointers move: `flatten_into` borrows, and `Vec::splice` shuffles
 /// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
 fn splice_children<'a>(mut children: Vec<Flat<'a>>, want: escape::Delim) -> Vec<Flat<'a>> {
-    let ch = want.ch();
     while let Some(idx) =
-        edge_to_splice(&children, ch).or_else(|| same_delim_to_splice(&children, want))
+        edge_to_splice(&children, want).or_else(|| same_delim_to_splice(&children, want))
     {
         let (inline, depth) = children[idx];
         let (Inline::Emph(x) | Inline::Strong(x)) = inline else {
@@ -1618,6 +1665,26 @@ mod tests {
         out
     }
 
+    /// The HTML a real parser builds from what the writer printed.
+    ///
+    /// `recovered` concatenates `Event::Text` and `Event::Code` and so is blind
+    /// to structure by construction — which is the whole defect this task
+    /// closes. The `<p>` wrapper is trimmed so a case reads as the inline
+    /// shape it is about.
+    fn recovered_html(inls: Vec<Inline>) -> String {
+        use pulldown_cmark::{html, Options, Parser};
+
+        let md = blocks_to_markdown(&[Block::Para(inls)], &AssetBag::default());
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_MATH);
+        let mut out = String::new();
+        html::push_html(&mut out, Parser::new_ext(&md, opts));
+        out.trim()
+            .trim_start_matches("<p>")
+            .trim_end_matches("</p>")
+            .to_string()
+    }
+
     /// Adjacent code spans render as one span over their concatenation.
     ///
     /// CommonMark cannot express two code spans in a row: the closing fence of
@@ -2352,5 +2419,72 @@ mod tests {
         ])];
         assert_eq!(para(inls.clone()), "*a b c*");
         assert_eq!(recovered(inls), "a b c");
+    }
+
+    /// The defect this task closes. `Emph` wrapping nothing but a `Strong`
+    /// prints `***a***`, and a parser splitting that run resolves it
+    /// em-outermost — exactly what the IR meant. The old edge rule spliced the
+    /// `Strong` away because `Delim::ch()` maps both classes to `*`, and the
+    /// `<strong>` vanished from a document converter's output
+    /// (`2026-08-16-cross-class-edge-splice-design.md` §1).
+    #[test]
+    fn an_emph_run_wrapping_only_a_strong_keeps_its_strong() {
+        let inls = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Text(
+            "a".into(),
+        )])])];
+        assert_eq!(para(inls.clone()), "***a***");
+        assert_eq!(recovered_html(inls.clone()), "<em><strong>a</strong></em>");
+        assert_eq!(recovered(inls), "a");
+    }
+
+    /// The cost, pinned so a later reader meets it as a decision. The converse
+    /// shape prints the same `***a***`, and the tie-break resolves it
+    /// em-outermost *against* the IR, so there is no `*`-only spelling of
+    /// `<strong><em>a</em></strong>` — it keeps splicing and Task 2 files it
+    /// permanent (design spec §2).
+    #[test]
+    fn a_strong_run_wrapping_only_an_emph_still_loses_its_emph() {
+        let inls = vec![Inline::Strong(vec![Inline::Emph(vec![Inline::Text(
+            "a".into(),
+        )])])];
+        assert_eq!(para(inls.clone()), "**a**");
+        assert_eq!(recovered_html(inls.clone()), "<strong>a</strong>");
+        assert_eq!(recovered(inls), "a");
+    }
+
+    /// The control for `sole_child_nests_canonically`'s second condition. A
+    /// same-class sole child is *not* the canonical nesting and must keep
+    /// splicing; `same_delim_to_splice` would catch it anyway, which is
+    /// precisely why the predicate states the condition rather than relying on
+    /// the other rule's ordering (design spec §3.2).
+    #[test]
+    fn an_emph_run_wrapping_only_an_emph_is_still_spliced() {
+        let inls = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
+            "a".into(),
+        )])])];
+        assert_eq!(para(inls.clone()), "*a*");
+        assert_eq!(recovered(inls), "a");
+    }
+
+    /// The exemption composes under nesting without a special case, and the
+    /// census alphabet cannot reach this shape — every alphabet container is
+    /// single-child to a depth of two, so `Emph[Strong[Emph[b]]]` is tested
+    /// here or nowhere (design spec §3.3).
+    ///
+    /// The outer `Emph` run declines and keeps its `Strong`; the inner
+    /// `Strong` run does not qualify — condition 3 fails — so it splices its
+    /// `Emph` and prints `**b**`; the whole prints `***b***`. The innermost
+    /// `Emph` is lost, but that is the `Strong`-outer limit reappearing one
+    /// level down, not a new corruption, and Task 2 files the shape permanent
+    /// on the strength of the `Strong[Emph[…]]` it contains. A `****b****`
+    /// here would mean the exemption is recursing where it must not.
+    #[test]
+    fn the_exemption_composes_one_level_down() {
+        let inls = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Emph(
+            vec![Inline::Text("b".into())],
+        )])])];
+        assert_eq!(para(inls.clone()), "***b***");
+        assert_eq!(recovered_html(inls.clone()), "<em><strong>b</strong></em>");
+        assert_eq!(recovered(inls), "b");
     }
 }

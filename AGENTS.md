@@ -322,10 +322,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   never hand-edited**: a shape is permanent only if it both nests a same-class
   container directly and differs only by collapsing adjacent identical classes.
   One bless command rewrites all three. Design spec
-  `2026-08-16-structural-census-design.md`; its §6 records the largest queued
-  family, 2,002 shapes in which `Emph[Strong[x]]` loses its `<strong>` because
+  `2026-08-16-structural-census-design.md`; its §6 recorded the largest queued
+  family, 2,002 shapes losing a level because
   `splice_children`'s edge rule keys on the delimiter character and
-  `Delim::ch()` maps both classes to `*`.
+  `Delim::ch()` maps both classes to `*`. That family is closed:
+  `2026-08-16-cross-class-edge-splice-design.md` narrows the edge rule so
+  `Emph[Strong[x]]` prints `***x***`, and files the mirror shape permanent
+  because `***x***` always resolves em-outermost.
 - Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
   (64) is a fidelity bound that flattens without losing content;
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
