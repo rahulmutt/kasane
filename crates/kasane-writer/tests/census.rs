@@ -109,6 +109,87 @@ fn shapes() -> Vec<Vec<Inline>> {
     out
 }
 
+/// One emphasis container, as it appears on the stack enclosing a character.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Emphasis {
+    Em,
+    St,
+}
+
+/// Every character `rendered_text` contributes, paired with the stack of
+/// emphasis containers enclosing it.
+///
+/// Mirrors `kasane_gfm::rendered_text`'s own walk arm for arm — its
+/// `MAX_INLINE_DEPTH` cutoff, and its `[^n]` spelling for a footnote reference
+/// — because the whole comparison is meaningless if this walks a different
+/// projection from the one the text assertion uses. That mirroring is not
+/// asserted in prose: `the_context_walk_reproduces_rendered_text_for_every_short_sequence`
+/// re-derives `rendered_text` from this walk's own output every run.
+///
+/// `Link` pushes nothing. `flatten_into` (`markdown.rs:237-238`) splices every
+/// non-`External` target away before the emit loop ever sees it, so a
+/// transparent link is not a structural level in the output and must not be
+/// one here (design spec §2).
+fn ir_context(
+    inlines: &[Inline],
+    depth: usize,
+    stack: &mut Vec<Emphasis>,
+    out: &mut Vec<(char, Vec<Emphasis>)>,
+) {
+    if depth >= kasane_ir::MAX_INLINE_DEPTH {
+        return;
+    }
+    for i in inlines {
+        match i {
+            Inline::Text(t) | Inline::Code(t) | Inline::Math(t) => {
+                for c in t.chars() {
+                    out.push((c, stack.clone()));
+                }
+            }
+            Inline::Emph(x) => {
+                stack.push(Emphasis::Em);
+                ir_context(x, depth + 1, stack, out);
+                stack.pop();
+            }
+            Inline::Strong(x) => {
+                stack.push(Emphasis::St);
+                ir_context(x, depth + 1, stack, out);
+                stack.pop();
+            }
+            Inline::Link { inlines, .. } => ir_context(inlines, depth + 1, stack, out),
+            Inline::FootnoteRef(n) => {
+                for c in format!("[^{}]", n.0).chars() {
+                    out.push((c, stack.clone()));
+                }
+            }
+        }
+    }
+}
+
+/// The characters of a context walk, in order.
+fn context_text(v: &[(char, Vec<Emphasis>)]) -> String {
+    v.iter().map(|(c, _)| *c).collect()
+}
+
+/// The first of the three guards (design spec §3): a hard failure, not a skip.
+///
+/// If this fires, the instrument is broken rather than the writer — someone has
+/// edited `ir_context` or `rendered_text` without the other, and every
+/// structural verdict downstream is being computed against the wrong
+/// projection.
+#[test]
+fn the_context_walk_reproduces_rendered_text_for_every_short_sequence() {
+    for seq in shapes() {
+        let mut ctx = Vec::new();
+        ir_context(&seq, 0, &mut Vec::new(), &mut ctx);
+        assert_eq!(
+            context_text(&ctx),
+            kasane_gfm::rendered_text(&seq),
+            "the context walk has drifted from `rendered_text` on {seq:?}"
+        );
+    }
+}
+
 #[test]
 fn inline_text_survives_rendering_for_every_short_sequence() {
     let mut corrupt = BTreeSet::new();
