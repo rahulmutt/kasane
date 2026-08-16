@@ -272,3 +272,22 @@ Three residual risks, recorded rather than closed:
 - **570 queue entries have no named mechanism.** They are grouped by a
   predicate, not diagnosed. A reader should not infer from this spec that the
   queue is four families; it is at least four, and the tail is unexamined.
+- **Condition 1 is scoped to the whole shape, not to the mismatching
+  position.** `nests_same_class_directly` asks whether `seq` contains direct
+  same-class nesting *anywhere*, and `differs_only_by_collapse` is evaluated
+  over all positions, so a shape carrying an unrelated direct same-class
+  container can satisfy condition 1 on the strength of a mismatch that
+  belongs to a different position entirely — filing that position permanent
+  on a loss that is actually fixable, which is exactly what condition 1
+  exists to prevent. This is unreachable at the committed alphabet: every
+  alphabet container is single-child, so no shape has a container holding
+  both text and a nested container, which is the same fact the first
+  residual risk above rests on. It therefore goes live in the same item that
+  widens the alphabet — which is also when the transparent-`Link` gap below
+  goes live, so that item must make condition 1 per-position *before* it
+  widens anything. A sibling gap sits next to it: `nests_same_class_directly`
+  does not treat "a container whose sole child is a transparent `Link` that
+  itself wraps a same-class container" as satisfying condition 1, even though
+  §2 makes a `Link` structurally invisible. Its failure direction is safe
+  today — such a shape lands in the queue rather than the permanent file,
+  i.e. it over-queues rather than over-excuses.

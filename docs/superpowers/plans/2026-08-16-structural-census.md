@@ -187,8 +187,8 @@ The other half of the comparison, plus the two remaining §3 guards. Both are ha
 - Modify: `crates/kasane-writer/tests/census.rs` (`parsed_text` and its doc comment at `:78-95`; add after it)
 
 **Interfaces:**
-- Consumes: `Emphasis`, `ir_context`, `context_text` (Task 1); `shapes()`, `parsed_text`; `kasane_writer::blocks_to_markdown`.
-- Produces: `fn parser_options() -> Options`; `fn parsed_context(&str) -> Vec<(char, Vec<Emphasis>)>`; `fn trim_whitespace(&[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)]`. Tasks 3 and 4 use `parsed_context` and `trim_whitespace`.
+- Consumes: `Emphasis`, `ir_context`, `context_text` (Task 1); `shapes()`, `parsed_text`; `kasane_writer::blocks_to_markdown`, `kasane_gfm::rendered_text`.
+- Produces: `fn parser_options() -> Options`; `fn parsed_context(&str) -> Vec<(char, Vec<Emphasis>)>`; `fn trim_whitespace(&[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)]`; `type ContextWalk = Vec<(char, Vec<Emphasis>)>`; `fn context_walks(&[Inline]) -> Option<(ContextWalk, ContextWalk)>`. Tasks 3 and 4 use `parsed_context`, `trim_whitespace` and `context_walks`.
 
 - [ ] **Step 1: Extract the parser options**
 
@@ -286,6 +286,33 @@ fn trim_whitespace(v: &[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)] {
     &v[start..end]
 }
 
+/// A context walk's characters, each paired with its enclosing emphasis stack.
+type ContextWalk = Vec<(char, Vec<Emphasis>)>;
+
+/// Renders `seq`, gates on the text assertion, and returns both trimmed
+/// context walks -- or `None` if the text is already corrupt, in which case
+/// structure is not evaluated (design spec §2, "Gate").
+///
+/// Shared by the alignment guard below and `classify` (Task 3): the guard is
+/// only evidence for what `classify` actually compares if both exercise the
+/// same render/gate/walk setup. Two independent copies of it could drift
+/// apart, and if they did, the guard would stop covering the walks `classify`
+/// uses.
+fn context_walks(seq: &[Inline]) -> Option<(ContextWalk, ContextWalk)> {
+    let md = kasane_writer::blocks_to_markdown(&[Block::Para(seq.to_vec())], &AssetBag::default());
+    let expected = kasane_gfm::rendered_text(seq);
+    if parsed_text(&md).trim() != expected.trim() {
+        return None;
+    }
+
+    let mut ir = Vec::new();
+    ir_context(seq, 0, &mut Vec::new(), &mut ir);
+    let ir = trim_whitespace(&ir).to_vec();
+    let got = parsed_context(&md);
+    let got = trim_whitespace(&got).to_vec();
+    Some((ir, got))
+}
+
 /// The second of the three guards (design spec §3).
 ///
 /// Where the text already matches, the two walks must produce the same
@@ -296,24 +323,15 @@ fn trim_whitespace(v: &[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)] {
 #[test]
 fn the_two_context_walks_align_character_for_character() {
     for seq in shapes() {
-        let md =
-            kasane_writer::blocks_to_markdown(&[Block::Para(seq.clone())], &AssetBag::default());
-        let expected = kasane_gfm::rendered_text(&seq);
-        if parsed_text(&md).trim() != expected.trim() {
+        let Some((ir, got)) = context_walks(&seq) else {
             // Text already corrupt: named by the text assertion, and structure
             // is not evaluated here (design spec §2, "Gate").
             continue;
-        }
-
-        let mut ir = Vec::new();
-        ir_context(&seq, 0, &mut Vec::new(), &mut ir);
-        let ir = trim_whitespace(&ir);
-        let got = parsed_context(&md);
-        let got = trim_whitespace(&got);
+        };
 
         assert_eq!(
-            context_text(ir),
-            context_text(got),
+            context_text(&ir),
+            context_text(&got),
             "the two walks disagree on characters for {seq:?}, so their \
              stacks cannot be compared positionally"
         );
@@ -438,32 +456,6 @@ fn differs_only_by_collapse(
         .all(|(x, y)| collapse(&x.1) == collapse(&y.1))
 }
 
-/// A context walk's characters, each paired with its enclosing emphasis stack.
-type ContextWalk = Vec<(char, Vec<Emphasis>)>;
-
-/// Renders `seq`, gates on the text assertion, and returns both trimmed
-/// context walks -- or `None` if the text is already corrupt, in which case
-/// structure is not evaluated (design spec §2, "Gate").
-///
-/// Shared by the alignment guard below and `classify`: the guard is only
-/// evidence for what `classify` actually compares if both exercise the same
-/// render/gate/walk setup. Two independent copies of it could drift apart,
-/// and if they did, the guard would stop covering the walks `classify` uses.
-fn context_walks(seq: &[Inline]) -> Option<(ContextWalk, ContextWalk)> {
-    let md = kasane_writer::blocks_to_markdown(&[Block::Para(seq.to_vec())], &AssetBag::default());
-    let expected = kasane_gfm::rendered_text(seq);
-    if parsed_text(&md).trim() != expected.trim() {
-        return None;
-    }
-
-    let mut ir = Vec::new();
-    ir_context(seq, 0, &mut Vec::new(), &mut ir);
-    let ir = trim_whitespace(&ir).to_vec();
-    let got = parsed_context(&md);
-    let got = trim_whitespace(&got).to_vec();
-    Some((ir, got))
-}
-
 /// The relation, for one shape (design spec §2).
 fn classify(seq: &[Inline]) -> Structure {
     let Some((ir, got)) = context_walks(seq) else {
@@ -480,7 +472,7 @@ fn classify(seq: &[Inline]) -> Structure {
 }
 ```
 
-This differs from what was originally planned: the task review found this render/gate/walk setup duplicated verbatim against Task 2's `the_two_context_walks_align_character_for_character`, and the finding was ruled to govern over the plan text, so both now call the shared `context_walks` helper above.
+This differs from what was originally planned: the task review found this render/gate/walk setup duplicated verbatim against Task 2's `the_two_context_walks_align_character_for_character`, and the finding was ruled to govern over the plan text, so both now call a shared `context_walks` helper instead. That helper, and its `ContextWalk` alias, moved into Task 2 alongside the alignment test that first needed them; `classify` above reuses them rather than repeating the render/gate/walk sequence.
 
 - [ ] **Step 2: Write the ratchet helper and the structural assertion**
 
@@ -611,7 +603,14 @@ grep -c 'Emph(\[Emph(' crates/kasane-writer/tests/census-inexpressible.txt
 grep -c 'Emph(\[Strong(' crates/kasane-writer/tests/census-known-structure-corrupt.txt
 ```
 
-Expected: a non-zero count in each. Direct same-class nesting is permanent; mixed-class nesting is a queued defect (design spec §6). If `Emph([Strong(` appears in the *inexpressible* file, condition 1 is miswired — that family is fixable via `***a***` and must stay in the queue.
+Expected: a non-zero count in each. Direct same-class nesting is permanent; mixed-class nesting is a queued defect (design spec §6). If the bare, length-1 shape `[Emph([Strong([Text("a")])])]` appears in the *inexpressible* file, condition 1 is miswired — that family is fixable via `***a***` and must stay in the queue:
+
+```bash
+grep -xc '\[Emph(\[Strong(\[Text("a")\])\])\]' crates/kasane-writer/tests/census-inexpressible.txt
+grep -xc '\[Strong(\[Emph(\[Text("a")\])\])\]' crates/kasane-writer/tests/census-inexpressible.txt
+```
+
+Expected: **0** in each. (A plain `grep -c 'Emph(\[Strong('` over the whole *inexpressible* file over-fires: the pattern also matches inside longer shapes where the mixed-class element sits mid-run, un-touched by `edge_to_splice` (edge-only, keyed on the delimiter character) or `same_delim_to_splice` (same-`Delim` only) — it survives rendering intact and contributes no mismatch itself, and the file only lists that shape because a *different*, genuinely direct same-class element elsewhere in the same sequence earned it. Scoping the check to the bare length-1 shape avoids that false fire.)
 
 - [ ] **Step 6: Run the full check**
 
