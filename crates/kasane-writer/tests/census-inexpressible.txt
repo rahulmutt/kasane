@@ -2,7 +2,14 @@
 #
 # Two mechanisms, both forced by spelling emphasis with `*` alone:
 #
-#   `<em><em>x</em></em>`         -- `**x**` is strong, not nested emphasis.
+#   same-class nesting            -- a container whose sole child is the same
+#                                     class collapses: `<em><em>x</em></em>`
+#                                     prints `*x*`, not nested emphasis, and
+#                                     `<strong><strong>x</strong></strong>`
+#                                     prints `**x**`, not doubly strong --
+#                                     `****x****` is never what the writer
+#                                     prints, because the nested container is
+#                                     merged away before printing.
 #   `<strong><em>x</em></strong>` -- `***x***` is the only run that could carry
 #                                    both levels, and CommonMark's tie-break
 #                                    always resolves it em-outermost.
@@ -14,10 +21,11 @@
 # No writer change can close these, which is why they are not in the queue
 # (`census-known-structure-corrupt.txt`).
 #
-# COMPUTED, never hand-edited. A shape lands here only if it BOTH nests one of
-# the two shapes above directly AND differs from the IR only by collapsing
-# adjacent identical classes and dropping an emphasis directly inside a strong.
-# Stop satisfying either and it moves back to the queue on the next bless. See
+# COMPUTED, never hand-edited. A shape lands here only if it BOTH nests,
+# directly, a same-class container or a `<strong>` whose sole child is an
+# `<em>`, AND differs from the IR only by collapsing adjacent identical
+# classes and dropping an emphasis directly inside a strong. Stop satisfying
+# either and it moves back to the queue on the next bless. See
 # `docs/superpowers/specs/2026-08-16-cross-class-edge-splice-design.md` §4.
 #
 # Regenerate: KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census

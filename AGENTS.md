@@ -319,21 +319,25 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `census-inexpressible.txt` is permanent, holding shapes Markdown cannot
   express at any level (`<em><em>x</em></em>` has no spelling — `**x**` is
   strong). The split between those two files is **computed on every bless,
-  never hand-edited**: a shape is permanent only if it both nests one of the
-  two unspellable shapes directly — `<em><em>x</em></em>` or
-  `<strong><em>x</em></strong>` — and differs from the IR only by collapsing
-  adjacent identical classes and dropping an emphasis directly inside a
-  strong. The asymmetry is deliberate: `<em><strong>x</strong></em>` IS
-  spellable, and keeping it out of the permanent file is what stops a
-  regression laundering itself as a representational limit.
+  never hand-edited**: a shape is permanent only if it both nests, directly, a
+  same-class container (`<em><em>x</em></em>` or
+  `<strong><strong>x</strong></strong>`) or a `<strong>` whose sole child is
+  an `<em>`, and differs from the IR only by collapsing adjacent identical
+  classes and dropping an emphasis directly inside a strong. The asymmetry is
+  deliberate: `<em><strong>x</strong></em>` IS spellable, and keeping it out
+  of the permanent file is what stops a regression laundering itself as a
+  representational limit.
   One bless command rewrites all three. Design spec
   `2026-08-16-structural-census-design.md`; its §6 recorded the largest queued
   family, 2,002 shapes losing a level because
   `splice_children`'s edge rule keys on the delimiter character and
-  `Delim::ch()` maps both classes to `*`. That family is closed:
-  `2026-08-16-cross-class-edge-splice-design.md` narrows the edge rule so
+  `Delim::ch()` maps both classes to `*`.
+  `2026-08-16-cross-class-edge-splice-design.md` narrows that edge rule so
   `Emph[Strong[x]]` prints `***x***`, and files the mirror shape permanent
-  because `***x***` always resolves em-outermost.
+  because `***x***` always resolves em-outermost: 366 of the 2,002 went clean
+  and 748 moved to the permanent file, leaving 888 still queued -- most of
+  them blocked by `run_end` fusing the shape with a `*`-delimited neighbour
+  (that spec's §6).
 - Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
   (64) is a fidelity bound that flattens without losing content;
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's

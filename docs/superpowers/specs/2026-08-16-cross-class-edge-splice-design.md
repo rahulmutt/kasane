@@ -355,8 +355,12 @@ to re-bless.
 
 ## 6. Non-goals
 
-- **Draining the family to zero.** ~1,056 shapes are inexpressible with `*`
-  alone. They move file, not state.
+- **Draining the family to zero.** Measured, 748 shapes moved from the queue
+  to the permanent file — not all of the family that is inexpressible with
+  `*` alone. The other 340 (246 `Strong([Emph(`-only plus 94 carrying both
+  orders, both below) satisfy condition 1 but fail condition 2's
+  `differs_only_by_erasure`, so they move file, not state, and stay queued
+  instead.
 - **The single-edge configurations.** §3.4's first rejected approach. They stay
   spliced and stay in the queue, along with `Emph[Text(" "), Strong[a]]`, which
   `emphasize` would make safe by trimming the space outward. Both are
@@ -380,25 +384,29 @@ to re-bless.
       adjacent, which is common at the census's length-3 sequences. Fusion
       destroys `sole_child_nests_canonically`'s sole-printing-child
       precondition (§3.2) before it is ever asked whether the member's own
-      nesting is canonical, so the exemption cannot fire. Which rule then
-      splices the target's `Strong` away depends on which member prints
-      first in the fused run, since that decides the run's class and markup
-      (`markdown.rs:287–297`):
-      - **302 (55%)** land in a run classed `Emph` (a real `Emph` sibling
-        prints first), so the ordinary edge rule (`edge_to_splice`) removes
-        the target's `Strong` outright and the bold text disappears
-        entirely — `[Text("a"), Emph([Text("a")]),
-        Emph([Strong([Text("a")])])]` prints `"a*aa*"`, no `**` anywhere.
-      - **118 (22%)** land in a run classed `Strong` (a real `Strong`
-        sibling prints first), so the target's own `Strong` is now nested
-        *inside* a run of its own class and `same_delim_to_splice` removes
-        it the way it always removes same-class nesting, unconditionally —
-        the letter survives but merges into the neighbour's own bold run
-        with no trace of the original `Emph[Strong[…]]` boundary —
-        `[Text("a"), Strong([Text("a")]), Emph([Strong([Text("a")])])]`
-        prints `"a**aa**"`.
-      - **10** carry more than one `Emph[Strong[…]]` occurrence and land in
-        both outcomes across the different occurrences in the same shape.
+      nesting is canonical, so the exemption cannot fire — the letter's
+      bold survives or not depending on which member prints first in the
+      fused run, e.g. `[Text("a"), Emph([Text("a")]),
+      Emph([Strong([Text("a")])])]` prints `"a*aa*"` (no `**` anywhere) while
+      `[Text("a"), Strong([Text("a")]), Emph([Strong([Text("a")])])]` prints
+      `"a**aa**"` (the letter survives bold, merged into the neighbour's own
+      run, with no trace of the original `Emph[Strong[…]]` boundary).
+
+      A finer question — which of `splice_children`'s two rules
+      (`edge_to_splice` or `same_delim_to_splice`) removes the target's
+      `Strong` in each fused case — was drafted here as a 302/118/10
+      sub-split of the 430, partitioned by which run class the fused run
+      took. That sub-split is cut: it has been reproduced by nobody but its
+      author, and its bucket *definition* (partition by run class) does not
+      match its bucket *description* (attribution by which rule fired). The
+      `"a**aa**"` case above is the concrete counterexample — the run is
+      classed `Strong`, but the target's `Strong` sits at an edge of the
+      run's children, so `edge_to_splice` finds and removes it first via
+      `splice_children`'s `.or_else`, before `same_delim_to_splice` ever gets
+      a candidate; the earlier draft attributed it to `same_delim_to_splice`.
+      The printed strings above are correct; which rule produced them is
+      left open, along with the rest of the finer split, for the item that
+      widens the alphabet (see the "Widening the alphabet" bullet below).
     - **118 (22%) are genuinely isolated** — no fused neighbour — and fail
       for the mechanism an earlier draft of this bullet named exclusively:
       `emphasis_run`'s left-flanking rule (`can_open`) declines to spell the
@@ -406,9 +414,7 @@ to re-bless.
       inner `**`'s punctuation, regardless of what §3.2's predicate decided
       — `[Text("a"), Emph([Strong([Text("a")])])]` prints `"a**a**"`.
 
-    (302 + 118 + 118 + 10 = 548; the two 118s are coincidentally equal and
-    name different populations — one is fused-but-visually-bold, the other
-    unfused-and-blocked.) Fusion, not left-flanking, is the mechanism behind
+    (430 + 118 = 548.) Fusion, not left-flanking, is the mechanism behind
     most of §5.1's 366-vs-~946 shortfall. Closing the fusion share is out of
     scope here: it means grouping `run_end` by `Delim` as well as character,
     or widening `sole_child_nests_canonically` to survive fusion — not

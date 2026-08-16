@@ -144,6 +144,11 @@ fn cross_class_nesting_truncates_no_earlier_than_same_class() {
     let same_class = deepest_surviving(&nested);
     let cross_class = deepest_surviving(&nested_alternating);
 
+    assert!(
+        same_class.is_some(),
+        "the same-class helper survived no depth at all -- the comparison below would pass vacuously"
+    );
+
     // Measured at MAX_INLINE_DEPTH == 256: both are Some(255). The depth
     // guard (`markdown.rs`'s `depth >= MAX_INLINE_DEPTH`) fires on the input
     // IR's structural depth, walked before any splicing decision, so the

@@ -539,6 +539,13 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<usize> {
 /// census can prove: the wider single-edge cases (`*a**b***`) also round-trip,
 /// but most of what that would license is unreachable by the census alphabet,
 /// so it is deliberately left out (design spec §3.2 and §3.4).
+///
+/// Relies on a caller invariant: with `want == Delim::Emph`, a child with no
+/// `Delim` at all (e.g. `Backtick`) would pass both checks above and reach
+/// the sole-printing-child test undistinguished from a real `Strong` — it is
+/// excluded only because [`edge_to_splice`] calls this after already
+/// filtering `idx` on `escape::delim(children[idx].0).map(escape::Delim::ch)
+/// == Some(ch)`, which no `Backtick` satisfies.
 fn sole_child_nests_canonically(children: &[Flat<'_>], idx: usize, want: escape::Delim) -> bool {
     if want != escape::Delim::Emph || escape::delim(children[idx].0) == Some(want) {
         return false;
