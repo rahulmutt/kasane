@@ -474,13 +474,22 @@ fn nests_strong_over_emph_directly(seq: &[Inline]) -> bool {
 /// Whether every difference between the two walks disappears under the two
 /// erasures `*` alone forces. Condition 2 of the split (design spec §4).
 ///
-/// Two normalizations, not one: adjacent identical classes collapse
+/// Two rules, not one: adjacent identical classes collapse
 /// (`<em><em>x</em></em>` has no spelling), and an `Em` directly inside a `St`
-/// is dropped (`<strong><em>x</em></strong>` has none either). Applied to both
-/// walks and iterated to a fixpoint, because a stack can need both — `[St, Em,
-/// Em]` collapses to `[St, Em]` and only then drops to `[St]`, and doing the
-/// two steps once in the other order leaves `[St, Em]` and files a genuinely
-/// unspellable shape corrupt.
+/// is dropped (`<strong><em>x</em></strong>` has none either). A stack can need
+/// both — `[St, Em, Em]` must reach `[St]`, and a pass applying only one of the
+/// two rules, or applying them as two separate sweeps in the wrong order, would
+/// stop at `[St, Em]` and file a genuinely unspellable shape corrupt.
+///
+/// Both rules run in one scan, each element tested against the last *kept*
+/// element rather than its original predecessor, and that is what lets a single
+/// pass reach the fixpoint: `[St, Em, Em]` drops both `Em`s against the same
+/// kept `St` and yields `[St]` directly, never materialising the `[St, Em]` a
+/// two-sweep version would. A pass's output is a fixpoint by construction —
+/// nothing is pushed after an element it equals, or after a `St` it would be
+/// dropped against — so the loop confirms and exits. It is kept as a cheap
+/// guard rather than a live iteration: add a third rule or a third class and
+/// one-pass sufficiency stops being obvious, while the loop is already correct.
 ///
 /// A **drop**, not a reorder. The writer leaves `Strong[Emph[x]]` spliced, so
 /// it prints `**x**` and a parser recovers `[St]` against an IR of `[St, Em]`
