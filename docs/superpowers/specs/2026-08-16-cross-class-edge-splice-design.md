@@ -80,11 +80,31 @@ is always em-outermost. `Emph[Strong[x]]` is what the tie-break produces.
 
 `census.rs`'s alphabet contains exactly two cross-class elements, `em(st(t))`
 and `st(em(t))`, both single-child. A sequence element that is one of those
-forms a run of one member whose entire content is the inner container — whole-run
-coverage. Adjacent-run fusion reaches a few of the single-edge configurations
-(`[Emph[Strong[a]], Emph[Text("b")]]` fuses to one run with a head-edge
-collision), but the mass of the 2,002 sits in the two whole-run rows, which is
-why a rule covering only those rows wins nearly the whole expressible half.
+forms a run of one member whose entire content is the inner container —
+whole-run coverage, considering that member in isolation. The mass of the
+2,002 shapes genuinely does sit in the two whole-run rows by member type:
+most of the family is built by placing one of these two single-child
+elements somewhere in a length-1-to-3 sequence, not by constructing a
+multi-child single-edge shape directly.
+
+**That does not mean a rule covering only those two rows wins nearly the
+whole expressible half — an earlier draft of this section argued exactly
+that, and it was wrong.** `run_end` (§6 below) groups a delimiter run by
+**character**, not by `Delim`: any `*`-delimited neighbour — `Emph` or
+`Strong`, whichever class — fuses with a whole-run-coverage member the
+moment the two sit next to each other in the same short sequence, which is
+common once sequences reach length 3. Fusion destroys the very thing
+"whole-run coverage" was standing in for — `sole_child_nests_canonically`'s
+sole-printing-child precondition — before `edge_to_splice` or
+`same_delim_to_splice` ever asks whether the member's own content nests
+canonically. Measured directly, by rendering the actual post-fix queue
+family through the real writer (§6): of the 548 queued shapes containing
+`Emph[Strong[…]]`, only 118 (22%) are genuinely isolated in this sense; 430
+(78%) sit next to a real `*`-delimited neighbour and fuse with it. Fusion,
+not the writer's left-flanking rule on its own, is what keeps most of the
+family from round-tripping — §6 gives the full measured split, including
+what happens to the ones that do fuse. §5.1 records what the gap between
+this section's estimate and the measured result costs the fix's coverage.
 
 ## 3. The change
 
@@ -264,7 +284,10 @@ caught, because condition 2 is what is actually doing the work:
 `differs_only_by_erasure` fails on the `[Emph, Strong]`-vs-`[Emph]` mismatch
 at the regressed position independent of what condition 1 concludes elsewhere
 in the shape. The same holds for the 110 shapes carrying both cross-class
-orders: they qualify as inexpressible on their `Strong`-outer half, but a
+orders anywhere in the census's full alphabet (§1's pre-fix count, not §6's
+94 — those are the subset of the 110 that are still queued after this item's
+fix; the other 16 moved to the permanent file and none are in the text-tier
+allowlist): they qualify as inexpressible on their `Strong`-outer half, but a
 regression in their `Emph`-outer half survives normalization and breaks
 condition 2 just the same.
 
@@ -292,13 +315,18 @@ whole-child cross-class forms dominate and reasoned the fix should win "nearly
 the whole expressible half" — informally, ~946 shapes going clean against a
 queue drained to ~810. The measured result is 366 clean against a queue of
 1,698: roughly a third of the predicted win, not nearly all of it. The gap is
-not a miscount; it is a mechanism §2.1 did not model. §6 names it: 548 of the
-queued shapes contain the fixed `Emph[Strong[…]]` pattern and still fail to
-round-trip, not because `splice_children` mis-splices them but because
-`emphasis_run`'s left-flanking rule declines to spell the outer `*` at all for
-most of them, upstream of and independent of the splice decision. §2.1 counted
-occurrences of the pattern; it did not check whether the surrounding context
-lets the writer spell the delimiter once the splice is correctly declined.
+not a miscount; it is two mechanisms behind §6's 548-shape residual, and the
+dominant one is not the one an earlier draft of this section named. §6 gives
+the measured split, obtained by rendering the queue's actual 548-shape
+`Emph[Strong[…]]`-only family through the real writer: 430 of them (78%)
+**fuse** with an adjacent `*`-delimited sibling elsewhere in the same short
+sequence — `run_end` groups by character, not `Delim` (§2.1, §6) — which
+destroys the sole-printing-child precondition the exemption needs before the
+splice rules ever run. Only 118 (22%) are the isolated case originally
+described here, blocked purely by `emphasis_run`'s left-flanking rule
+(`can_open`) with no fusion involved. §2.1 counted occurrences of the
+pattern; it did not check whether a same-character neighbour was standing
+next to most of them.
 
 ### 5.2 Pinned relation edges
 
@@ -340,22 +368,56 @@ to re-bless.
     `2026-08-16-structural-census-design.md` §8 already flags as having no
     named mechanism. This item does not diagnose it.
   - **548** contain `Emph([Strong(` only — a residual family this item does
-    not close, and one §2.1 did not anticipate. `splice_children`'s edge rule
-    is not what withholds these: `emphasis_run`'s left-flanking rule
-    (`markdown.rs`'s `can_open`) governs whether the outer `*` gets spelled at
-    all, upstream of and independent of §3's splice decision. With a bare
-    letter immediately before the run, the outer `*` is preceded by a letter
-    (`Flank::Other`) and followed by the inner `**` (`Flank::Punct`);
-    `can_open` requires the delimiter not be followed by punctuation, or, if
-    it is, not be preceded by a letter/digit — this case fails both, so the
-    run is not left-flanking and `emphasis_run` renders the children bare
-    regardless of what §3.2's predicate decided. This is the mechanism behind
-    §5.1's 366-vs-~946 shortfall, and it is out of scope here: closing it
-    means changing `emphasis_run` or its callers, not `splice_children`.
+    not close, and one §2.1's original draft mis-explained. Measured by
+    rendering every one of the 548 through the real writer (not inferred
+    from reading the splice code alone), two mechanisms are in play, and
+    `splice_children`'s edge rule is demonstrably the majority one — the
+    opposite of what an earlier draft of this bullet claimed:
+    - **430 (78%) fuse with an adjacent `*`-delimited sibling.** `run_end`
+      (`markdown.rs:454-466`) groups a run by delimiter **character**, not
+      by `Delim`: any neighbouring `Emph` or `Strong`, regardless of class,
+      merges into the same run as the target member the moment the two are
+      adjacent, which is common at the census's length-3 sequences. Fusion
+      destroys `sole_child_nests_canonically`'s sole-printing-child
+      precondition (§3.2) before it is ever asked whether the member's own
+      nesting is canonical, so the exemption cannot fire. Which rule then
+      splices the target's `Strong` away depends on which member prints
+      first in the fused run, since that decides the run's class and markup
+      (`markdown.rs:287–297`):
+      - **302 (55%)** land in a run classed `Emph` (a real `Emph` sibling
+        prints first), so the ordinary edge rule (`edge_to_splice`) removes
+        the target's `Strong` outright and the bold text disappears
+        entirely — `[Text("a"), Emph([Text("a")]),
+        Emph([Strong([Text("a")])])]` prints `"a*aa*"`, no `**` anywhere.
+      - **118 (22%)** land in a run classed `Strong` (a real `Strong`
+        sibling prints first), so the target's own `Strong` is now nested
+        *inside* a run of its own class and `same_delim_to_splice` removes
+        it the way it always removes same-class nesting, unconditionally —
+        the letter survives but merges into the neighbour's own bold run
+        with no trace of the original `Emph[Strong[…]]` boundary —
+        `[Text("a"), Strong([Text("a")]), Emph([Strong([Text("a")])])]`
+        prints `"a**aa**"`.
+      - **10** carry more than one `Emph[Strong[…]]` occurrence and land in
+        both outcomes across the different occurrences in the same shape.
+    - **118 (22%) are genuinely isolated** — no fused neighbour — and fail
+      for the mechanism an earlier draft of this bullet named exclusively:
+      `emphasis_run`'s left-flanking rule (`can_open`) declines to spell the
+      outer `*` because it is preceded by a letter and followed by the
+      inner `**`'s punctuation, regardless of what §3.2's predicate decided
+      — `[Text("a"), Emph([Strong([Text("a")])])]` prints `"a**a**"`.
+
+    (302 + 118 + 118 + 10 = 548; the two 118s are coincidentally equal and
+    name different populations — one is fused-but-visually-bold, the other
+    unfused-and-blocked.) Fusion, not left-flanking, is the mechanism behind
+    most of §5.1's 366-vs-~946 shortfall. Closing the fusion share is out of
+    scope here: it means grouping `run_end` by `Delim` as well as character,
+    or widening `sole_child_nests_canonically` to survive fusion — not
+    changing the edge rule this item already narrowed.
   - **246** contain `Strong([Emph(` only — these satisfy condition 1 (§4) but
     fail condition 2's `differs_only_by_erasure`, so they stay queued rather
     than moving to the permanent file.
-  - **94** carry both orders.
+  - **94** carry both orders — the post-fix queue subset of §1's pre-fix,
+    whole-alphabet count of 110 (§4 disambiguates the two).
 - **Widening the alphabet**, and therefore also **making condition 1
   per-position**. Both belong to the item that widens, per the 2a spec's §8.
 - **Block structure and the merged-table HTML path.** Items 2c and 2b.
