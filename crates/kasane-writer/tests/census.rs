@@ -367,6 +367,35 @@ fn the_structural_relation_marks_direct_same_class_nesting_inexpressible() {
     assert_eq!(classify(&seq), Structure::Inexpressible);
 }
 
+/// The second permanent mechanism, and the one this item adds.
+///
+/// `<strong><em>a</em></strong>` has no `*`-only spelling: `***a***` is the
+/// only run that could carry both levels, and CommonMark's tie-break always
+/// resolves it em-outermost. Spelling it needs `**_a_**`, and alternating `*`
+/// with `_` is rejected by three specs. Permanent, not queued.
+#[test]
+fn the_structural_relation_marks_strong_over_emph_inexpressible() {
+    let seq = vec![Inline::Strong(vec![Inline::Emph(vec![Inline::Text(
+        "a".into(),
+    )])])];
+    assert_eq!(classify(&seq), Structure::Inexpressible);
+}
+
+/// The guard that matters most.
+///
+/// The converse shape *is* spellable — `***a***` — and is fixed in the writer
+/// (`2026-08-16-cross-class-edge-splice-design.md` §3). This asserts it is
+/// neither corrupt nor permanent, so it fails loudly if the fix regresses
+/// *and* if condition 1 ever loses its direction and starts laundering the
+/// fixed family into the permanent file.
+#[test]
+fn the_structural_relation_keeps_emph_over_strong_clean() {
+    let seq = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Text(
+        "a".into(),
+    )])])];
+    assert_eq!(classify(&seq), Structure::Clean);
+}
+
 const STRUCTURE_ALLOWLIST: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/census-known-structure-corrupt.txt"
@@ -417,21 +446,73 @@ fn nests_same_class_directly(seq: &[Inline]) -> bool {
     })
 }
 
-/// Whether every difference between the two walks disappears once adjacent
-/// identical classes are collapsed. Condition 2 of the split (design spec §4).
-fn differs_only_by_collapse(ir: &[(char, Vec<Emphasis>)], got: &[(char, Vec<Emphasis>)]) -> bool {
-    fn collapse(v: &[Emphasis]) -> Vec<Emphasis> {
-        let mut out: Vec<Emphasis> = Vec::new();
-        for &e in v {
-            if out.last() != Some(&e) {
-                out.push(e);
-            }
+/// Whether `seq` holds a `Strong` whose **sole** child is an `Emph`.
+///
+/// The second disjunct of condition 1 (design spec §4). Directional on
+/// purpose: `***x***` always resolves em-outermost, so
+/// `<strong><em>x</em></strong>` has no `*`-only spelling, while
+/// `<em><strong>x</strong></em>` has one and the writer now prints it.
+/// Matching both orders here would let a regression of the fixed family
+/// launder itself into the permanent file, which is the one failure this
+/// split must not have.
+///
+/// Scoped to the whole shape for the same reason its sibling is, and carrying
+/// the same residual risk — see `2026-08-16-structural-census-design.md` §8,
+/// and §7 of this item's spec for what a second predicate costs the
+/// per-position conversion.
+fn nests_strong_over_emph_directly(seq: &[Inline]) -> bool {
+    seq.iter().any(|i| match i {
+        Inline::Strong(x) => {
+            matches!(x.as_slice(), [Inline::Emph(_)]) || nests_strong_over_emph_directly(x)
         }
-        out
+        Inline::Emph(x) => nests_strong_over_emph_directly(x),
+        Inline::Link { inlines, .. } => nests_strong_over_emph_directly(inlines),
+        _ => false,
+    })
+}
+
+/// Whether every difference between the two walks disappears under the two
+/// erasures `*` alone forces. Condition 2 of the split (design spec §4).
+///
+/// Two normalizations, not one: adjacent identical classes collapse
+/// (`<em><em>x</em></em>` has no spelling), and an `Em` directly inside a `St`
+/// is dropped (`<strong><em>x</em></strong>` has none either). Applied to both
+/// walks and iterated to a fixpoint, because a stack can need both — `[St, Em,
+/// Em]` collapses to `[St, Em]` and only then drops to `[St]`, and doing the
+/// two steps once in the other order leaves `[St, Em]` and files a genuinely
+/// unspellable shape corrupt.
+///
+/// A **drop**, not a reorder. The writer leaves `Strong[Emph[x]]` spliced, so
+/// it prints `**x**` and a parser recovers `[St]` against an IR of `[St, Em]`
+/// — the level is deleted, not swapped. Nothing prints `***x***` for a
+/// `Strong`-outer shape, so a reorder normalization would never fire.
+///
+/// The drop's direction is half the laundering guard. If the writer regresses
+/// and `Emph[Strong[x]]` loses its `<strong>`, the stacks are `[Em, St]`
+/// against `[Em]`; this drops an `Em` that follows a `St`, not a `St` that
+/// follows an `Em`, so the walks stay unequal and the shape lands in the
+/// queue where the ratchet fails the build.
+fn differs_only_by_erasure(ir: &[(char, Vec<Emphasis>)], got: &[(char, Vec<Emphasis>)]) -> bool {
+    fn normalize(v: &[Emphasis]) -> Vec<Emphasis> {
+        let mut cur = v.to_vec();
+        loop {
+            let mut out: Vec<Emphasis> = Vec::new();
+            for &e in &cur {
+                match out.last() {
+                    Some(&last) if last == e => {}
+                    Some(&Emphasis::St) if e == Emphasis::Em => {}
+                    _ => out.push(e),
+                }
+            }
+            if out == cur {
+                return out;
+            }
+            cur = out;
+        }
     }
     ir.iter()
         .zip(got)
-        .all(|(x, y)| collapse(&x.1) == collapse(&y.1))
+        .all(|(x, y)| normalize(&x.1) == normalize(&y.1))
 }
 
 /// The relation, for one shape (design spec §2).
@@ -443,7 +524,9 @@ fn classify(seq: &[Inline]) -> Structure {
     if ir.iter().zip(&got).all(|(x, y)| x.1 == y.1) {
         return Structure::Clean;
     }
-    if nests_same_class_directly(seq) && differs_only_by_collapse(&ir, &got) {
+    if (nests_same_class_directly(seq) || nests_strong_over_emph_directly(seq))
+        && differs_only_by_erasure(&ir, &got)
+    {
         return Structure::Inexpressible;
     }
     Structure::Corrupt
@@ -499,16 +582,25 @@ fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str
 const INEXPRESSIBLE_HEADER: &str = "\
 # Shapes whose structure Markdown cannot express, at any level.
 #
-# `<em><em>x</em></em>` has no CommonMark spelling: `**x**` is strong, not
-# nested emphasis. No writer change can close these, which is why they are not
-# in the queue (`census-known-structure-corrupt.txt`) -- 1,236 unclosable
-# entries there would make \"shrink to zero\" meaningless.
+# Two mechanisms, both forced by spelling emphasis with `*` alone:
 #
-# COMPUTED, never hand-edited. A shape lands here only if it BOTH contains a
-# container whose sole child is a same-class container AND differs from the IR
-# only by collapsing adjacent identical classes. Stop satisfying either and it
-# moves back to the queue on the next bless. See
-# `docs/superpowers/specs/2026-08-16-structural-census-design.md` §4.
+#   `<em><em>x</em></em>`         -- `**x**` is strong, not nested emphasis.
+#   `<strong><em>x</em></strong>` -- `***x***` is the only run that could carry
+#                                    both levels, and CommonMark's tie-break
+#                                    always resolves it em-outermost.
+#
+# The converse of the second, `<em><strong>x</strong></em>`, IS spellable and
+# is not here -- the writer prints `***x***` for it. That asymmetry is what
+# keeps a regression of the fixed family out of this file.
+#
+# No writer change can close these, which is why they are not in the queue
+# (`census-known-structure-corrupt.txt`).
+#
+# COMPUTED, never hand-edited. A shape lands here only if it BOTH nests one of
+# the two shapes above directly AND differs from the IR only by collapsing
+# adjacent identical classes and dropping an emphasis directly inside a strong.
+# Stop satisfying either and it moves back to the queue on the next bless. See
+# `docs/superpowers/specs/2026-08-16-cross-class-edge-splice-design.md` §4.
 #
 # Regenerate: KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census
 ";

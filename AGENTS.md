@@ -319,8 +319,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `census-inexpressible.txt` is permanent, holding shapes Markdown cannot
   express at any level (`<em><em>x</em></em>` has no spelling — `**x**` is
   strong). The split between those two files is **computed on every bless,
-  never hand-edited**: a shape is permanent only if it both nests a same-class
-  container directly and differs only by collapsing adjacent identical classes.
+  never hand-edited**: a shape is permanent only if it both nests one of the
+  two unspellable shapes directly — `<em><em>x</em></em>` or
+  `<strong><em>x</em></strong>` — and differs from the IR only by collapsing
+  adjacent identical classes and dropping an emphasis directly inside a
+  strong. The asymmetry is deliberate: `<em><strong>x</strong></em>` IS
+  spellable, and keeping it out of the permanent file is what stops a
+  regression laundering itself as a representational limit.
   One bless command rewrites all three. Design spec
   `2026-08-16-structural-census-design.md`; its §6 recorded the largest queued
   family, 2,002 shapes losing a level because
