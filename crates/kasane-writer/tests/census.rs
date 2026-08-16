@@ -149,6 +149,32 @@ fn trim_whitespace(v: &[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)] {
     &v[start..end]
 }
 
+/// A context walk's characters, each paired with its enclosing emphasis stack.
+type ContextWalk = Vec<(char, Vec<Emphasis>)>;
+
+/// Renders `seq`, gates on the text assertion, and returns both trimmed
+/// context walks -- or `None` if the text is already corrupt, in which case
+/// structure is not evaluated (design spec §2, "Gate").
+///
+/// Shared by the alignment guard below and `classify`: the guard is only
+/// evidence for what `classify` actually compares if both exercise the same
+/// render/gate/walk setup. Two independent copies of it could drift apart,
+/// and if they did, the guard would stop covering the walks `classify` uses.
+fn context_walks(seq: &[Inline]) -> Option<(ContextWalk, ContextWalk)> {
+    let md = kasane_writer::blocks_to_markdown(&[Block::Para(seq.to_vec())], &AssetBag::default());
+    let expected = kasane_gfm::rendered_text(seq);
+    if parsed_text(&md).trim() != expected.trim() {
+        return None;
+    }
+
+    let mut ir = Vec::new();
+    ir_context(seq, 0, &mut Vec::new(), &mut ir);
+    let ir = trim_whitespace(&ir).to_vec();
+    let got = parsed_context(&md);
+    let got = trim_whitespace(&got).to_vec();
+    Some((ir, got))
+}
+
 /// The second of the three guards (design spec §3).
 ///
 /// Where the text already matches, the two walks must produce the same
@@ -159,24 +185,15 @@ fn trim_whitespace(v: &[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)] {
 #[test]
 fn the_two_context_walks_align_character_for_character() {
     for seq in shapes() {
-        let md =
-            kasane_writer::blocks_to_markdown(&[Block::Para(seq.clone())], &AssetBag::default());
-        let expected = kasane_gfm::rendered_text(&seq);
-        if parsed_text(&md).trim() != expected.trim() {
+        let Some((ir, got)) = context_walks(&seq) else {
             // Text already corrupt: named by the text assertion, and structure
             // is not evaluated here (design spec §2, "Gate").
             continue;
-        }
-
-        let mut ir = Vec::new();
-        ir_context(&seq, 0, &mut Vec::new(), &mut ir);
-        let ir = trim_whitespace(&ir);
-        let got = parsed_context(&md);
-        let got = trim_whitespace(&got);
+        };
 
         assert_eq!(
-            context_text(ir),
-            context_text(got),
+            context_text(&ir),
+            context_text(&got),
             "the two walks disagree on characters for {seq:?}, so their \
              stacks cannot be compared positionally"
         );
@@ -395,22 +412,14 @@ fn differs_only_by_collapse(ir: &[(char, Vec<Emphasis>)], got: &[(char, Vec<Emph
 
 /// The relation, for one shape (design spec §2).
 fn classify(seq: &[Inline]) -> Structure {
-    let md = kasane_writer::blocks_to_markdown(&[Block::Para(seq.to_vec())], &AssetBag::default());
-    let expected = kasane_gfm::rendered_text(seq);
-    if parsed_text(&md).trim() != expected.trim() {
+    let Some((ir, got)) = context_walks(seq) else {
+        return Structure::Clean;
+    };
+
+    if ir.iter().zip(&got).all(|(x, y)| x.1 == y.1) {
         return Structure::Clean;
     }
-
-    let mut ir = Vec::new();
-    ir_context(seq, 0, &mut Vec::new(), &mut ir);
-    let ir = trim_whitespace(&ir);
-    let got = parsed_context(&md);
-    let got = trim_whitespace(&got);
-
-    if ir.iter().zip(got).all(|(x, y)| x.1 == y.1) {
-        return Structure::Clean;
-    }
-    if nests_same_class_directly(seq) && differs_only_by_collapse(ir, got) {
+    if nests_same_class_directly(seq) && differs_only_by_collapse(&ir, &got) {
         return Structure::Inexpressible;
     }
     Structure::Corrupt
