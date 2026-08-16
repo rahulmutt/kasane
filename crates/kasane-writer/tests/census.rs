@@ -34,7 +34,7 @@
 //! — the same exclusion `P13_WORDS` documents.
 
 use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::collections::BTreeSet;
 
 const ALLOWLIST: &str = concat!(
@@ -75,15 +75,23 @@ fn alphabet() -> Vec<Inline> {
     ]
 }
 
-/// The text a real parser recovers from `md`.
-fn parsed_text(md: &str) -> String {
+/// The oracle's options. Shared so the two parser walks cannot drift onto
+/// different option sets — `ENABLE_MATH` in one and not the other would move
+/// characters between `Event::Text` and `Event::InlineMath` and silently
+/// change what each walk counts.
+fn parser_options() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_MATH);
+    opts
+}
+
+/// The text a real parser recovers from `md`.
+fn parsed_text(md: &str) -> String {
     let mut out = String::new();
-    for ev in Parser::new_ext(md, opts) {
+    for ev in Parser::new_ext(md, parser_options()) {
         match ev {
             Event::Text(t) | Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => {
                 out.push_str(&t)
@@ -92,6 +100,87 @@ fn parsed_text(md: &str) -> String {
         }
     }
     out
+}
+
+/// Every character a real parser recovers, paired with the stack of emphasis
+/// containers enclosing it.
+///
+/// The third guard (design spec §3) is the `assert!` at the end: an unbalanced
+/// event stream means the comparison below it is meaningless, so it fails
+/// rather than returning a half-built vector.
+fn parsed_context(md: &str) -> Vec<(char, Vec<Emphasis>)> {
+    let mut stack: Vec<Emphasis> = Vec::new();
+    let mut out = Vec::new();
+    for ev in Parser::new_ext(md, parser_options()) {
+        match ev {
+            Event::Start(Tag::Emphasis) => stack.push(Emphasis::Em),
+            Event::Start(Tag::Strong) => stack.push(Emphasis::St),
+            Event::End(TagEnd::Emphasis | TagEnd::Strong) => {
+                stack.pop();
+            }
+            Event::Text(t) | Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => {
+                for c in t.chars() {
+                    out.push((c, stack.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        stack.is_empty(),
+        "unbalanced emphasis events parsing {md:?} — the structural \
+         comparison for this shape would be meaningless"
+    );
+    out
+}
+
+/// The slice with leading and trailing whitespace dropped, matching the
+/// `.trim()` the text assertion compares under. Without this the two vectors
+/// would be off by however much whitespace the writer added or the parser ate.
+fn trim_whitespace(v: &[(char, Vec<Emphasis>)]) -> &[(char, Vec<Emphasis>)] {
+    let start = v
+        .iter()
+        .position(|(c, _)| !c.is_whitespace())
+        .unwrap_or(v.len());
+    let end = v
+        .iter()
+        .rposition(|(c, _)| !c.is_whitespace())
+        .map_or(start, |i| i + 1);
+    &v[start..end]
+}
+
+/// The second of the three guards (design spec §3).
+///
+/// Where the text already matches, the two walks must produce the same
+/// characters in the same order — that is what makes a positional comparison of
+/// their stacks meaningful. This cannot fail by construction, which is exactly
+/// why it is asserted: if it ever does, some character is reaching one walk and
+/// not the other and every structural verdict is suspect.
+#[test]
+fn the_two_context_walks_align_character_for_character() {
+    for seq in shapes() {
+        let md =
+            kasane_writer::blocks_to_markdown(&[Block::Para(seq.clone())], &AssetBag::default());
+        let expected = kasane_gfm::rendered_text(&seq);
+        if parsed_text(&md).trim() != expected.trim() {
+            // Text already corrupt: named by the text assertion, and structure
+            // is not evaluated here (design spec §2, "Gate").
+            continue;
+        }
+
+        let mut ir = Vec::new();
+        ir_context(&seq, 0, &mut Vec::new(), &mut ir);
+        let ir = trim_whitespace(&ir);
+        let got = parsed_context(&md);
+        let got = trim_whitespace(&got);
+
+        assert_eq!(
+            context_text(ir),
+            context_text(got),
+            "the two walks disagree on characters for {seq:?}, so their \
+             stacks cannot be compared positionally"
+        );
+    }
 }
 
 /// Every sequence of length 1-3 over the alphabet.
