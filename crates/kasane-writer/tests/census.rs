@@ -21,6 +21,15 @@
 //! census`, and read the diff: it is the exact list of shapes your change
 //! fixed or broke, which is the evidence a reviewer wants.
 //!
+//! There are two tiers, and three files. The text tier above compares what a
+//! parser recovers against `kasane_gfm::rendered_text`. The **structural**
+//! tier compares, for each character, the stack of emphasis containers
+//! enclosing it on both sides, and runs only where the text tier already
+//! passes. `census-known-structure-corrupt.txt` is its queue, target zero;
+//! `census-inexpressible.txt` is permanent, holding shapes Markdown cannot
+//! express at any level. The split between those two files is computed on
+//! every bless, never hand-edited.
+//!
 //! # Why this alphabet
 //!
 //! Nineteen elements, chosen to put every delimiter class next to every other:
@@ -344,6 +353,20 @@ fn the_structural_relation_ignores_intentional_run_fusion() {
     assert_eq!(classify(&seq), Structure::Clean);
 }
 
+/// The relation names the third state, not only the other two.
+///
+/// `<em><em>x</em></em>` has no CommonMark spelling — `**x**` is strong, not
+/// nested emphasis — so this verdict is permanent rather than a queued
+/// defect. Pinning it here keeps the third state honest if the bless path
+/// ever breaks.
+#[test]
+fn the_structural_relation_marks_direct_same_class_nesting_inexpressible() {
+    let seq = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
+        "a".into(),
+    )])])];
+    assert_eq!(classify(&seq), Structure::Inexpressible);
+}
+
 const STRUCTURE_ALLOWLIST: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/census-known-structure-corrupt.txt"
@@ -375,6 +398,12 @@ enum Structure {
 /// `Emph[a, Emph[b], c]` round-trips correctly today, so filing it as permanent
 /// on the strength of condition 2 alone would bury a real regression if it ever
 /// broke.
+///
+/// Scoped to the whole shape, not to the mismatching position: this asks
+/// whether `seq` contains direct same-class nesting *anywhere*, not whether
+/// the position condition 2 is explaining is inside it. See design spec §8's
+/// residual risks for what that costs once the alphabet stops being
+/// single-child-only.
 fn nests_same_class_directly(seq: &[Inline]) -> bool {
     seq.iter().any(|i| match i {
         Inline::Emph(x) => {
@@ -426,9 +455,7 @@ fn classify(seq: &[Inline]) -> Structure {
 /// excuses.
 ///
 /// `#`-prefixed lines are comments, which is how the permanent file carries its
-/// header. The text allowlist keeps its own copy of this logic for now — it is
-/// the instrument two other items depend on, and re-pointing it is Task 4's
-/// step, gated separately.
+/// header.
 fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str>) {
     if std::env::var_os("KASANE_CENSUS_BLESS").is_some() {
         let mut body = header.unwrap_or("").to_string();
@@ -449,7 +476,8 @@ fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str
 
     assert!(
         new.is_empty(),
-        "{} shape(s) newly {noun}:\n{}",
+        "{} shape(s) newly {noun} -- bless them into {path} \
+         (KASANE_CENSUS_BLESS=1 does it for you):\n{}",
         new.len(),
         new.iter()
             .take(10)
