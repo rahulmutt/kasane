@@ -1,7 +1,7 @@
 # kasane — Cross-Class Edge Splice Design Spec
 
 **Date:** 2026-08-16
-**Status:** Designed, not implemented.
+**Status:** Implemented on branch `cross-class-edge-splice`.
 **Parent spec:** `2026-08-16-structural-census-design.md` (§6, "What this item
 finds and does not fix", which prices this defect at 2,002 shapes and hands it
 "its own item and its own design").
@@ -206,13 +206,31 @@ A **drop**, not a swap. §3 leaves `Strong[Emph[x]]` spliced, so it prints
 the level is deleted, not reordered. Nothing in this design ever prints
 `***x***` for a `Strong`-outer shape, so a swap normalization would never fire.
 
-One normalization rather than two arms, and iterated rather than applied once,
-because a shape can be erased both ways at once. `Strong[Emph[Emph[a]]]` prints
-`**a**`, giving an IR stack of `[Strong, Emph, Emph]` against a recovered
-`[Strong]`: collapse yields `[Strong, Emph]`, the drop then yields `[Strong]`,
-and the walks agree. Applying the two steps once in the other order leaves
-`[Strong, Emph]` and files a genuinely unspellable shape corrupt, which is why
-the fixpoint is specified rather than an order.
+One normalization, not two rules applied as separate sweeps, because a shape
+can need both erasures at once, and a two-sweep implementation — collapse
+every adjacent same-class pair across the whole stack, then drop every
+`Emph`-after-`Strong` across the whole stack, as two independent passes —
+would stall on some shapes. `Strong[Emph[Emph[a]]]` prints `**a**`, giving an
+IR stack of `[Strong, Emph, Emph]` against a recovered `[Strong]`: a naive
+two-sweep version collapses the two `Emph`s first to reach `[Strong, Emph]`,
+then drops in a second sweep to reach `[Strong]` — two passes, with `[Strong,
+Emph]` genuinely materialized in between.
+
+That is not what the implemented `differs_only_by_erasure` does, and the
+difference is worth stating precisely rather than glossing. It runs both
+rules in a single scan, testing each element against the last *kept* element
+of the output being built rather than against its original predecessor: both
+`Emph`s in `[Strong, Emph, Emph]` are tested against the same kept `Strong`
+and dropped in the same pass, so `[Strong, Emph]` is never materialized and
+the fixpoint is reached in one pass, not two. A pass's output is a fixpoint
+by construction — nothing is pushed after an element it equals, or after a
+`Strong` it would be dropped against — so the surrounding loop confirms the
+result is unchanged and exits without doing further work. The loop is kept as
+a cheap guard, not because this two-rule, two-class rule set needs genuine
+multi-pass iteration — it does not, for any shape the current alphabet can
+build — but because adding a third rule or a third class would make one-pass
+sufficiency stop being obvious, while the loop is already correct for that
+case too.
 
 ```rust
 if (nests_same_class_directly(seq) || nests_strong_over_emph_directly(seq))
@@ -222,16 +240,33 @@ if (nests_same_class_directly(seq) || nests_strong_over_emph_directly(seq))
 }
 ```
 
-**The laundering hazard is closed by condition 1's direction and by the drop's
-direction together.** If §3's fix regresses and `Emph[Strong[x]]` loses its
-`<strong>`, the IR stack is `[Emph, Strong]` against a recovered `[Emph]`. The
-drop removes an `Emph` preceded by a `Strong`, and this stack has a `Strong`
-preceded by an `Emph` — the normalization does not touch it, the walks stay
-unequal, and the shape satisfies neither condition-1 predicate. It lands in the
-queue, where the ratchet fails the build. The same holds for the 110 shapes
-carrying both orders: they qualify as inexpressible on their `Strong`-outer
-half, but a regression in their `Emph`-outer half survives normalization and
-breaks condition 2.
+**The laundering hazard is closed by condition 2's directional drop; condition
+1's direction is a secondary belt, not the primary guard.** If §3's fix
+regresses and `Emph[Strong[x]]` loses its `<strong>`, the IR stack is `[Emph,
+Strong]` against a recovered `[Emph]`. The drop removes an `Emph` immediately
+preceded by a `Strong`, never a `Strong` preceded by an `Emph`, and this stack
+has the latter — the normalization does not touch it, the walks stay unequal,
+the shape is `Corrupt`, and it lands in the queue where the ratchet fails the
+build, **whatever condition 1 concludes about the shape**.
+
+That last clause is load-bearing, not a flourish: condition 1 is scoped to the
+whole shape (§4's own recursion, §7), so it can be satisfied by same-class
+nesting that has nothing to do with the regression being reasoned about. 37
+shapes in the permanent file today contain both the fixed `Emph[Strong[x]]`
+pattern and an unrelated direct same-class nest (`Emph[Emph[…]]` or
+`Strong[Strong[…]]`) elsewhere in the same sequence, so
+`nests_same_class_directly` already holds for them independent of whether the
+`Emph[Strong[x]]` position regresses. A regressed shape drawn from that set
+does *not* have the property an earlier draft of this paragraph claimed for
+every regressed shape — "satisfies neither condition-1 predicate" — because it
+satisfies the same-class disjunct regardless of the regression. It is still
+caught, because condition 2 is what is actually doing the work:
+`differs_only_by_erasure` fails on the `[Emph, Strong]`-vs-`[Emph]` mismatch
+at the regressed position independent of what condition 1 concludes elsewhere
+in the shape. The same holds for the 110 shapes carrying both cross-class
+orders: they qualify as inexpressible on their `Strong`-outer half, but a
+regression in their `Emph`-outer half survives normalization and breaks
+condition 2 just the same.
 
 `INEXPRESSIBLE_HEADER` needs rewriting. It currently explains only
 `<em><em>x</em></em>` and says a shape lands in the file by containing a
@@ -242,15 +277,28 @@ same-class container, which stops being the whole truth.
 ### 5.1 Census
 
 The instrument is the existing one; this item re-blesses it and reads the diff.
-Predicted movement, **confirmed at bless and not asserted in advance**:
+Measured at bless:
 
 | file | before | after |
 |---|---|---|
 | `census-known-corrupt.txt` (text) | 32 | 32 |
-| `census-known-structure-corrupt.txt` (queue) | 2,812 | ~810 |
-| `census-inexpressible.txt` (permanent) | 1,236 | ~2,292 |
+| `census-known-structure-corrupt.txt` (queue) | 2,812 | 1,698 |
+| `census-inexpressible.txt` (permanent) | 1,236 | 1,984 |
 
-with ~946 shapes going clean.
+366 shapes went clean: `2,812 − 1,698 − (1,984 − 1,236) = 366`.
+
+That is well short of §2.1's estimate. §2.1 argued the alphabet's two
+whole-child cross-class forms dominate and reasoned the fix should win "nearly
+the whole expressible half" — informally, ~946 shapes going clean against a
+queue drained to ~810. The measured result is 366 clean against a queue of
+1,698: roughly a third of the predicted win, not nearly all of it. The gap is
+not a miscount; it is a mechanism §2.1 did not model. §6 names it: 548 of the
+queued shapes contain the fixed `Emph[Strong[…]]` pattern and still fail to
+round-trip, not because `splice_children` mis-splices them but because
+`emphasis_run`'s left-flanking rule declines to spell the outer `*` at all for
+most of them, upstream of and independent of the splice decision. §2.1 counted
+occurrences of the pattern; it did not check whether the surrounding context
+lets the writer spell the delimiter once the splice is correctly declined.
 
 ### 5.2 Pinned relation edges
 
@@ -285,9 +333,29 @@ to re-bless.
   spliced and stay in the queue, along with `Emph[Text(" "), Strong[a]]`, which
   `emphasize` would make safe by trimming the space outward. Both are
   deliberately conservative losses.
-- **The ~810 remaining queue entries.** The tail
-  `2026-08-16-structural-census-design.md` §8 already flags as having no named
-  mechanism. This item does not diagnose it.
+- **The queue's 1,698 remaining entries**, which measurement (§5.1) shows
+  decompose disjointly into four families rather than the single undiagnosed
+  tail this section originally named:
+  - **810** contain neither `Emph([Strong(` nor `Strong([Emph(` — the tail
+    `2026-08-16-structural-census-design.md` §8 already flags as having no
+    named mechanism. This item does not diagnose it.
+  - **548** contain `Emph([Strong(` only — a residual family this item does
+    not close, and one §2.1 did not anticipate. `splice_children`'s edge rule
+    is not what withholds these: `emphasis_run`'s left-flanking rule
+    (`markdown.rs`'s `can_open`) governs whether the outer `*` gets spelled at
+    all, upstream of and independent of §3's splice decision. With a bare
+    letter immediately before the run, the outer `*` is preceded by a letter
+    (`Flank::Other`) and followed by the inner `**` (`Flank::Punct`);
+    `can_open` requires the delimiter not be followed by punctuation, or, if
+    it is, not be preceded by a letter/digit — this case fails both, so the
+    run is not left-flanking and `emphasis_run` renders the children bare
+    regardless of what §3.2's predicate decided. This is the mechanism behind
+    §5.1's 366-vs-~946 shortfall, and it is out of scope here: closing it
+    means changing `emphasis_run` or its callers, not `splice_children`.
+  - **246** contain `Strong([Emph(` only — these satisfy condition 1 (§4) but
+    fail condition 2's `differs_only_by_erasure`, so they stay queued rather
+    than moving to the permanent file.
+  - **94** carry both orders.
 - **Widening the alphabet**, and therefore also **making condition 1
   per-position**. Both belong to the item that widens, per the 2a spec's §8.
 - **Block structure and the merged-table HTML path.** Items 2c and 2b.
@@ -310,15 +378,32 @@ Risks, recorded rather than closed:
   context — the exact seam the emphasis-seam item hardened. The census is
   exhaustive over sequences of length 1–3, so every neighbour pairing the
   alphabet can build is covered. Nothing covers length 4 and beyond.
-- **Inline depth.** Declining a splice keeps a container the old rule flattened,
-  so these shapes render one level deeper and shapes near `MAX_INLINE_DEPTH`
-  could truncate where they previously did not. `inline_depth.rs` is the check,
-  and it needs an explicit look rather than an assumption.
-- **The permanent file nearly doubles** and becomes the majority of the corrupt
-  set — ~2,292 permanent against ~810 queue. A reader can take that as the
-  project giving up. The mitigations are that the file is computed on every
-  bless, that §5.2's two edges assert the direction condition 1 rests on, and
-  that the header is rewritten to explain both mechanisms.
+- **Inline depth.** Declining a splice keeps a container the old rule
+  flattened, so these shapes render one level deeper and shapes near
+  `MAX_INLINE_DEPTH` could truncate where they previously did not.
+  `inline_depth.rs` is the check, and it needs an explicit look rather than an
+  assumption. **Measured, not assumed:** the deepest input depth at which
+  content survives is 255 for both a same-class chain and an alternating
+  cross-class chain — equal, so the retained container costs no headroom and
+  the risk is not realized. The reason is structural, not coincidental: the
+  writer's depth guard fires on the input IR's structural depth, walked
+  before any splicing decision, so declining a splice cannot consume depth
+  budget that guard has already accounted for. `inline_depth.rs`'s
+  `cross_class_nesting_truncates_no_earlier_than_same_class` pins this by
+  comparing the two helpers against each other rather than asserting a
+  literal depth, so the assertion survives any future change to
+  `MAX_INLINE_DEPTH`'s value.
+- **The permanent file nearly doubles** and becomes the majority of the
+  corrupt set. Predicted at ~2,292 permanent against a queue of ~810 (a ~74%
+  share); measured, the permanent file grew to 1,984 (up from 1,236, a gain of
+  748, not the ~1,056 predicted) against a queue of 1,698 (down from 2,812) —
+  a smaller majority, ~54% of the 3,682-shape corrupt set, than predicted, but
+  still a majority, because the queue also drained far less than §2.1
+  estimated. §5.1 and §6 record why. A reader can still take the permanent
+  file's growth as the project giving up. The mitigations are that the file is
+  computed on every bless, that §5.2's two edges assert the direction
+  condition 1 rests on, and that the header is rewritten to explain both
+  mechanisms.
 - **Sequencing.** That growth lands while the CI ratchet — the third residual
   item — is still unbuilt, and it is precisely the guard against a future bless
   laundering a shape into the permanent file. `ratchet()` today is a
@@ -335,8 +420,22 @@ Risks, recorded rather than closed:
   the same single-child reason that spec gives — no container holds both text
   and a nested container — but the per-position conversion deferred to the
   alphabet-widening item now has two predicates and one extra normalization step
-  to convert, not one predicate. If §5.1's permanent count comes back above
-  ~2,292, this is the first place to look.
+  to convert, not one predicate. **Measured: the permanent count came back at
+  1,984 entries, below the ~2,292 §5.1 predicted, so the hazard stayed
+  unreached at this alphabet.** A separate check turned up a pre-existing
+  blind spot in the plan rather than a new hazard: Task 2's Step 9 laundering
+  grep — which tests only whether a permanent-file shape contains
+  `Strong([Emph(` without also containing `Emph([Strong(` — returns 5 at
+  `8b9d05e`, the commit before this branch existed, so it was already a
+  false-positive source before this item started. It grew to 37 once Task 1's
+  §3 fix landed (`0ac2c48`) and stayed at 37 through Task 2's bless, so the
+  growth traces to the fix changing what round-trips, not to a laundered
+  classification during this item's blesses: those 37 shapes reach the
+  permanent file legitimately through `nests_same_class_directly` (condition
+  1's other disjunct) rather than through a laundered regression (see §4's
+  corrected laundering argument). The check that asks the intended question
+  — an `Emph`-outer shape in the permanent file with no justifying mechanism
+  at all, neither disjunct of condition 1 — returns 0.
 
 ## 8. What this fixes that was not the stated goal
 

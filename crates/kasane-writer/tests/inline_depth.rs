@@ -124,9 +124,11 @@ fn cross_class_nesting_within_the_bound_is_preserved() {
 /// bound sits.
 ///
 /// `take_while` assumes survival is monotonic in depth (once truncation
-/// starts, deeper inputs stay truncated); measured directly for both
-/// helpers over `1..=MAX_INLINE_DEPTH + 4`, each has exactly one
-/// survived→truncated transition, so the assumption holds here.
+/// starts, deeper inputs stay truncated); the scan below covers
+/// `1..=MAX_INLINE_DEPTH + 2` on every run, and each helper has exactly one
+/// survived→truncated transition in that range. A one-off manual check
+/// extended the scan to `MAX_INLINE_DEPTH + 4` and found no further
+/// transition, but that wider range is not what this test re-checks.
 #[test]
 fn cross_class_nesting_truncates_no_earlier_than_same_class() {
     let deepest_surviving = |build: &dyn Fn(usize) -> Inline| -> Option<usize> {
