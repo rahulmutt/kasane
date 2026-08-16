@@ -256,7 +256,7 @@ the bless path cannot make the instrument vacuous:
 - `[Emph[Text("a")], Emph[Text("b")]]` **is not** — adjacent-run fusion is
   intentional, and a check that flags it would be unusable.
 
-Three residual risks, recorded rather than closed:
+Four residual risks, recorded rather than closed:
 
 - **The known loss `*a *b* c*` is unreachable by this alphabet.** The census
   nests only through single-child alphabet elements, so no shape produces a
