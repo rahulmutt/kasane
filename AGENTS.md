@@ -308,6 +308,24 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census` and read
   the diff — that diff is the exact evidence a reviewer wants, of what a
   change fixed or broke.
+- The census has two tiers, and three files. The text tier above compares what
+  a parser recovers against `kasane_gfm::rendered_text`. The **structural**
+  tier compares, for each character, the stack of emphasis containers enclosing
+  it on both sides — a loss that leaves the text byte-identical (a `<strong>`
+  coming back as an `<em>`, a nesting level dropped) is invisible to the first
+  tier and caught by the second. It runs only where the text tier already
+  passes, since per-character alignment presupposes equal strings.
+  `census-known-structure-corrupt.txt` is its queue, target zero;
+  `census-inexpressible.txt` is permanent, holding shapes Markdown cannot
+  express at any level (`<em><em>x</em></em>` has no spelling — `**x**` is
+  strong). The split between those two files is **computed on every bless,
+  never hand-edited**: a shape is permanent only if it both nests a same-class
+  container directly and differs only by collapsing adjacent identical classes.
+  One bless command rewrites all three. Design spec
+  `2026-08-16-structural-census-design.md`; its §6 records the largest queued
+  family, 2,002 shapes in which `Emph[Strong[x]]` loses its `<strong>` because
+  `splice_children`'s edge rule keys on the delimiter character and
+  `Delim::ch()` maps both classes to `*`.
 - Inline nesting is bounded twice, deliberately. `epub::xhtml::MAX_INLINE_DEPTH`
   (64) is a fidelity bound that flattens without losing content;
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's

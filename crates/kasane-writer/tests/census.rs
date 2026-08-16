@@ -309,44 +309,39 @@ fn inline_text_survives_rendering_for_every_short_sequence() {
         }
     }
 
-    if std::env::var_os("KASANE_CENSUS_BLESS").is_some() {
-        let body: String = corrupt.iter().map(|l| format!("{l}\n")).collect();
-        std::fs::write(ALLOWLIST, body).expect("writing the allowlist");
-        return;
-    }
+    ratchet(ALLOWLIST, &corrupt, "corrupt", None);
+}
 
-    let known: BTreeSet<String> = std::fs::read_to_string(ALLOWLIST)
-        .expect("tests/census-known-corrupt.txt must exist -- bless it with KASANE_CENSUS_BLESS=1")
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect();
+/// The relation catches a class substitution — one of the two losses this tier
+/// exists for.
+///
+/// `[Emph("a"), Strong("b")]` prints `*ab*`: the run fuse merges the `Strong`
+/// into the `Em` run, and `b` comes back inside an `<em>` it was never in. The
+/// text is byte-identical either way, which is why the text assertion cannot
+/// see it.
+#[test]
+fn the_structural_relation_catches_a_class_substitution() {
+    let seq = vec![
+        Inline::Emph(vec![Inline::Text("a".into())]),
+        Inline::Strong(vec![Inline::Text("b".into())]),
+    ];
+    assert_eq!(classify(&seq), Structure::Corrupt);
+}
 
-    let new: Vec<&String> = corrupt.difference(&known).collect();
-    let fixed: Vec<&String> = known.difference(&corrupt).collect();
-
-    assert!(
-        new.is_empty(),
-        "{} shape(s) newly corrupt. Each of these renders to text a parser \
-         reads differently from `rendered_text`:\n{}",
-        new.len(),
-        new.iter()
-            .take(10)
-            .map(|s| format!("  {s}\n"))
-            .collect::<String>()
-    );
-    assert!(
-        fixed.is_empty(),
-        "{} allowlisted shape(s) are no longer corrupt -- delete them from \
-         tests/census-known-corrupt.txt (KASANE_CENSUS_BLESS=1 does it for \
-         you):\n{}",
-        fixed.len(),
-        fixed
-            .iter()
-            .take(10)
-            .map(|s| format!("  {s}\n"))
-            .collect::<String>()
-    );
+/// The relation stays silent on intentional fusion.
+///
+/// `[Emph("a"), Emph("b")]` prints `*ab*` too — one `<em>` over both — but
+/// every character keeps the class it had, so nothing was lost. Adjacent-run
+/// fusion is deliberate (`2026-08-15-adjacent-inline-fusion-design.md`); a
+/// check that flagged it would be unusable, and would have buried the shape
+/// above in thousands of false positives.
+#[test]
+fn the_structural_relation_ignores_intentional_run_fusion() {
+    let seq = vec![
+        Inline::Emph(vec![Inline::Text("a".into())]),
+        Inline::Emph(vec![Inline::Text("b".into())]),
+    ];
+    assert_eq!(classify(&seq), Structure::Clean);
 }
 
 const STRUCTURE_ALLOWLIST: &str = concat!(
