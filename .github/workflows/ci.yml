@@ -20,6 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # `mise run census-ratchet` resolves a merge base with main, which the
+          # default shallow fetch cannot reach. Full history here rather than a
+          # deeper-but-bounded fetch: a bound is a guess about how far a branch
+          # has diverged, and getting it wrong fails the ratchet on a stale
+          # branch rather than on a regression.
+          fetch-depth: 0
 
       # Installs the exact toolchain pinned in mise.toml, so CI and a laptop
       # resolve from one file and cannot drift.
@@ -32,6 +39,13 @@ jobs:
 
       - name: Test
         run: mise run test
+
+      # After Test, not before: this compares the committed allowlists across
+      # revisions and takes their accuracy on trust, which is only earned once
+      # census.rs has asserted that they match what the writer actually does.
+      # Run first, it could pass on files the test was about to reject.
+      - name: Census ratchet
+        run: mise run census-ratchet
 
   ocr:
     runs-on: ubuntu-latest

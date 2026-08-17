@@ -26,9 +26,12 @@
 //! tier compares, for each character, the stack of emphasis containers
 //! enclosing it on both sides, and runs only where the text tier already
 //! passes. `census-known-structure-corrupt.txt` is its queue, target zero;
-//! `census-inexpressible.txt` is permanent, holding shapes Markdown cannot
-//! express at any level. The split between those two files is computed on
-//! every bless, never hand-edited.
+//! `census-inexpressible.txt` holds the shapes *this writer's `*`-only
+//! alphabet* cannot express — not, as this line said until 2026-08-17, shapes
+//! Markdown cannot express: `_*x*_` spells `<em><em>x</em></em>`. The split
+//! between those two files is computed on every bless, never hand-edited, and
+//! growth of the permanent file is gated by `census-permanent-count.txt`
+//! (see `permanence_ceiling`).
 //!
 //! # Why this alphabet
 //!
@@ -406,6 +409,50 @@ const INEXPRESSIBLE: &str = concat!(
     "/tests/census-inexpressible.txt"
 );
 
+const PERMANENT_CEILING: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/census-permanent-count.txt"
+);
+
+/// Whether this run is regenerating the ratchet files rather than checking
+/// them.
+///
+/// Spelled once and shared, because [`ratchet`] and [`permanence_ceiling`]
+/// disagreeing about what a bless is would let one of them write while the
+/// other asserts against the file it just changed.
+fn blessing() -> bool {
+    std::env::var_os("KASANE_CENSUS_BLESS").is_some()
+}
+
+/// The most entries `census-inexpressible.txt` may hold.
+///
+/// A **ceiling**, not a count: the permanent file shrinking is always an
+/// improvement, so this is only ever compared as an upper bound and a shrink
+/// needs no edit. A bless *lowers* it to match — safe, since lowering only
+/// tightens the gate — and never raises it.
+///
+/// Raising it is a hand edit, and that asymmetry is the entire point. Moving a
+/// shape into the permanent file asserts that *no writer change can ever fix
+/// it*, which is the one claim in this census that nothing downstream
+/// re-examines: the queue is worked down item by item, but permanence is read
+/// as settled. `KASANE_CENSUS_BLESS=1` must therefore not be able to make that
+/// claim on its own — it writes the three shape files and stops here, so a
+/// growing permanent file leaves this test failing until a human raises the
+/// number in the same commit. That is a deliberately visible one-line diff.
+///
+/// The gate exists because the claim went wrong at scale once already. A probe
+/// on 2026-08-17 searched every `*`/`_` spelling of each shape in this file and
+/// found 1,740 of 1,984 expressible — the file was 88% wrong, and 748 of those
+/// entries had been moved in by a single bless
+/// (`2026-08-16-cross-class-edge-splice-design.md` §4).
+fn permanence_ceiling() -> usize {
+    let raw = std::fs::read_to_string(PERMANENT_CEILING)
+        .unwrap_or_else(|e| panic!("{PERMANENT_CEILING} must exist and be readable: {e}"));
+    raw.trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("{PERMANENT_CEILING} must hold a single integer: {e}"))
+}
+
 /// How one shape's structure survived rendering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Structure {
@@ -549,7 +596,7 @@ fn classify(seq: &[Inline]) -> Structure {
 /// `#`-prefixed lines are comments, which is how the permanent file carries its
 /// header.
 fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str>) {
-    if std::env::var_os("KASANE_CENSUS_BLESS").is_some() {
+    if blessing() {
         let mut body = header.unwrap_or("").to_string();
         body.extend(found.iter().map(|l| format!("{l}\n")));
         std::fs::write(path, body).expect("writing the allowlist");
@@ -589,7 +636,24 @@ fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str
 }
 
 const INEXPRESSIBLE_HEADER: &str = "\
-# Shapes whose structure Markdown cannot express, at any level.
+# Shapes whose structure THIS WRITER'S ALPHABET cannot express.
+#
+# Not `Markdown cannot express`, which is what this line claimed until
+# 2026-08-17 and is false. Every mechanism below is forced by spelling emphasis
+# with `*` alone, and CommonMark also has `_`. Alternating the two spells all
+# three of these:
+#
+#   `_*x*_`     is `<em><em>x</em></em>`
+#   `__**x**__` is `<strong><strong>x</strong></strong>`
+#   `__*x*__`   is `<strong><em>x</em></strong>`
+#
+# A probe over every `*`/`_` spelling of every shape in this file found 1,740 of
+# 1,984 expressible -- so read this file as the queue for the item that widens
+# the alphabet, not as a statement about Markdown. What is genuinely
+# unspellable is narrower and has a different cause: CommonMark's left-flanking
+# rule, which stops any delimiter opening between a letter and punctuation, so
+# `aa*` + a code span + `*` cannot emphasize at all. `census-permanent-count.txt`
+# gates growth here for exactly this reason.
 #
 # Two mechanisms, both forced by spelling emphasis with `*` alone:
 #
@@ -609,8 +673,9 @@ const INEXPRESSIBLE_HEADER: &str = "\
 # is not here -- the writer prints `***x***` for it. That asymmetry is what
 # keeps a regression of the fixed family out of this file.
 #
-# No writer change can close these, which is why they are not in the queue
-# (`census-known-structure-corrupt.txt`).
+# No writer change can close these WITHOUT WIDENING THE ALPHABET, which is why
+# they are not in the queue (`census-known-structure-corrupt.txt`) -- the queue
+# is what the current alphabet can still reach.
 #
 # COMPUTED, never hand-edited. A shape lands here only if it BOTH nests,
 # directly, a same-class container or a `<strong>` whose sole child is an
@@ -652,5 +717,33 @@ fn inline_structure_survives_rendering_for_every_short_sequence() {
         &inexpressible,
         "inexpressible",
         Some(INEXPRESSIBLE_HEADER),
+    );
+
+    // The permanence gate (see `permanence_ceiling`). Asserted after both
+    // ratchets so a shape that is merely unlisted is reported by the specific
+    // error rather than by this one, and so `inexpressible.len()` is the size
+    // the file actually has once a passing run is done with it.
+    let ceiling = permanence_ceiling();
+    let ceiling = if blessing() && inexpressible.len() < ceiling {
+        std::fs::write(PERMANENT_CEILING, format!("{}\n", inexpressible.len()))
+            .expect("lowering the permanence ceiling");
+        inexpressible.len()
+    } else {
+        ceiling
+    };
+    assert!(
+        inexpressible.len() <= ceiling,
+        "the permanent file would grow to {} entries, over its ceiling of {ceiling}.\n\
+         \n\
+         {} shape(s) are newly claimed inexpressible. A bless cannot make that \
+         claim for you: raise the number in {PERMANENT_CEILING} to {} in this \
+         same commit, so the claim appears in the diff and a reviewer sees it.\n\
+         \n\
+         Before you do -- is it true? A shape is only permanent if NO writer \
+         change can express it. `_*x*_` spells `<em><em>x</em></em>`, which this \
+         file's header called unspellable until 2026-08-17.",
+        inexpressible.len(),
+        inexpressible.len() - ceiling,
+        inexpressible.len(),
     );
 }
