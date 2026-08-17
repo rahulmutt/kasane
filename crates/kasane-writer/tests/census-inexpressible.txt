@@ -1,4 +1,21 @@
-# Shapes whose structure Markdown cannot express, at any level.
+# Shapes whose structure THIS WRITER'S ALPHABET cannot express.
+#
+# Not `Markdown cannot express`, which is what this line claimed until
+# 2026-08-17 and is false. Every mechanism below is forced by spelling emphasis
+# with `*` alone, and CommonMark also has `_`. Alternating the two spells all
+# three of these:
+#
+#   `_*x*_`     is `<em><em>x</em></em>`
+#   `__**x**__` is `<strong><strong>x</strong></strong>`
+#   `__*x*__`   is `<strong><em>x</em></strong>`
+#
+# A probe over every `*`/`_` spelling of every shape in this file found 1,740 of
+# 1,984 expressible -- so read this file as the queue for the item that widens
+# the alphabet, not as a statement about Markdown. What is genuinely
+# unspellable is narrower and has a different cause: CommonMark's left-flanking
+# rule, which stops any delimiter opening between a letter and punctuation, so
+# `aa*` + a code span + `*` cannot emphasize at all. `census-permanent-count.txt`
+# gates growth here for exactly this reason.
 #
 # Two mechanisms, both forced by spelling emphasis with `*` alone:
 #
@@ -18,8 +35,9 @@
 # is not here -- the writer prints `***x***` for it. That asymmetry is what
 # keeps a regression of the fixed family out of this file.
 #
-# No writer change can close these, which is why they are not in the queue
-# (`census-known-structure-corrupt.txt`).
+# No writer change can close these WITHOUT WIDENING THE ALPHABET, which is why
+# they are not in the queue (`census-known-structure-corrupt.txt`) -- the queue
+# is what the current alphabet can still reach.
 #
 # COMPUTED, never hand-edited. A shape lands here only if it BOTH nests,
 # directly, a same-class container or a `<strong>` whose sole child is an

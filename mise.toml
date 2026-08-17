@@ -69,6 +69,149 @@ run = ["cargo fmt --all -- --check",
 [tasks.convert]
 run = "cargo run -p kasane-cli --"
 
+# The other half of the census ratchet. `cargo test` proves the allowlist files
+# match reality (census.rs's `ratchet` fails in both directions); this proves
+# they only ever got better. It compares committed file to committed file across
+# revisions and never runs the census, which is what lets it be pure git+text --
+# accuracy is inherited from the test.
+#
+# Not folded into `mise run test`: it needs a git history and a network fetch,
+# which a plain `cargo test` must not.
+[tasks.census-ratchet]
+description = "The census allowlists may only shrink against main"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Every sort and every `comm` in this script must agree on collation, and
+# `comm` reads the ambient locale rather than inheriting the `LC_ALL=C` a
+# pipeline set. Exporting it once is what keeps them consistent -- without it
+# `comm` rejects input this script sorted itself, on shapes containing `*`.
+export LC_ALL=C
+
+dir="crates/kasane-writer/tests"
+text="$dir/census-known-corrupt.txt"
+queue="$dir/census-known-structure-corrupt.txt"
+perm="$dir/census-inexpressible.txt"
+ceil="$dir/census-permanent-count.txt"
+
+# The revision to measure against. On a PR this is the merge base with main; on
+# a push to main it resolves to HEAD itself, so every set compares equal and the
+# check passes without special-casing the branch. KASANE_RATCHET_BASE overrides
+# it, which is how this task is exercised against real history.
+base="${KASANE_RATCHET_BASE:-}"
+if [ -z "$base" ]; then
+  git fetch --quiet origin main 2>/dev/null || true
+  base="$(git merge-base HEAD FETCH_HEAD 2>/dev/null \\
+       || git merge-base HEAD origin/main 2>/dev/null \\
+       || git merge-base HEAD main)"
+fi
+echo "base: $(git log -1 --format='%h %s' "$base")"
+echo
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# One file's shape lines, sorted for `comm`: comments and blanks dropped. awk
+# rather than `grep -v`, which exits non-zero on an empty result and would trip
+# `set -o pipefail`. Returns 1 when the path does not exist at that revision.
+at_base() {
+  git cat-file -e "$base:$1" 2>/dev/null || return 1
+  git show "$base:$1" | awk '!/^#/ && NF' | LC_ALL=C sort -u
+}
+at_head() { awk '!/^#/ && NF' "$1" | LC_ALL=C sort -u; }
+
+for f in "$text" "$queue" "$perm"; do
+  n="$(basename "$f")"
+  if at_base "$f" > "$tmp/base.$n" 2>/dev/null; then :; else
+    echo "SKIP $n -- absent at the base, so there is no baseline to ratchet against" >&2
+    : > "$tmp/base.$n"
+    touch "$tmp/skip.$n"
+  fi
+  at_head "$f" > "$tmp/head.$n"
+done
+
+# The union is the assertion that actually forbids a regression: a shape may
+# move between the queue and the permanent file, but no shape may become
+# corrupt that was not. Checking the two files separately would let a
+# regression hide as a reclassification.
+tq="$(basename "$queue")"; tp="$(basename "$perm")"; tt="$(basename "$text")"
+for side in base head; do
+  LC_ALL=C sort -u "$tmp/$side.$tq" "$tmp/$side.$tp" > "$tmp/$side.union"
+done
+
+fail=0
+printf '%-8s %8s %8s %8s   %s\\n' set base head delta verdict
+# `gate` says whether an addition to this set is a failure. The permanent file
+# is reported but NOT gated here: a shape moving in from the queue is legitimate
+# reclassification, and forbidding it outright would make every shape that
+# cannot be fixed yet sit in the queue forever. What guards that move is the
+# ceiling census.rs asserts, plus the no-gratuitous-raise check below. The union
+# is what makes the move safe to allow -- it forbids a shape becoming corrupt
+# that was not, so a growing permanent file can only be drawing from the queue.
+check() { # label base-set head-set gate skip-marker
+  local b h added n_b n_h verdict
+  b="$2"; h="$3"
+  n_b="$(wc -l < "$b" | tr -d ' ')"; n_h="$(wc -l < "$h" | tr -d ' ')"
+  added="$(comm -13 "$b" "$h")"
+  verdict="ok"
+  if [ -n "${5:-}" ] && [ -f "$5" ]; then
+    verdict="skipped (no baseline)"
+  elif [ -n "$added" ]; then
+    local n_added
+    n_added="$(printf '%s\\n' "$added" | wc -l | tr -d ' ')"
+    if [ "$4" = gate ]; then
+      verdict="FAIL -- $n_added added"
+      fail=1
+    else
+      verdict="$n_added moved in (not gated)"
+    fi
+  fi
+  printf '%-8s %8s %8s %+8d   %s\\n' "$1" "$n_b" "$n_h" "$((n_h - n_b))" "$verdict"
+  if [ "$4" = gate ] && [ -n "$added" ]; then
+    # `sed -n 1,10p`, not `head -10`: head closes the pipe after ten lines,
+    # which SIGPIPEs the writer, and under `set -e -o pipefail` that aborted
+    # this script before it could finish the table or print its summary. sed
+    # reads to EOF.
+    printf '%s\\n' "$added" | sed -n '1,10p' | sed 's/^/           /'
+  fi
+}
+check text  "$tmp/base.$tt"    "$tmp/head.$tt"    gate   "$tmp/skip.$tt"
+check queue "$tmp/base.$tq"    "$tmp/head.$tq"    gate   "$tmp/skip.$tq"
+check perm  "$tmp/base.$tp"    "$tmp/head.$tp"    report ""
+check union "$tmp/base.union"  "$tmp/head.union"  gate   ""
+
+# The permanent file's own gate is the ceiling asserted by census.rs. Here we
+# only forbid raising it gratuitously: a raise is how a human states "these
+# shapes can never be fixed", so it must come with shapes that actually moved
+# in. Without this, the number could drift upward and pre-authorise a later
+# bless -- which is precisely the reviewable moment the ceiling exists to
+# create.
+if git cat-file -e "$base:$ceil" 2>/dev/null; then
+  cb="$(git show "$base:$ceil" | tr -d '[:space:]')"
+  ch="$(tr -d '[:space:]' < "$ceil")"
+  grew="$(comm -13 "$tmp/base.$tp" "$tmp/head.$tp" | wc -l | tr -d ' ')"
+  echo
+  if [ "$ch" -gt "$cb" ] && [ "$grew" -eq 0 ]; then
+    echo "FAIL ceiling raised $cb -> $ch with no shape newly claimed inexpressible." >&2
+    echo "     A raise is a permanence claim; make it in the commit that needs it." >&2
+    fail=1
+  else
+    echo "ceiling: $cb -> $ch ($grew shape(s) newly permanent)"
+  fi
+else
+  echo
+  echo "ceiling: absent at the base -- introduced by this change, nothing to compare"
+fi
+
+echo
+if [ "$fail" -ne 0 ]; then
+  echo "census ratchet FAILED: the allowlists may only shrink against main." >&2
+  exit 1
+fi
+echo "census ratchet ok"
+"""
+
 [tasks.fuzz]
 description = "Fuzz one target: mise run fuzz <target> [-- -max_total_time=60]"
 run = """

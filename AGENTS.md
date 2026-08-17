@@ -308,7 +308,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census` and read
   the diff — that diff is the exact evidence a reviewer wants, of what a
   change fixed or broke.
-- The census has two tiers, and three files. The text tier above compares what
+- The census has two tiers, and four files. The text tier above compares what
   a parser recovers against `kasane_gfm::rendered_text`. The **structural**
   tier compares, for each character, the stack of emphasis containers enclosing
   it on both sides — a loss that leaves the text byte-identical (a `<strong>`
@@ -316,9 +316,18 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   tier and caught by the second. It runs only where the text tier already
   passes, since per-character alignment presupposes equal strings.
   `census-known-structure-corrupt.txt` is its queue, target zero;
-  `census-inexpressible.txt` is permanent, holding shapes Markdown cannot
-  express at any level (`<em><em>x</em></em>` has no spelling — `**x**` is
-  strong). The split between those two files is **computed on every bless,
+  `census-inexpressible.txt` holds the shapes **this writer's `*`-only
+  alphabet** cannot express. It is not a statement about Markdown, which is
+  what this entry claimed until 2026-08-17: CommonMark also has `_`, and
+  alternating the two spells every mechanism the file names — `_*x*_` is
+  `<em><em>x</em></em>`, `__**x**__` is doubly strong, `__*x*__` is
+  `<strong><em>x</em></strong>`. A probe over every `*`/`_` spelling found
+  1,740 of its 1,984 entries expressible, so read it as the queue for the
+  alphabet-widening item. What is genuinely unspellable is narrower and has a
+  different cause — CommonMark's left-flanking rule, which stops any delimiter
+  opening between a letter and punctuation, so `[Text("a"), Text("a"),
+  Emph([Code("x")])]` cannot emphasize with `*` or `_`.
+  The split between those two files is **computed on every bless,
   never hand-edited**: a shape is permanent only if it both nests, directly, a
   same-class container (`<em><em>x</em></em>` or
   `<strong><strong>x</strong></strong>`) or a `<strong>` whose sole child is
@@ -327,7 +336,21 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   deliberate: `<em><strong>x</strong></em>` IS spellable, and keeping it out
   of the permanent file is what stops a regression laundering itself as a
   representational limit.
-  One bless command rewrites all three. Design spec
+  One bless command rewrites all three shape files — but **not** the fourth,
+  `census-permanent-count.txt`, a one-integer ceiling on how many entries
+  `census-inexpressible.txt` may hold. A bless lowers it to match a shrink and
+  never raises it, so growing the permanent file leaves the test failing until a
+  human raises the number in the same commit. That asymmetry is the point:
+  moving a shape into the permanent file asserts no writer change can ever fix
+  it, which is the one claim here nothing downstream re-examines, and it is the
+  claim that went wrong for 748 shapes at once. `mise run census-ratchet` is
+  the other half — it compares the committed files against the merge base with
+  `main` and fails if the text or structure queue, or their union with the
+  permanent file, gained any shape. The union is what makes reclassification
+  safe to allow: a shape may move between the two files, but none may become
+  corrupt that was not. It runs in CI *after* `mise run test`, because it takes
+  the files' accuracy on trust and only the test establishes that.
+  Design spec
   `2026-08-16-structural-census-design.md`; its §6 recorded the largest queued
   family, 2,002 shapes losing a level because
   `splice_children`'s edge rule keys on the delimiter character and
