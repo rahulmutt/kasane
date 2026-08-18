@@ -24,7 +24,7 @@ Both discard structure on shapes whose plain `*`-only spelling already
 round-trips. An archived probe priced that at **924 shapes** — 390 in
 `census-known-structure-corrupt.txt` and 534 in `census-inexpressible.txt`,
 where they sit under the claim that no writer change can ever close them. This
-item recovers them without widening the alphabet.
+item recovers them without widening the alphabet — re-measured at 389, see §2.
 
 **In scope:** both halves. Shapes in the queue and shapes currently filed
 permanent, since the same writer change reaches both and splitting them would
@@ -50,19 +50,23 @@ cargo test -p kasane-writer --test census_probe -- --ignored --nocapture
 It renders every shape in the length 1-3 census (`census_support::shapes`)
 under each [`Ledger`](#51-the-knob) cell in isolation, and once more under the
 union of all seven cells, comparing each rendering against the same shape
-rendered under `Ledger::CONSERVATIVE` — the all-bits-off ledger that
-reproduces today's output byte for byte. A shape counts `newly_clean` if it is
-clean (`census_support::text_is_clean` and `classify_with` both agree) under
-the cell/union and was not clean under `CONSERVATIVE`, split by which of the
-two census files lists it (`census-known-structure-corrupt.txt`, the queue;
-`census-inexpressible.txt`, permanent); `newly_corrupt` if the reverse. Both
-files were read in their pre-branch state: no cell beyond
-`emph_over_strong_whole_run` had been turned on yet, and no bless had moved
-either file, so the counts below are the baseline this item's later blesses
-are measured against.
+rendered under `Ledger::CONSERVATIVE` — the all-bits-off ledger. `CONSERVATIVE`
+is **not** today's shipped output: it is pre-`0ac2c48` output, one cell below
+what `main` ships as `LICENSED` (`markdown.rs`'s `Ledger` doc comment). A shape
+counts `newly_clean` if it is clean (`census_support::text_is_clean` and
+`classify_with` both agree) under the cell/union and was not clean under
+`CONSERVATIVE`, split by which of the two *structural* census files lists it
+(`census-known-structure-corrupt.txt`, the queue; `census-inexpressible.txt`,
+permanent) — the table below is scoped to those two files and says nothing
+about `census-known-corrupt.txt` (32 shapes, text tier; §6 expects it
+untouched). `newly_corrupt` counts the reverse: clean under `CONSERVATIVE`,
+not clean under the cell/union. Both files were read in their pre-branch
+state: no cell beyond `emph_over_strong_whole_run` had been turned on yet, and
+no bless had moved either file, so the counts below are the baseline this
+item's later blesses are measured against.
 
 Every cell's `newly_corrupt` column measured `0`: no cell licensed here
-corrupts a shape that renders clean today.
+corrupts a shape that was clean under `CONSERVATIVE`.
 
 | cell | queue newly_clean | permanent newly_clean | newly_corrupt |
 |---|---|---|---|
@@ -79,9 +83,28 @@ corrupts a shape that renders clean today.
 cell, and a cell can recover a shape only once another cell has stopped a
 fusion from swallowing it (§4.3). `emph_over_strong_whole_run` measures `0`
 against both files not because it recovers nothing, but because it is the one
-cell already in `Ledger::LICENSED` (Tasks 1-2) — the shapes it recovers were
-already blessed out of both census files before this probe ran, so against the
+cell already in `Ledger::LICENSED` (Task 1) — the shapes it recovers were
+already blessed out of both census files by the `cross-class-edge-splice`
+branch (`0ac2c48`/`ffc9162`/`bf58001`) before this probe ran, so against the
 *current* files it has nothing left to take.
+
+**The `CONSERVATIVE`-only rows above have a blind spot.** `newly_corrupt`
+there only catches a regression among shapes clean under `CONSERVATIVE`; a
+shape `LICENSED` already recovers — clean under `LICENSED`, not clean under
+`CONSERVATIVE` — sits outside that comparison entirely, since a regression on
+it leaves both `clean` and `was_clean` false and moves no counter. The probe
+closes that gap with one further measurement, the seven-cell union compared
+against a `LICENSED` baseline instead:
+
+```text
+ALL_CELLS_VS_LICENSED,shipped_baseline,389,0
+```
+
+`0` in the last column: no cell, alone or combined, corrupts a shape that
+ships clean **today** either. This is the row that actually licenses calling
+the `newly_corrupt` gate an early warning for the item — the `CONSERVATIVE`
+rows alone would have missed a regression on anything `LICENSED` already
+fixed.
 
 **The measurement disagrees with 924/390/534, and per this section's own rule
 the measurement wins: the archived probe was wrong.** The combined recovery
@@ -411,7 +434,9 @@ Risks, in the order they deserve worry:
    the `false` default, and §3.3's explicit reviewer instruction.
 3. **Deep-tier wall-clock.** Mitigation: measure before committing; §5.3's
    authorized fallback to length 4, logged.
-4. **The measurement disagreeing with 924/390/534.** Mitigation: §2 — the
-   measurement wins, and it runs before any rule is written.
+4. **The measurement disagreeing with 924/390/534.** This happened: §2's
+   committed probe measured 389 (292/97), not 924 (390/534). Per §2's own
+   rule the measurement won, and the archived counts were corrected in the
+   same commit that recorded the new ones.
 5. **queue -> permanent laundering (§6).** Mitigation: per-shape justification
    in the PR body; the union ratchet alone does not catch it.

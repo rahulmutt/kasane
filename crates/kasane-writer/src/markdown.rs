@@ -478,8 +478,8 @@ mod cell {
 /// A bitset rather than a two-value mode, because design spec §2's probe has
 /// to price each cell *separately*: the last probe's finer split was cut for
 /// being unreproducible, and a mode that only says "old" or "new" reproduces
-/// exactly that failure. `CONSERVATIVE` is the empty set and renders byte for
-/// byte what `main` renders.
+/// exactly that failure. `CONSERVATIVE` is the empty set and reproduces
+/// pre-`0ac2c48` output — one cell below what `main` ships as `LICENSED`.
 #[doc(hidden)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Ledger(u32);

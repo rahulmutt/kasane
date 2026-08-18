@@ -82,10 +82,38 @@ fn price_every_cell_against_both_census_files() {
     let permanent = keys(PERMANENT);
     let all = shapes();
 
+    // A sanity guard, not part of the measurement: this section exists
+    // because a previous probe's numbers turned out to be untrustworthy, so
+    // a silent key-format drift between `shapes()`'s `Debug` keys and the
+    // census files' own keys must fail loudly rather than quietly produce a
+    // plausible-looking but empty measurement.
+    assert!(
+        !queued.is_empty(),
+        "{STRUCTURE_QUEUE} must list at least one key"
+    );
+    assert!(
+        !permanent.is_empty(),
+        "{PERMANENT} must list at least one key"
+    );
+    assert!(
+        all.iter()
+            .any(|seq| queued.contains(&format!("{seq:?}"))
+                || permanent.contains(&format!("{seq:?}"))),
+        "no key from `shapes()` matched either census file — the key format has \
+         drifted and every count below would be meaningless"
+    );
+
     // The baseline does not depend on the cell under test, so it is computed
     // once rather than once per cell (my ruling: this hoist changes no
     // printed number, since every per-cell and combined comparison below
     // still reads `Ledger::CONSERVATIVE`'s clean/not-clean verdict).
+    //
+    // `CONSERVATIVE` is pre-`0ac2c48` output, one cell below what `main`
+    // ships as `LICENSED` (`markdown.rs`'s `Ledger` doc comment) -- so this
+    // baseline is what the 292/97/389 table below is priced against, and it
+    // is *not* "today's shipped output". A second baseline, against
+    // `LICENSED` itself, is computed further down for the row that actually
+    // answers "does any cell corrupt a shape that ships clean today".
     let baseline: Vec<bool> = all
         .iter()
         .map(|seq| is_clean(seq, Ledger::CONSERVATIVE))
@@ -110,4 +138,23 @@ fn price_every_cell_against_both_census_files() {
     println!("ALL_CELLS,queue,{q},{broke}");
     println!("ALL_CELLS,permanent,{p},{broke}");
     println!("ALL_CELLS,total_recovered,{},{broke}", q + p);
+
+    // A second baseline, against `Ledger::LICENSED` -- today's shipped
+    // output -- rather than `CONSERVATIVE`. The rows above only count a
+    // regression among shapes clean under `CONSERVATIVE`; a shape `LICENSED`
+    // already recovers (clean under `LICENSED`, not clean under
+    // `CONSERVATIVE`) is invisible to that `broke` column entirely, since a
+    // regression there leaves both `clean` and `was_clean` false and moves
+    // no counter. This row closes that blind spot: its `broke` column is the
+    // early warning for "some cell licensed here corrupts a shape that ships
+    // clean today", which the `CONSERVATIVE`-only rows above cannot see.
+    let licensed_baseline: Vec<bool> = all
+        .iter()
+        .map(|seq| is_clean(seq, Ledger::LICENSED))
+        .collect();
+    let (lq, lp, lbroke) = measure(ledger, &all, &licensed_baseline, &queued, &permanent);
+    println!(
+        "ALL_CELLS_VS_LICENSED,shipped_baseline,{},{lbroke}",
+        lq + lp
+    );
 }
