@@ -218,9 +218,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   deliberately **not** on that seam: flanking stays in `emphasis_run`'s
   `can_open`/`can_close`, the only place CommonMark's own rules are spelled
   out, and the ledger reads no text. That split is load-bearing rather than
-  tidy — a structurally licensed abutment can re-flank the run around it and
-  send `emphasis_run` down its decline branch, printing children bare, which
-  is the mechanism behind both failure families the disproof below records. CommonMark
+  tidy, and the disproof below records two distinct failures across it, with
+  distinct causes: a licensed abutment can re-flank the run around it and send
+  `emphasis_run` down its decline branch, printing children bare (the 37
+  permanent-to-queue moves, and the tail cells' 800 code-span text losses); or
+  it can leave a three-character delimiter run whose pairing depends on what
+  follows it, which is not a flanking question at all (the head cells' 2,528
+  asterisk mis-pairings). CommonMark
   can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
   expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
   container can nest safely when its own delimiters are one-sided-flanking (`*a
