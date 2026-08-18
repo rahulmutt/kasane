@@ -67,7 +67,7 @@ different keys, in prose that has to keep them consistent by hand:
 ```rust
 /// May a delimiter run of `inner`'s class stand adjacent to a run of
 /// `outer`'s class at this structural site, or must it be collapsed?
-fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site) -> bool
+fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site, ledger: Ledger) -> bool
 
 /// Where in the printed stream the abutment would happen.
 enum Site {
@@ -86,6 +86,17 @@ enum Site {
 ```
 
 `Site` is closed. It names structural positions, not text.
+
+`may_abut` itself is two functions in one, both table-shaped and neither
+reading text: a `match` on `(outer, inner, site)` that names, for each
+licensed triple, which bit of a [`Ledger`](#51-the-knob) it belongs to and
+returns `None` for everything unlisted; and the licensing check itself, which
+looks that bit up and tests it against the `ledger` argument. The `match` is
+the table §3.2 describes; the `Ledger` it's keyed against is what makes the
+same table answer differently depending on which cells are turned on. An
+unlisted triple has no bit at all, so it is refused under every `Ledger`
+including one with every other bit set — that is what keeps the default
+conservative regardless of how many cells later widening turns on.
 
 ### 3.2 The table
 
@@ -214,13 +225,32 @@ One `#[doc(hidden)] pub` test seam, the same convention as `est_tokens`,
 
 ```rust
 #[doc(hidden)]
-pub enum Ledger { Licensed, Conservative }
+pub struct Ledger(u32);
+
+impl Ledger {
+    pub const CONSERVATIVE: Ledger = Ledger(0);
+    pub const LICENSED: Ledger = Ledger(/* the shipped cells, or'd together */);
+    pub const CELLS: &'static [(&'static str, u32)] = &[/* every named cell */];
+    pub fn from_bits(bits: u32) -> Ledger { Ledger(bits) }
+    pub fn bits(self) -> u32 { self.0 }
+}
 ```
 
-`Conservative` forces every `may_abut` call to `false`, reproducing today's
-output byte for byte. Two consumers: §2's probe, and §5.3's filter. It is a test
-seam and not API for the same reason the others are — the alternative is a copy
-of the writer's own rules in a test, which drifts.
+A bitset rather than the two-value mode this section originally specified.
+The two-value shape cannot price cells separately: it can only ask "old
+behaviour or new," which is exactly the granularity the last probe's finer
+302/118/10 sub-split needed and did not have — that split was found
+unreproducible and cut (§2), the specific, recent failure this design is
+built not to repeat. A bitset lets §2's probe and this section's own deep
+census hold every other cell fixed and flip one, so a bad cell's cost is
+attributable to that cell rather than smeared across whatever else `Licensed`
+happened to also turn on.
+
+`CONSERVATIVE` (the empty set) forces every `may_abut` call to `false`,
+reproducing today's output byte for byte. `LICENSED` is what the writer
+ships with. Two consumers of the seam: §2's probe, and §5.3's filter. It is a
+test seam and not API for the same reason the others are — the alternative
+is a copy of the writer's own rules in a test, which drifts.
 
 ### 5.2 The corpus
 

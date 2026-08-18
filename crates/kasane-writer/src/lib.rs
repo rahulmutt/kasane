@@ -7,6 +7,8 @@ mod markdown;
 
 pub use library::{write_library_index, LibraryEntry, LibraryFailure};
 pub use markdown::blocks_to_markdown;
+#[doc(hidden)]
+pub use markdown::{blocks_to_markdown_with_ledger, Ledger};
 
 use anyhow::{bail, Context, Result};
 use kasane_core::{FileNode, SiteTree};
