@@ -1,16 +1,23 @@
 //! The census oracle, shared by every census tier.
 //!
-//! Three test binaries render the same shapes through the same parser and ask
-//! the same structural question: `census.rs` (lengths 1-3, the ratchet),
-//! `census_probe.rs` (design spec §2's re-measurement), and `census_deep.rs`
-//! (design spec §5's licensed-spelling tier). A copy of `classify` in any one
-//! of them would drift from the others, which is the same reason
-//! `section::canonicalize_inlines` is a `#[doc(hidden)] pub` seam rather than
-//! a rule re-spelled in a test.
+//! Two test binaries render the same shapes through the same parser and ask
+//! the same structural question: `census.rs` (lengths 1-3, the ratchet) and
+//! `census_probe.rs` (design spec §2's re-measurement). A copy of
+//! `classify_with` in either would drift from the other, which is the same
+//! reason `section::canonicalize_inlines` is a `#[doc(hidden)] pub` seam
+//! rather than a rule re-spelled in a test.
 //!
-//! Every tier renders through [`render`], which takes an explicit `Ledger`:
-//! the probe and the deep tier both need today's output and the licensed
-//! output in one process.
+//! A third tier was designed and **never committed**: `census_deep.rs`, design
+//! spec §5's licensed-spelling tier. It was written, measured, and abandoned
+//! with the rest of that design — as specified it fails 2,561 times on
+//! unmodified `main`, and its corpus cannot witness the failure it exists to
+//! catch. Read spec §5.4 before building anything in its place; this module is
+//! deliberately general enough to serve such a tier, and nothing here assumes
+//! one exists.
+//!
+//! Every tier renders through [`render`], which takes an explicit `Ledger`,
+//! because the probe needs today's output and the output under one isolated
+//! cell in the same process.
 
 // Each tier uses a different subset of this module; Rust warns per test
 // binary, not per workspace.
@@ -144,7 +151,9 @@ pub fn render(seq: &[Inline], ledger: Ledger) -> String {
 /// Separate from [`classify_with`] on purpose: `classify_with` returns `Clean`
 /// when the text is already corrupt, because the structural tier is gated on
 /// the text tier and the text assertion names those shapes itself. A caller
-/// that is not the ratchet — the deep tier — must ask both questions.
+/// that is not the ratchet must ask both questions, and the probe does. (The
+/// never-committed `census_deep.rs` was the caller this sentence originally
+/// named — design spec §5.4.)
 pub fn text_is_clean(seq: &[Inline], ledger: Ledger) -> bool {
     let md = render(seq, ledger);
     parsed_text(&md).trim() == kasane_gfm::rendered_text(seq).trim()
@@ -154,10 +163,12 @@ pub fn text_is_clean(seq: &[Inline], ledger: Ledger) -> bool {
 /// context walks -- or `None` if the text is already corrupt, in which case
 /// structure is not evaluated (design spec §2, "Gate").
 ///
-/// Shared by the alignment guard below and `classify`: the guard is only
-/// evidence for what `classify` actually compares if both exercise the same
-/// render/gate/walk setup. Two independent copies of it could drift apart,
-/// and if they did, the guard would stop covering the walks `classify` uses.
+/// Shared by [`classify_with`] here and `census.rs`'s alignment guard
+/// (`the_two_context_walks_align_character_for_character`): the guard is only
+/// evidence for what `classify_with` actually compares if both exercise the
+/// same render/gate/walk setup. Two independent copies of it could drift
+/// apart, and if they did, the guard would stop covering the walks
+/// `classify_with` uses.
 pub fn context_walks_with(seq: &[Inline], ledger: Ledger) -> Option<(ContextWalk, ContextWalk)> {
     let md = render(seq, ledger);
     let expected = kasane_gfm::rendered_text(seq);

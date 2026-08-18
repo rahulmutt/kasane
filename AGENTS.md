@@ -375,19 +375,21 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   safe to allow: a shape may move between the two files, but none may become
   corrupt that was not. It runs in CI *after* `mise run test`, because it takes
   the files' accuracy on trust and only the test establishes that.
-  Two instruments sit beside the census and use its oracle rather than a copy
-  that drifts. `tests/census_support/mod.rs` *is* that oracle, extracted:
-  `alphabet` and `shapes` build the corpus, `parsed_text` recovers what a parser
-  saw, and `render`, `text_is_clean` and `classify_with` each take the writer's
-  `Ledger`, so a tier can hold the writer's source fixed and vary one licensed
-  cell instead of editing `markdown.rs` per experiment.
-  `tests/census_probe.rs` is its first consumer — an `#[ignore]`d probe, run
-  with
+  `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
+  a tier measures with the census's own instrument rather than a copy that
+  drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers
+  what a parser saw, and `render`, `text_is_clean` and `classify_with` each
+  take the writer's `Ledger`, so a tier can hold the writer's source fixed and
+  vary one licensed cell instead of editing `markdown.rs` per experiment.
+  `census.rs` consumes it, and so does `tests/census_probe.rs` — an
+  `#[ignore]`d probe, run with
   `cargo test -p kasane-writer --test census_probe -- --ignored --nocapture`,
-  that renders the whole length 1-3 census under each cell in isolation and
-  prices what that one cell alone recovers from each structural file. A probe in the repo
-  rather than a script in a scratch directory is the point: the last archived one
-  produced a sub-split nobody could reproduce.
+  that renders the whole length 1-3 census under each ledger cell in isolation
+  and prices what that one cell alone recovers from each structural file. A
+  probe in the repo rather than a script in a scratch directory is the point:
+  the last archived one produced a sub-split nobody could reproduce. Read what
+  it prints with the design spec's §2b beside it — its columns are length-3
+  figures, and the cells it prices lose recovered text at lengths 4-5.
   Design spec
   `2026-08-16-structural-census-design.md`; its §6 recorded the largest queued
   family, 2,002 shapes losing a level because

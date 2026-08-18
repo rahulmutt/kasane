@@ -8,6 +8,15 @@
 //! ```text
 //! cargo test -p kasane-writer --test census_probe -- --ignored --nocapture
 //! ```
+//!
+//! **Read design spec §2b before acting on what this prints.** Every figure
+//! here is a *length-3* figure, and the branch that added this probe went on to
+//! measure the same cells at lengths 4-5, where they lose recovered text on up
+//! to 3,328 shapes. In particular the `broke` columns below — including the
+//! `ALL_CELLS_VS_LICENSED` row's `0` — are length-3 facts, not a safety
+//! result: spec §2b.5 records that every structural gate on that branch read
+//! `0` while text losses ran into the thousands. This probe prices what a cell
+//! *recovers*; nothing here prices what it destroys.
 
 mod census_support;
 
@@ -145,9 +154,12 @@ fn price_every_cell_against_both_census_files() {
     // already recovers (clean under `LICENSED`, not clean under
     // `CONSERVATIVE`) is invisible to that `broke` column entirely, since a
     // regression there leaves both `clean` and `was_clean` false and moves
-    // no counter. This row closes that blind spot: its `broke` column is the
+    // no counter. This row closes that blind spot: its `broke` column is an
     // early warning for "some cell licensed here corrupts a shape that ships
-    // clean today", which the `CONSERVATIVE`-only rows above cannot see.
+    // clean today *at length 3*", which the `CONSERVATIVE`-only rows above
+    // cannot see. It is not a safety result. Design spec §2b.5: this row
+    // measured `0` for every cell set, and the same cells lose text on 800 and
+    // 3,328 shapes at lengths 4-5. A `0` here licenses nothing.
     let licensed_baseline: Vec<bool> = all
         .iter()
         .map(|seq| is_clean(seq, Ledger::LICENSED))

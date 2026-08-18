@@ -27,7 +27,8 @@ Both discard structure on shapes whose plain `*`-only spelling already
 round-trips. An archived probe priced that at **924 shapes** — 390 in
 `census-known-structure-corrupt.txt` and 534 in `census-inexpressible.txt`,
 where they sit under the claim that no writer change can ever close them. This
-item recovers them without widening the alphabet — re-measured at 389, see §2.
+item set out to recover them without widening the alphabet — re-measured at
+389, see §2. It did not: no cell set is safe to license, see §2b.
 
 **In scope:** both halves. Shapes in the queue and shapes currently filed
 permanent, since the same writer change reaches both and splitting them would
@@ -108,6 +109,16 @@ ships clean **today** either. This is the row that actually licenses calling
 the `newly_corrupt` gate an early warning for the item — the `CONSERVATIVE`
 rows alone would have missed a regression on anything `LICENSED` already
 fixed.
+
+**Scope that `0` to this corpus — it is a length-3 fact and not a safety
+result (§2b.5).** Every figure in this section is measured over the length 1-3
+census. The same cells were later measured at lengths 4-5 and lose recovered
+text on 168, 800 and 3,328 shapes depending on the cell and the alphabet
+(§2b.1), while this column and every other structural counter on the branch
+still read `0`. The `newly_corrupt` gate is an early warning about *this*
+corpus and nothing wider; the recoveries below are real and the reassurance
+beside them is not. A retry re-running this probe should read §2b.5 before
+believing any zero it prints.
 
 **The measurement disagrees with 924/390/534, and per this section's own rule
 the measurement wins: the archived probe was wrong.** The combined recovery
@@ -405,8 +416,9 @@ its answer is correct.
 
 > **Both call sites shipped as described** (Task 1), routing through the seam
 > with one cell licensed, byte-identical to `main`. §4.3 is the part that
-> matters in hindsight: it named the interaction that killed the item, and
-> understated it (§2b.4, §5.4).
+> matters in hindsight: it named one of the two failures the item ran into and
+> understated it (§2b.4, §5.4). It did not name the other, the delimiter-pairing
+> one that decided the item (§2b.3).
 
 ### 4.1 `splice_children`
 
@@ -690,6 +702,7 @@ move without that justification is not reviewable.
    primary evidence. §6 states what each file is expected to do.
    (**No bless happened** — see §6's correction and §2b.1.)
 2. **Deep census**, `crates/kasane-writer/tests/census_deep.rs`, per §5.
+   (**Never committed** — see §5.4.)
 3. **Unit, in `markdown.rs`'s test module.** One pinned printed string per
    licensed cell, *and one per refusal that stays* — including
    `(Strong, Emph, WholeRun)` and the `Interior` same-`Delim` arm — so a later
@@ -773,12 +786,19 @@ Risks, in the order they deserve worry:
 
 **Which of these materialised.**
 
-1. **Risk 1 is what killed the item, and it killed it more broadly than §4.3
-   anticipated.** The flanking interaction reaches the splice call site as well
-   as the fusion one: it is the mechanism behind both the 37 permanent -> queue
-   moves (§2b.4) and the 800 text losses (§2b.1, §5.4). Its stated mitigation is
-   §5.3's differencing filter, which is the one piece of the design that cannot
-   run (§5.4) — so the risk ranked first arrived with its guard missing.
+1. **Risk 1 materialised, more broadly than §4.3 anticipated — but it is not
+   what killed the item.** The flanking interaction reaches the splice call site
+   as well as the fusion one, and it is the mechanism behind the 37
+   permanent -> queue moves (§2b.4) and the tail cells' 800 code-span text
+   losses (§2b.1, §5.4). Its stated mitigation is §5.3's differencing filter,
+   which is the one piece of the design that cannot run (§5.4) — so the risk
+   ranked first arrived with its guard missing. **What killed the item is a
+   second failure this list never named**: a licensed edge leaves a
+   three-character delimiter run whose pairing depends on what follows it, which
+   is not a flanking question at all — the head cells' 2,528 asterisk
+   mis-pairings, the largest family measured. §2b.3 is why that one is the
+   ledger's premise rather than a wrong arm, and why no mitigation of Risk 1
+   would have reached it.
 2. **Risk 2 did not materialise, and that is the finding.** The ledger never
    drifted into a resolver: the closed `Site`, the `false` default and §3.3's
    reviewer instruction held for the entire branch. Becoming a resolver is
