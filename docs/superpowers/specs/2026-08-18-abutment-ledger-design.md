@@ -34,28 +34,61 @@ leave the census asserting that shapes this branch fixes are unfixable.
 
 ## 2. The measurement that gates this item
 
-**No count in this spec is load-bearing until task one runs.** The 924/390/534
-split comes from a probe that was archived rather than committed, and whose
-finer 302/118/10 sub-split was found unreproducible and cut from the
-edge-splice spec's §6. That is a specific, recent failure of exactly this
-evidence, and it is the reason this section exists.
+**No count in this spec was load-bearing until this measurement ran.** The
+924/390/534 split quoted in §1 comes from a probe that was archived rather
+than committed, and whose finer 302/118/10 sub-split was found unreproducible
+and cut from the edge-splice spec's §6. That is a specific, recent failure of
+exactly this evidence, and it is the reason this section exists.
 
-Task one is a committed re-measurement:
+The re-measurement is committed at `crates/kasane-writer/tests/census_probe.rs`
+rather than archived, and is re-run with:
 
-1. Render every shape in `census-known-structure-corrupt.txt` and
-   `census-inexpressible.txt` twice — once under the licensed ledger (§3), once
-   under an all-`false` ledger reproducing today's output byte for byte.
-2. Parse both with the census's own oracle (`pulldown-cmark` 0.13, the option
-   set in `census.rs::parser_options`).
-3. Record, per shape: unchanged / newly clean / newly corrupt.
+```text
+cargo test -p kasane-writer --test census_probe -- --ignored --nocapture
+```
 
-It ships as an `#[ignore]`d test beside the census, not as a script somebody
-runs and describes. The knob it needs is §5.1's, which the deep census needs
-anyway — the probe is not extra machinery, it is the first consumer of the
-machinery this item builds.
+It renders every shape in the length 1-3 census (`census_support::shapes`)
+under each [`Ledger`](#51-the-knob) cell in isolation, and once more under the
+union of all seven cells, comparing each rendering against the same shape
+rendered under `Ledger::CONSERVATIVE` — the all-bits-off ledger that
+reproduces today's output byte for byte. A shape counts `newly_clean` if it is
+clean (`census_support::text_is_clean` and `classify_with` both agree) under
+the cell/union and was not clean under `CONSERVATIVE`, split by which of the
+two census files lists it (`census-known-structure-corrupt.txt`, the queue;
+`census-inexpressible.txt`, permanent); `newly_corrupt` if the reverse. Both
+files were read in their pre-branch state: no cell beyond
+`emph_over_strong_whole_run` had been turned on yet, and no bless had moved
+either file, so the counts below are the baseline this item's later blesses
+are measured against.
 
-If the measurement disagrees with 924/390/534, **the measurement wins** and this
-spec's counts are corrected in the same commit that records them.
+Every cell's `newly_corrupt` column measured `0`: no cell licensed here
+corrupts a shape that renders clean today.
+
+| cell | queue newly_clean | permanent newly_clean | newly_corrupt |
+|---|---|---|---|
+| `emph_over_strong_whole_run` | 0 | 0 | 0 |
+| `emph_over_strong_head_edge` | 48 | 0 | 0 |
+| `emph_over_strong_tail_edge` | 48 | 0 | 0 |
+| `strong_over_emph_head_edge` | 0 | 48 | 0 |
+| `strong_over_emph_tail_edge` | 0 | 48 | 0 |
+| `emph_beside_strong_run_seam` | 52 | 0 | 0 |
+| `strong_beside_emph_run_seam` | 52 | 0 | 0 |
+| **`ALL_CELLS` (union, not a sum)** | **292** | **97** | **0** |
+
+`ALL_CELLS` is not the column sum: one shape can be recovered by more than one
+cell, and a cell can recover a shape only once another cell has stopped a
+fusion from swallowing it (§4.3). `emph_over_strong_whole_run` measures `0`
+against both files not because it recovers nothing, but because it is the one
+cell already in `Ledger::LICENSED` (Tasks 1-2) — the shapes it recovers were
+already blessed out of both census files before this probe ran, so against the
+*current* files it has nothing left to take.
+
+**The measurement disagrees with 924/390/534, and per this section's own rule
+the measurement wins: the archived probe was wrong.** The combined recovery
+this item licenses is **389 shapes total — 292 from the structure queue, 97
+from the permanent file** — not 924, and not the 390/534 split. §6's counts
+are corrected to these measured numbers in the same commit that records this
+table.
 
 ## 3. The seam
 
@@ -300,9 +333,9 @@ program has followed since the 2a item.
   changes structure, not recovered text. If the bless moves this file, that is a
   finding to diagnose before blessing, not a diff to accept.
 - **`census-known-structure-corrupt.txt` (1,698)** — shrinks by the queued share
-  (hypothesis: 390).
+  (measured: 292, §2 — not the archived 390).
 - **`census-inexpressible.txt` (1,984)** — shrinks by the permanent share
-  (hypothesis: 534).
+  (measured: 97, §2 — not the archived 534).
 - **`census-permanent-count.txt` (1,984)** — a bless lowers it to match the
   shrink. No hand edit, no ceiling bump.
 
