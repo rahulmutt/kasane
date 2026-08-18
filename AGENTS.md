@@ -207,13 +207,20 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   whose `Delim` equals the run's own is spliced too, even where the nesting it
   replaces would sometimes have printed correctly; two adjacent runs spelled
   with the same character are fused into one run; and a delimiter that would
-  fail to flank on either side where it lands is not emitted at all. All four
-  now decide through one seam, `may_abut` — a lookup on an (outer class, inner
-  class, structural site) triple against a `Ledger` bitset of licensed cells,
-  reading no text and returning `false` for any triple it does not list, so the
-  conservative answer is the default rather than four paragraphs kept in step by
-  hand. Exactly one cell is licensed: `emph_over_strong_whole_run`, which
-  reproduces the `sole_child_nests_canonically` exemption it replaced. CommonMark
+  fail to flank on either side where it lands is not emitted at all. The first
+  three now decide through one seam, `may_abut` — a lookup on an (outer class,
+  inner class, structural site) triple against a `Ledger` bitset of licensed
+  cells, reading no text and returning `false` for any triple it does not
+  list, so the conservative answer is the default rather than three paragraphs
+  kept in step by hand. Exactly one cell is licensed:
+  `emph_over_strong_whole_run`, which reproduces the
+  `sole_child_nests_canonically` exemption it replaced. The fourth rule is
+  deliberately **not** on that seam: flanking stays in `emphasis_run`'s
+  `can_open`/`can_close`, the only place CommonMark's own rules are spelled
+  out, and the ledger reads no text. That split is load-bearing rather than
+  tidy — a structurally licensed abutment can re-flank the run around it and
+  send `emphasis_run` down its decline branch, printing children bare, which
+  is the mechanism behind both failure families the disproof below records. CommonMark
   can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
   expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
   container can nest safely when its own delimiters are one-sided-flanking (`*a
@@ -371,7 +378,8 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `Ledger`, so a tier can hold the writer's source fixed and vary one licensed
   cell instead of editing `markdown.rs` per experiment.
   `tests/census_probe.rs` is its first consumer — an `#[ignore]`d probe, run
-  with `cargo test -p kasane-writer --test census_probe -- --ignored --nocapture`,
+  with
+  `cargo test -p kasane-writer --test census_probe -- --ignored --nocapture`,
   that renders the whole length 1-3 census under each cell in isolation and
   prices what that one cell alone recovers from each structural file. A probe in the repo
   rather than a script in a scratch directory is the point: the last archived one

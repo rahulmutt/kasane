@@ -7,9 +7,11 @@ pub fn blocks_to_markdown(blocks: &[Block], assets: &AssetBag) -> String {
 
 /// Render under a chosen ledger. A test seam, not API — the same
 /// `#[doc(hidden)] pub` convention as `est_tokens` and `path_slug_of`, and for
-/// the same reason: design spec §2's probe and §5's deep census both need
-/// today's output *and* the licensed output in one process, and a copy of the
-/// writer's rules in a test would drift.
+/// the same reason: design spec §2's probe needs today's output *and* the
+/// output under one isolated cell in the same process, and a copy of the
+/// writer's rules in a test would drift. §5's deep census was the seam's other
+/// intended consumer; it was never committed — that design was measured and
+/// abandoned, spec §2b and §5.4.
 #[doc(hidden)]
 pub fn blocks_to_markdown_with_ledger(
     blocks: &[Block],

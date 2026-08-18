@@ -127,8 +127,10 @@ shipped (§5.1). The cells did not: exactly one cell is licensed on branch
 and no census file moved. **No cell set is safe to license**, and the reason is
 the ledger's key, not its arms.
 
-The evidence is two documents in
-`.superpowers/sdd/2026-08-18-abutment-ledger/`: the blocked implementer's
+The evidence is two working documents, **not committed to this repository** —
+`.superpowers/` is git-excluded, so every figure they carry is reproduced in
+§2b and §5.4 rather than cited by reference. They are
+`.superpowers/sdd/2026-08-18-abutment-ledger/`'s: the blocked implementer's
 measurements (`task-4-report.md`) and a second agent's independent verification
 in an isolated worktree (`task-4-verification.md`), which reproduced the
 length-3 table cell for cell and then measured what nobody had — lengths 4-7,
@@ -160,8 +162,9 @@ survives.**
   corpus's alphabet as well, only because those seven elements cannot witness its
   failure mode at all — see §5.4.
 - `EMPH_OVER_STRONG_HEAD_EDGE`, the other subset the length-3 table showed clean
-  on every metric, loses text on **168** shapes on §5.2's own deep corpus and
-  **3,328** on the extended one.
+  on both of its regression metrics, loses text on **168** shapes on §5.2's own
+  deep corpus and **3,328** on the extended one. (It is not clean on every
+  column: the same row moves 28 shapes queue -> permanent.)
 - The mirror pair behaves identically: `STRONG_OVER_EMPH_HEAD_EDGE` loses 168 on
   the deep corpus and 3,328 on the extended one; `STRONG_OVER_EMPH_TAIL_EDGE`
   loses 0 on the deep corpus and 800 on the extended one.
@@ -195,7 +198,8 @@ probe reads 0 (§2b.5).
 **The correction that matters is that "both edges" is not the generator.** It is
 a length-3 artifact, and believing it invites the repair "license at most one
 edge per run" — a repair that is already measured dead, at **336** text
-corruptions on lengths 4-5. A *single* licensed edge corrupts text at length 4:
+corruptions on §5.2's seven-element deep corpus at lengths 4-5, the narrower of
+the two corpora. A *single* licensed edge corrupts text at length 4:
 
 ```text
 [Emph[Strong[a]], Emph[a], Emph[Strong[a]], Emph[a]]   head cell alone
@@ -229,8 +233,15 @@ relative to the rest of the printed line: **the failure is positional, and
 Deciding it correctly means reasoning about how a parser pairs delimiters —
 which is exactly what §3.3 forbids `may_abut` from doing, and what AGENTS.md
 records this repo has refused three times. **This is the ledger's premise, not a
-wrong arm.** No further cell, no sixth `Site`, and no "already has one licensed
-edge" rule reaches it; only becoming the resolver §3.3 exists to prevent does.
+wrong arm.**
+
+*Judgement, not measurement, and marked as such:* no further cell, no sixth
+`Site`, and no "already has one licensed edge" rule looks able to reach it —
+only becoming the resolver §3.3 exists to prevent. What is measured is the
+asymmetry above; the inference that no structural key can carry it is the
+verifier's opinion and mine, and a retry that thinks it has a counterexample
+should measure it over the census's own alphabet at length >= 4 before believing
+it.
 
 ### 2b.4 The `StrongOverEmph` cells fail separately, through §4.3
 
@@ -373,7 +384,7 @@ candidates are licensed there is no first resolution, so there is no second
 iteration, and both containers stand. The correction is narrower than the defect:
 a *single* licensed edge corrupts text at length 4, so "both edges" is a length-3
 artifact rather than the generator (§2b.2), and the repair it suggests is
-measured dead at 336 text corruptions.
+measured dead at 336 text corruptions on §5.2's deep corpus.
 
 ### 3.3 Why this is a ledger and not the pairing mirror
 
@@ -630,6 +641,35 @@ and was not taken.
 - **`census-permanent-count.txt` (1,984)** — a bless lowers it to match the
   shrink. No hand edit, no ceiling bump.
 
+**Every one of the four bullets above was measured, and every expectation they
+state is false — see §2b.** No bless happened, and none of these survived
+contact with a licensed cell:
+
+- `census-known-corrupt.txt` is *not* untouched. "This item changes structure,
+  not recovered text" is the premise the branch spent itself disproving: the four
+  edge cells grow that file by **16** shapes at length 3 alone (§2b.1), and the
+  one cell that survives the literal criterion loses text on 800 shapes at
+  lengths 4-5 over the census's own alphabet (§2b.1, §5.4). That bullet's own
+  instruction — "a finding to diagnose before blessing" — is the correct
+  instruction and is what stopped the item.
+- The 292 / 97 shrinks are **not reachable by any subset of the seven cells**
+  (§2b.1). The largest text-clean, permanent -> queue-free subset recovers 48
+  queued shapes and 0 permanent ones.
+- "No hand edit, no ceiling bump" is false for that same subset. Its bless would
+  take `census-known-structure-corrupt.txt` from **1,698 to 1,622** (76 lines
+  out: 48 recovered, 28 reclassified) and `census-inexpressible.txt` from
+  **1,984 to 2,012** — *above* the ceiling, requiring exactly the hand-raised
+  `census-permanent-count.txt` this bullet forbids. Buying 48 recoveries with 28
+  fresh permanence claims is the trade §6's last paragraph exists to make
+  visible, on a branch whose §2 records that the last bless to make 748 such
+  claims at once was later found 88% wrong.
+
+The two paragraphs below are the part of §6 that held. The ratchet's queue gate
+is what caught the `StrongOverEmph` cells and its union rule is what would have
+let them through (§2b.4); and the per-shape justification rule this section ends
+with is exactly what the surviving cell's 28 queue -> permanent moves would have
+had to satisfy, one by one.
+
 `mise run census-ratchet` gates the text queue, the structure queue, and their
 union with the permanent file against the merge base, for **growth only**.
 Shapes leaving all three files pass it unaided.
@@ -648,6 +688,7 @@ move without that justification is not reviewable.
 
 1. **Existing length-3 census.** The bless diff, read line by line, is the
    primary evidence. §6 states what each file is expected to do.
+   (**No bless happened** — see §6's correction and §2b.1.)
 2. **Deep census**, `crates/kasane-writer/tests/census_deep.rs`, per §5.
 3. **Unit, in `markdown.rs`'s test module.** One pinned printed string per
    licensed cell, *and one per refusal that stays* — including
@@ -673,12 +714,13 @@ already pins what this section wanted it rewritten to pin — a same-`Delim`
 container mid-buffer, refused by `may_abut(Emph, Emph, Interior)`, which no cell
 touches because `bit_for` has no same-`Delim` arm at any site. Nothing here is
 weakened, because nothing here broke. The test that *does* break is
-`fusing_nested_emphasis_does_not_leak_its_delimiters`, which renders `***ab***`
-where it pins `*ab*`; of the two cases behind that, one is a genuine recovery and
-one — `[Strong[Emph[a]], Strong[Emph[b]]]` — is a regression, `Inexpressible` ->
-`Corrupt` with em/strong order inverted rather than a level erased. Point 2 of
-this list is moot — the deep census was never committed (§5.4) — and point 5 is
-violated: P13 fails with the cells on (§2b.5).
+`fusing_nested_emphasis_does_not_leak_its_delimiters`. Two of its three cases
+move; the reported failure string — `***ab***` where the test pins `*ab*` — is
+case 2, `[Emph[Strong[a]], Emph[Strong[b]]]`, and that one is a genuine
+recovery. Case 3, `[Strong[Emph[a]], Strong[Emph[b]]]`, pins `**ab**` and is a
+regression: `Inexpressible` -> `Corrupt`, em/strong order inverted rather than a
+level erased. Point 2 of this list is moot — the deep census was never committed
+(§5.4) — and point 5 is violated: P13 fails with the cells on (§2b.5).
 
 ## 8. Non-goals
 
@@ -708,6 +750,9 @@ violated: P13 fails with the cells on (§2b.5).
 `mise run lint && mise run test` green, with `lint` covering `--all-targets`
 plus `fmt --check`, then `mise run census-ratchet`. The proof specific to this
 item is the bless diff plus the deep tier, both read rather than accepted.
+**Neither exists.** No bless was made and the deep tier was never committed
+(§5.4); what stands in their place is §2's committed probe, the measurements in
+§2b, and the fact that the branch's rendered output is byte-identical to `main`.
 
 Risks, in the order they deserve worry:
 

@@ -7,7 +7,7 @@
 > byte-identical to `main`. **Task 4 was attempted, measured, and cancelled, and
 > Task 5 with it** — no cell set is free of text loss, because the failure is
 > positional while the ledger's key is structural, and the deep census tier Task
-> 5 would have built fails 2,561 times on unmodified `main` as designed. Task 6
+> 4 would have built fails 2,561 times on unmodified `main` as designed. Task 6
 > was replaced by a documentation task recording the disproof. Read
 > `docs/superpowers/specs/2026-08-18-abutment-ledger-design.md` §2b before
 > reading anything below; the Task 4-5 bodies are kept unedited because they are
