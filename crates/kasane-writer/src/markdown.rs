@@ -707,6 +707,19 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
 /// [`edge_to_splice`] this does not stop at the first and last printing
 /// element — position is irrelevant to the collision this closes, so every
 /// element is a candidate.
+///
+/// The `may_abut` query below is position-blind by construction: it always
+/// asks `Site::Interior`, even for a child [`edge_to_splice`] would have
+/// asked about with `HeadEdge`/`TailEdge`/`WholeRun` first. That is
+/// behaviour-neutral today, since no same-`Delim` triple has an arm at any
+/// site, but it is a live hazard for later widening — `edge_to_splice` runs
+/// first and only defers a child when `may_abut` licenses it there, so
+/// licensing a same-`Delim` cell at `WholeRun` (say) would make
+/// `edge_to_splice` decline that child while this function, asking the same
+/// child under the unlicensed `Interior`, splices it anyway on the very next
+/// loop iteration of `splice_children`. A future cell here has to widen
+/// *this* site, or teach this function the candidate's edge position too, not
+/// just add an arm to `bit_for`.
 fn same_delim_to_splice(
     children: &[Flat<'_>],
     want: escape::Delim,
@@ -2610,11 +2623,12 @@ mod tests {
         assert_eq!(recovered(inls), "a");
     }
 
-    /// The control for `sole_child_nests_canonically`'s second condition. A
-    /// same-class sole child is *not* the canonical nesting and must keep
-    /// splicing; `same_delim_to_splice` would catch it anyway, which is
-    /// precisely why the predicate states the condition rather than relying on
-    /// the other rule's ordering (design spec §3.2).
+    /// The control for `bit_for`'s absence of an `(Emph, Emph, WholeRun)` arm.
+    /// A same-class sole child is *not* licensed to abut and must keep
+    /// splicing; `same_delim_to_splice` would catch it anyway (its own
+    /// `Site::Interior` query, unconditionally true today), which is
+    /// precisely why `edge_to_splice` tests the site itself rather than
+    /// relying on the other rule's ordering (design spec §3.2).
     #[test]
     fn an_emph_run_wrapping_only_an_emph_is_still_spliced() {
         let inls = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
@@ -2630,8 +2644,9 @@ mod tests {
     /// here or nowhere (design spec §3.3).
     ///
     /// The outer `Emph` run declines and keeps its `Strong`; the inner
-    /// `Strong` run does not qualify — condition 3 fails — so it splices its
-    /// `Emph` and prints `**b**`; the whole prints `***b***`. The innermost
+    /// `Strong` run does not qualify — `bit_for` has no `(Strong, Emph,
+    /// WholeRun)` arm, so `Site::WholeRun` is unlicensed for that pair — so it
+    /// splices its `Emph` and prints `**b**`; the whole prints `***b***`. The innermost
     /// `Emph` is lost, but that is the `Strong`-outer limit reappearing one
     /// level down, not a new corruption, and Task 2 files the shape permanent
     /// on the strength of the `Strong[Emph[…]]` it contains. A `****b****`
@@ -2700,5 +2715,30 @@ mod tests {
         for (name, bit) in Ledger::CELLS {
             assert!(seen & bit != 0, "cell {name} is named but unreachable");
         }
+    }
+
+    /// The threading itself, not just the table: `blocks_to_markdown_with_ledger`
+    /// must actually carry `ledger` down to the rule, not silently substitute
+    /// `Ledger::LICENSED` at some call site along the way -- the exact failure
+    /// every other test in this file cannot see, since the census and every
+    /// existing render test run under `LICENSED` alone. Under `CONSERVATIVE`
+    /// the sole-child `Strong` must still splice, exactly as it did before this
+    /// task (and as `sole_child_nests_canonically` did on `main`); under
+    /// `LICENSED` (`para`, which renders through the public `blocks_to_markdown`)
+    /// it must not.
+    #[test]
+    fn the_ledger_parameter_actually_reaches_the_rules() {
+        let inls = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Text(
+            "a".into(),
+        )])])];
+        assert_eq!(para(inls.clone()), "***a***");
+        assert_eq!(
+            blocks_to_markdown_with_ledger(
+                &[Block::Para(inls)],
+                &AssetBag::default(),
+                Ledger::CONSERVATIVE
+            ),
+            "*a*\n\n"
+        );
     }
 }
