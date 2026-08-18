@@ -1,7 +1,10 @@
 # kasane — Abutment Ledger Design Spec
 
 **Date:** 2026-08-18
-**Status:** Designed. Not implemented.
+**Status:** Partly implemented on branch `abutment-ledger`. The seam (`Site`,
+`Ledger`, `may_abut`), the shared census oracle and the committed per-cell probe
+ship; rendered output is byte-identical to `main`, because the licensing this
+item existed to do was measured and abandoned. See §2b.
 **Parent specs:** `2026-08-16-structural-census-design.md` (§8, the residual
 program), `2026-08-16-cross-class-edge-splice-design.md` (§6, whose "closing the
 fusion share is out of scope here" is this item's scope).
@@ -113,7 +116,190 @@ from the permanent file** — not 924, and not the 390/534 split. §6's counts
 are corrected to these measured numbers in the same commit that records this
 table.
 
+## 2b. The disproof
+
+**The licensing this spec exists to authorize did not ship, and §3-§5 describe
+an abandoned design.** The seam shipped (Task 1, §3.1 and §4), the shared census
+oracle shipped (Task 2), §2's probe shipped (Task 3), and `Ledger` itself
+shipped (§5.1). The cells did not: exactly one cell is licensed on branch
+`abutment-ledger` — `EMPH_OVER_STRONG_WHOLE_RUN`, reproducing the deleted
+`sole_child_nests_canonically` — so rendered output is byte-identical to `main`
+and no census file moved. **No cell set is safe to license**, and the reason is
+the ledger's key, not its arms.
+
+The evidence is two documents in
+`.superpowers/sdd/2026-08-18-abutment-ledger/`: the blocked implementer's
+measurements (`task-4-report.md`) and a second agent's independent verification
+in an isolated worktree (`task-4-verification.md`), which reproduced the
+length-3 table cell for cell and then measured what nobody had — lengths 4-7,
+and the census's own 19-element alphabet. Where they differ, the verification
+governs. **The baseline throughout is the shipped ledger** (bit 0 alone, what
+users get today), never `CONSERVATIVE`, so every regression below is against
+what ships. Three corpora: the length-3 census, 7,239 shapes over 19 elements;
+§5.2's deep corpus, 19,208 shapes over 7 elements at lengths 4-5; and an
+extended corpus the verification added, the census's own 19 elements at lengths
+4 and 5 — 130,321 + 2,476,099 = 2,606,420 shapes swept per cell.
+
+### 2b.1 No cell set is safe to license
+
+Under this item's literal criterion — zero text regressions on the length-3
+census and on §5.2's deep corpus, zero permanent -> queue moves — **exactly one
+non-empty subset survives:** `EMPH_OVER_STRONG_TAIL_EDGE`. It recovers **48**
+queue shapes and **0** permanent ones, at the cost of **28** queue -> permanent
+moves, each of which §6 requires justified individually. That is about 16% of the
+queued share this item was scoped to recover (§2's 292) and none of the
+permanent share (§2's 97). **§6's "shrinks by 292 / shrinks by 97" is not
+reachable by any subset of the seven cells.**
+
+Under the criterion that actually matters — no text loss at all — **none
+survives.**
+
+- `EMPH_OVER_STRONG_TAIL_EDGE` loses recovered text on **800** shapes at lengths
+  4-5 over the census's own 19-element alphabet (16 at length 4, 784 at length
+  5). It measures 0 on §5.2's deep corpus, and at lengths 6 and 7 over that
+  corpus's alphabet as well, only because those seven elements cannot witness its
+  failure mode at all — see §5.4.
+- `EMPH_OVER_STRONG_HEAD_EDGE`, the other subset the length-3 table showed clean
+  on every metric, loses text on **168** shapes on §5.2's own deep corpus and
+  **3,328** on the extended one.
+- The mirror pair behaves identically: `STRONG_OVER_EMPH_HEAD_EDGE` loses 168 on
+  the deep corpus and 3,328 on the extended one; `STRONG_OVER_EMPH_TAIL_EDGE`
+  loses 0 on the deep corpus and 800 on the extended one.
+- All four edge cells together: **16** text regressions at length 3, **744** on
+  the deep corpus, **640** at length 4 of the extended one.
+- The two `RunSeam` cells were never close: **210** text regressions each at
+  length 3 alone, **460** for the seven-cell union.
+
+Length-3 cleanliness does not imply length-4 cleanliness for any of these cells,
+and §5.2's deep corpus does not imply the census's own alphabet.
+
+### 2b.2 §3.2's "both edges need no cell" claim is false
+
+§3.2 asserts that "both edges collide, distinct containers" needs no cell,
+because "the splice loop's fixpoint handles the second after the first
+resolves." It does not. `edge_to_splice` returns the first candidate that is
+*not* licensed; when both are licensed it returns `None`, `splice_children`'s
+`while let` exits on its first iteration, and both containers stand:
+
+```text
+[Emph[Strong[a]], Emph[a], Emph[Strong[a]]]
+  shipped     "*aaa*"           recovers "aaa"    text ok,   structurally Corrupt
+  head+tail   "***a**a**a***"   recovers "aaa**"  TEXT LOST, structurally Clean
+```
+
+The fixpoint handles the second candidate *after the first splices*; when
+neither splices there is no second iteration. Note the second line: the shape
+becomes structurally `Clean` while its text is destroyed, which is why §2's
+probe reads 0 (§2b.5).
+
+**The correction that matters is that "both edges" is not the generator.** It is
+a length-3 artifact, and believing it invites the repair "license at most one
+edge per run" — a repair that is already measured dead, at **336** text
+corruptions on lengths 4-5. A *single* licensed edge corrupts text at length 4:
+
+```text
+[Emph[Strong[a]], Emph[a], Emph[Strong[a]], Emph[a]]   head cell alone
+  "***a**a**a**a*"   recovers "aaa*a*"   want "aaaa"   TEXT LOST
+```
+
+Here the tail candidate is a bare `Text`, which `edge_to_splice` rejects before
+`may_abut` is ever consulted — "both edges licensed" is not present. The mirror
+shape under the tail cell round-trips fine.
+
+### 2b.3 The premise fails, not an arm
+
+Split the extended corpus's text losses by which delimiter leaks into the
+recovered text:
+
+| cell | backtick family | asterisk family |
+|---|---|---|
+| `EMPH_OVER_STRONG_HEAD_EDGE` | 800 | **2,528** |
+| `EMPH_OVER_STRONG_TAIL_EDGE` | 800 | **0** |
+| `STRONG_OVER_EMPH_HEAD_EDGE` | 800 | **2,528** |
+| `STRONG_OVER_EMPH_TAIL_EDGE` | 800 | **0** |
+
+Head and tail are the same question by this spec's own symmetry, and `may_abut`
+answers them identically — yet a head licence mis-pairs an asterisk on 2,528
+shapes and a tail licence on **zero**. A structural key that cannot separate two
+cases the *output* separates is not under-specified; it is keyed on the wrong
+thing. The distinguishing fact is where the three-character delimiter run sits
+relative to the rest of the printed line: **the failure is positional, and
+`may_abut`'s key is structural.**
+
+Deciding it correctly means reasoning about how a parser pairs delimiters —
+which is exactly what §3.3 forbids `may_abut` from doing, and what AGENTS.md
+records this repo has refused three times. **This is the ledger's premise, not a
+wrong arm.** No further cell, no sixth `Site`, and no "already has one licensed
+edge" rule reaches it; only becoming the resolver §3.3 exists to prevent does.
+
+### 2b.4 The `StrongOverEmph` cells fail separately, through §4.3
+
+Licensing an `Emph` to stand at a `Strong` run's edge can make the `Strong` run
+itself fail to flank, so `emphasis_run` takes its decline branch, prints the
+children bare, and drops the `<strong>` entirely:
+
+```text
+[Text("a"), Strong[Emph[a]], Strong[a]]
+  shipped    "a**aa**"  ->  a<strong>aa</strong>   stacks [] [St] [St]   Inexpressible
+  StEmHead   "a*a*a"    ->  a<em>a</em>a           stacks [] [Em] []     Corrupt
+```
+
+Today's output erases the inner `<em>` — the single erasure
+`differs_only_by_erasure` forgives, and the reason the shape is filed permanent.
+The licensed output loses the `<strong>` outright and promotes to top level an
+`<em>` the IR nests inside it. That is strictly worse, and **37 shapes move
+permanent -> queue** under both `StrongOverEmph` cells (8 under either alone).
+
+`mise run census-ratchet` catches this, and **only through its queue gate**. The
+verification simulated one such move and ran the real task:
+
+```text
+set          base     head    delta   verdict
+text           32       32       +0   ok
+queue        1698     1699       +1   FAIL -- 1 added
+           [Code("x"), Code("x"), Emph([Emph([Text("a")])])]
+perm         1984     1983       -1   ok
+union        3682     3682       +0   ok
+census ratchet FAILED: the allowlists may only shrink against main.
+```
+
+**The union is unchanged.** The union rule §6 leans on — a shape may move between
+the two files, but none may become corrupt that was not — lets this through. §6
+worries about queue -> permanent laundering; this is the opposite direction, and
+it is the one that bites.
+
+### 2b.5 Every structural gate on this branch is blind to this family
+
+`structreg` — shapes structurally `Clean` under the shipped ledger that stop
+being clean — measured **0 in every single row** of every table above: all
+nineteen length-3 rows, all eight deep-corpus rows, every extended-corpus row.
+Over those same rows, text losses run to 3,328 for one cell and 744 for four.
+§2's `ALL_CELLS_VS_LICENSED,shipped_baseline,389,0` row is that same 0, and it is
+precisely the reassurance that does not survive contact with length 4.
+
+The reason is structural rather than accidental: the shapes that lose text are
+already in the queue or the permanent file, so no structural counter has
+anything to move. §2's probe, the census's structural tier, and the ratchet's
+union rule are blind to this family in the same way, for the same reason.
+**This is the most transferable finding on the branch.** A structural green is
+not evidence about text; any future gate for a change of this kind has to lead
+with the text tier at length >= 4.
+
+Only the text tiers spoke. `properties.rs`'s P13
+(`p13_inline_text_survives_rendering`) fails with the four edge cells on, shrinking
+deterministically to `[Strong[Emph[a]], Emph[a], Emph[Emph[a]]]` -> `***a*a*a***`
+recovering `aaa**`; with `EMPH_OVER_STRONG_TAIL_EDGE` alone it is 16/16 green,
+which is the same blindness one corpus further out.
+
 ## 3. The seam
+
+> **Shipped, and disproven as a licensing mechanism.** §3.1's interface and
+> §3.3's refusal are what Task 1 built and what the writer carries today. §3.2's
+> hypothesis table is the abandoned part: its two container-edge rows and its
+> `RunSeam` row license six cells, every one of them was measured separately, and
+> not one is safe (§2b.1); its "two rows need no cell" paragraph is false
+> (§2b.2). §2b.3 is why the key, not the rows, is the defect. Kept intact — the
+> next attempt needs to know exactly what was tried.
 
 ### 3.1 Interface
 
@@ -182,6 +368,13 @@ pair that would exceed three is a same-`Delim` pair the table already refuses.
 No length parameter is needed, and adding one would invite a caller to compute
 what the pair already decides.
 
+**The first of those two claims is false — see §2b.2.** When both edge
+candidates are licensed there is no first resolution, so there is no second
+iteration, and both containers stand. The correction is narrower than the defect:
+a *single* licensed edge corrupts text at length 4, so "both edges" is a length-3
+artifact rather than the generator (§2b.2), and the repair it suggests is
+measured dead at 336 text corruptions.
+
 ### 3.3 Why this is a ledger and not the pairing mirror
 
 AGENTS.md records that telling a safe spelling from a corrupting one "means
@@ -198,6 +391,11 @@ mirror re-entering by the back door**, and should be rejected in review even if
 its answer is correct.
 
 ## 4. The two call sites
+
+> **Both call sites shipped as described** (Task 1), routing through the seam
+> with one cell licensed, byte-identical to `main`. §4.3 is the part that
+> matters in hindsight: it named the interaction that killed the item, and
+> understated it (§2b.4, §5.4).
 
 ### 4.1 `splice_children`
 
@@ -272,7 +470,22 @@ consequence of the answer. §5 is what has to catch it, and the differencing
 filter in §5.3 is chosen specifically so that it catches it whether or not
 anyone predicted the interaction.
 
+**Measured: this is the item's whole cost centre, and it reaches further than
+this subsection says.** The decline branch is what turns a licensed abutment
+into the 37 permanent -> queue moves of §2b.4 *and* into the 800 text losses of
+§2b.1 — the same event both times, a run re-flanked into printing its children
+bare. It is reached from `splice_children`, not only from the shortened runs
+`run_end` produces, which is a case this subsection does not cover. And §5.3's
+filter, the stated mitigation, is the one piece of the design that cannot run
+(§5.4).
+
 ## 5. The deep census
+
+> **Never committed.** `Ledger` (§5.1) shipped; the tier itself was written
+> verbatim from §5.2/§5.3, measured, and discarded, because as specified it
+> fails 2,561 times on unmodified `main` and its corpus cannot witness the
+> failure it exists to catch. §5.4 records both defects. The design content
+> below is left intact because those two defects are the transferable part.
 
 ### 5.1 The knob
 
@@ -350,6 +563,61 @@ alone is authorized as a fallback (2,401 shapes) — **logged in the spec and th
 PR body, not dropped silently**, per the "no silent caps" rule the census
 program has followed since the 2a item.
 
+### 5.4 Correction: the tier as designed cannot run, and its corpus is blind
+
+`crates/kasane-writer/tests/census_deep.rs` was written verbatim from §5.2 and
+§5.3, measured, and **never committed**. It has two defects, either one
+disqualifying.
+
+**Its differencing filter baselines against the wrong ledger.** §5.3 keeps the
+shapes whose `LICENSED` and `CONSERVATIVE` renderings differ, which isolates
+*spellings the whole ledger changed*, not *spellings this item newly licensed* —
+and the whole ledger already includes Task 1's shipped cell, whose §4.3
+consequence is queued rather than clean. Run as specified against unmodified
+`main`, the tier fails **2,561 times**, out of 3,513 kept shapes. Every one of
+the 2,561 is a top-level `Emph[Strong[..]]` with a neighbour, and its length-3
+instance is a residual the census already records — line 568 of
+`census-known-structure-corrupt.txt`:
+
+```text
+[Emph([Strong([Text("a")])]), Text("a"), Text("a")]
+```
+
+So §5.3's contract — "a corrupt shape in this tier is a wrong cell in
+`may_abut`, not a residual to be recorded" — contradicts a residual the length-3
+census records for the cell the writer already ships. **The refinement that kills
+the obvious repair: 436 of the 2,561 classify `Inexpressible`, not `Corrupt`**
+(the other 2,125 are `Corrupt`), so handing the tier the length-3 queue as an
+allowlist — which §5.3 refuses by design anyway — would still leave 436
+failures. Only re-baselining the filter against the shipped `LICENSED` fixes
+both halves.
+
+**§5.2's corpus cannot witness the failure it exists to catch.** Its seven
+elements include `Code("x")` and `Emph[Strong[a]]` but **no emphasis container
+wrapping a code span** — no `Emph[Code("x")]`, no `Strong[Code("x")]`. Both are
+in the length-3 census's own alphabet, and they are precisely what witnesses
+`EMPH_OVER_STRONG_TAIL_EDGE`'s 800 text losses (§2b.1):
+
+```text
+[Code("x"), Emph[Code("x")], Emph[Strong[a]], Text("a")]
+  shipped     "`x`*`x`a*a"    recovers "xxaa"    text ok, structurally Corrupt
+  tail cell   "`x``x`**a**a"  recovers "x``xaa"  TEXT LOST
+```
+
+With the tail `Strong` licensed to stand, the `Emph` run's `*` no longer flanks,
+`emphasis_run` declines, the children print bare, and the leading `` `x` `` of
+`Emph[Code("x")]` abuts the preceding `` `x` `` into one code span. That family
+is a pre-existing writer defect the tail cell *reaches* rather than creates —
+§8's backtick non-goal — but relative to the shipped ledger it is still text
+loss, on 800 shapes that render cleanly today. **The tier as designed would have
+run green on that cell and blessed it as clean.** The lesson generalises past
+this item: a differencing filter is only as good as the alphabet it differences
+over, and a corpus narrowed for speed carries a blind spot someone has to name.
+
+**Wall-clock was never the constraint.** The tier ran in 1.06s against a 7.9s
+workspace suite, about 14%. §5.3's authorized length-4 fallback was not needed
+and was not taken.
+
 ## 6. What happens to the four census files
 
 - **`census-known-corrupt.txt` (32, text tier)** — expected untouched. This item
@@ -399,6 +667,19 @@ the one place in the work where a green suite is bought by editing a test, so
 each rewrite must state **which ledger cell now covers the case**. If no cell
 does, the test is right and the change is wrong.
 
+**Both predictions are wrong, measured with the four edge cells added to the
+shipped one: both tests pass unchanged.** `splicing_mid_buffer_costs_a_span_that_would_round_trip`
+already pins what this section wanted it rewritten to pin — a same-`Delim`
+container mid-buffer, refused by `may_abut(Emph, Emph, Interior)`, which no cell
+touches because `bit_for` has no same-`Delim` arm at any site. Nothing here is
+weakened, because nothing here broke. The test that *does* break is
+`fusing_nested_emphasis_does_not_leak_its_delimiters`, which renders `***ab***`
+where it pins `*ab*`; of the two cases behind that, one is a genuine recovery and
+one — `[Strong[Emph[a]], Strong[Emph[b]]]` — is a regression, `Inexpressible` ->
+`Corrupt` with em/strong order inverted rather than a level erased. Point 2 of
+this list is moot — the deep census was never committed (§5.4) — and point 5 is
+violated: P13 fails with the cells on (§2b.5).
+
 ## 8. Non-goals
 
 - **Widening the alphabet to `_`.** Item 2, priced by the same probe at ~2,198
@@ -406,7 +687,11 @@ does, the test is right and the change is wrong.
   that are clean today — the probe examined only already-failing ones. It also
   owns making the permanence condition per-position.
 - **The 32-shape backtick text family** (`census-known-corrupt.txt`), whose fix
-  shape is known and recorded at emphasis-seam spec §8.
+  shape is known and recorded at emphasis-seam spec §8. **Measured since: not
+  separable from this item after all.** Every one of
+  `EMPH_OVER_STRONG_TAIL_EDGE`'s 800 text losses is this family, reached through
+  §4.3's decline branch rather than created (§5.4). Any retry has to close it
+  first, or measure and accept those 800 in the open.
 - **Items 2b** (`Ctx::Cell`, `inlines_to_html` — no exhaustive sweep of any kind
   exists) **and 2c** (block structure). Both unstarted and unmeasured.
 - **The genuinely unspellable residual.** ~560 shapes, ~370 of them with no
@@ -440,3 +725,28 @@ Risks, in the order they deserve worry:
    same commit that recorded the new ones.
 5. **queue -> permanent laundering (§6).** Mitigation: per-shape justification
    in the PR body; the union ratchet alone does not catch it.
+
+**Which of these materialised.**
+
+1. **Risk 1 is what killed the item, and it killed it more broadly than §4.3
+   anticipated.** The flanking interaction reaches the splice call site as well
+   as the fusion one: it is the mechanism behind both the 37 permanent -> queue
+   moves (§2b.4) and the 800 text losses (§2b.1, §5.4). Its stated mitigation is
+   §5.3's differencing filter, which is the one piece of the design that cannot
+   run (§5.4) — so the risk ranked first arrived with its guard missing.
+2. **Risk 2 did not materialise, and that is the finding.** The ledger never
+   drifted into a resolver: the closed `Site`, the `false` default and §3.3's
+   reviewer instruction held for the entire branch. Becoming a resolver is
+   exactly what it would have had to do to work (§2b.3). The mitigation was
+   effective and the design was wrong — the discipline protected a premise that
+   could not carry the item.
+3. **Risk 3 did not materialise.** 1.06s against a 7.9s workspace suite (§5.4).
+4. Unchanged: this happened, as this row already records.
+5. **Risk 5 is real and measured** — 56 queue -> permanent moves under the four
+   cells, 28 under the one that survives the literal criterion (§2b.1) — but the
+   *opposite* direction, which this list does not name, is what the ratchet
+   actually caught (§2b.4).
+
+**And one risk nobody listed, which is the branch's most transferable finding:
+that structural gates would stay silent through all of it.** `structreg` measured
+0 in every row of every table while text losses ran into the thousands (§2b.5).

@@ -1,5 +1,18 @@
 # Abutment Ledger Implementation Plan
 
+> **Superseded in part, 2026-08-18. Tasks 1-3 executed; Tasks 4-6 as written
+> will not run.** Task 1 (the seam), Task 2 (the shared census oracle) and Task 3 (the
+> committed per-cell probe) shipped on branch `abutment-ledger`, all
+> behaviour-neutral: exactly one cell is licensed and rendered output is
+> byte-identical to `main`. **Task 4 was attempted, measured, and cancelled, and
+> Task 5 with it** — no cell set is free of text loss, because the failure is
+> positional while the ledger's key is structural, and the deep census tier Task
+> 5 would have built fails 2,561 times on unmodified `main` as designed. Task 6
+> was replaced by a documentation task recording the disproof. Read
+> `docs/superpowers/specs/2026-08-18-abutment-ledger-design.md` §2b before
+> reading anything below; the Task 4-5 bodies are kept unedited because they are
+> what the measurement refutes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Recover the ~924 inline shapes whose plain `*`-only spelling already round-trips but which `run_end`'s fusion and `splice_children`'s collapse currently discard, by routing both rules through one enumerated ledger of licensed abutments.
