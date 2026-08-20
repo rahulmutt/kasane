@@ -7,7 +7,7 @@
 //! reason `section::canonicalize_inlines` is a `#[doc(hidden)] pub` seam
 //! rather than a rule re-spelled in a test.
 //!
-//! A third tier was designed and **never committed**: `census_deep.rs`, design
+//! A third tier was designed and **never shipped**: `census_deep.rs`, design
 //! spec §5's licensed-spelling tier. It was written, measured, and abandoned
 //! with the rest of that design — as specified it fails 2,561 times on
 //! unmodified `main`, and its corpus cannot witness the failure it exists to
@@ -152,7 +152,7 @@ pub fn render(seq: &[Inline], ledger: Ledger) -> String {
 /// when the text is already corrupt, because the structural tier is gated on
 /// the text tier and the text assertion names those shapes itself. A caller
 /// that is not the ratchet must ask both questions, and the probe does. (The
-/// never-committed `census_deep.rs` was the caller this sentence originally
+/// never-shipped `census_deep.rs` was the caller this sentence originally
 /// named — design spec §5.4.)
 pub fn text_is_clean(seq: &[Inline], ledger: Ledger) -> bool {
     let md = render(seq, ledger);
