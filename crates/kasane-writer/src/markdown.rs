@@ -297,14 +297,20 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
 fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+    // PROBE: owned working view so a declined run's children can re-enter it.
+    let mut items: Vec<Flat<'a>> = items.to_vec();
     let mut s = String::new();
     let mut pos = pos;
     let mut i = 0;
+    // PROBE B: one checkpoint per emitted run, so a decline can roll the
+    // buffer back and re-scan the run that already landed beside it.
+    let mut marks: Vec<(usize, usize, Pos)> = Vec::new();
     while i < items.len() {
         let (inline, depth) = items[i];
         let before = pos;
         let len_before = s.len();
-        let end = run_end(items, i, ledger);
+        marks.push((i, len_before, before));
+        let end = run_end(&items, i, ledger);
         let members = &items[i..end];
         // The run's class comes from its first *printing* member, not its
         // first member outright: a vacuous leading `Emph` prints no
@@ -325,7 +331,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
                 let after_class = next_class(&items[end..]);
                 let markup = if d == escape::Delim::Emph { "*" } else { "**" };
-                s.push_str(&emphasis_run(
+                match emphasis_run(
                     members,
                     d,
                     ctx,
@@ -334,7 +340,22 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                     before_class,
                     after_class,
                     ledger,
-                ))
+                ) {
+                    RunOut::Emitted(t) => s.push_str(&t),
+                    // PROBE: the run printed no delimiter, so its children are
+                    // plain neighbours in the printed line. Put them back in
+                    // the view where the run stood and rescan from `i`.
+                    RunOut::Declined(children) => {
+                        items.splice(i..end, children);
+                        marks.pop();
+                        if let Some((pi, plen, ppos)) = marks.pop() {
+                            s.truncate(plen);
+                            pos = ppos;
+                            i = pi;
+                        }
+                        continue;
+                    }
+                }
             }
             // `delim` said this inline prints no delimiter that can collide,
             // so the run is this inline alone and it renders as it always has.
@@ -894,6 +915,13 @@ fn can_close(before: Flank, after: Flank) -> bool {
 // Eight plain params, each threaded straight through from `inlines_to_md_flat`'s
 // one call site with no natural sub-grouping; a struct would just relocate the
 // noise.
+/// PROBE: what one emphasis run contributed -- either printed text, or the
+/// children it declined to wrap, handed back for re-entry into the outer view.
+enum RunOut<'a> {
+    Emitted(String),
+    Declined(Vec<Flat<'a>>),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emphasis_run<'a>(
     members: &[Flat<'a>],
@@ -904,7 +932,7 @@ fn emphasis_run<'a>(
     before: Flank,
     after: Flank,
     ledger: Ledger,
-) -> String {
+) -> RunOut<'a> {
     let children = splice_children(run_children(members), want, ledger);
     let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
     let core = inner.trim();
@@ -912,7 +940,7 @@ fn emphasis_run<'a>(
     // `emphasize` says so itself -- and has no first or last character to
     // classify, so the flanking question does not arise.
     if core.is_empty() {
-        return inner;
+        return RunOut::Emitted(inner);
     }
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
@@ -934,7 +962,7 @@ fn emphasis_run<'a>(
     let opens = can_open(open_before, class_of(core.chars().next().unwrap()));
     let closes = can_close(class_of(core.chars().next_back().unwrap()), close_after);
     if opens && closes {
-        emphasize(&inner, markup)
+        RunOut::Emitted(emphasize(&inner, markup))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
         // it as a literal asterisk in the middle of the prose. The text is the
@@ -961,7 +989,7 @@ fn emphasis_run<'a>(
         // 32-shape family the census allowlist still names (design spec §8's
         // residual-risk bullets); a future shape corrupt only through this
         // seam would not be caught by anything here.
-        inner
+        RunOut::Declined(children)
     }
 }
 
