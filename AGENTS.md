@@ -207,7 +207,24 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   whose `Delim` equals the run's own is spliced too, even where the nesting it
   replaces would sometimes have printed correctly; two adjacent runs spelled
   with the same character are fused into one run; and a delimiter that would
-  fail to flank on either side where it lands is not emitted at all. CommonMark
+  fail to flank on either side where it lands is not emitted at all. The first
+  three now decide through one seam, `may_abut` — a lookup on an (outer class,
+  inner class, structural site) triple against a `Ledger` bitset of licensed
+  cells, reading no text and returning `false` for any triple it does not
+  list, so the conservative answer is the default rather than three paragraphs
+  kept in step by hand. Exactly one cell is licensed:
+  `emph_over_strong_whole_run`, which reproduces the
+  `sole_child_nests_canonically` exemption it replaced. The fourth rule is
+  deliberately **not** on that seam: flanking stays in `emphasis_run`'s
+  `can_open`/`can_close`, the only place CommonMark's own rules are spelled
+  out, and the ledger reads no text. That split is load-bearing rather than
+  tidy, and the disproof below records two distinct failures across it, with
+  distinct causes: a licensed abutment can re-flank the run around it and send
+  `emphasis_run` down its decline branch, printing children bare (the 37
+  permanent-to-queue moves, and the tail cells' 800 code-span text losses); or
+  it can leave a three-character delimiter run whose pairing depends on what
+  follows it, which is not a flanking question at all (the head cells' 2,528
+  asterisk mis-pairings). CommonMark
   can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
   expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
   container can nest safely when its own delimiters are one-sided-flanking (`*a
@@ -217,6 +234,14 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   the span boundary for the text -- which is the invariant -- uniformly rather
   than case by case, and `kasane-writer/tests/census.rs` is the exhaustive check
   that no such collision reaches the printed line regardless.
+  Widening that licensed set past the one cell was attempted on branch
+  `abutment-ledger` and **disproven by measurement**: no cell set is free of text
+  loss, because the failure is positional — it depends on what follows a run —
+  while the ledger's key is structural, so deciding it correctly is the same
+  delimiter-pairing mirror. Do not retry it as a table;
+  `docs/superpowers/specs/2026-08-18-abutment-ledger-design.md` §2b has the
+  numbers and §5.4 has the two defects in the tier that was supposed to catch
+  this.
   `markdown.rs` decides all of this on a flattened view of the *printed*
   stream rather than on IR siblings, because the two are not the same list: an
   unresolved link prints only its children, so those children stand beside the
@@ -350,6 +375,21 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   safe to allow: a shape may move between the two files, but none may become
   corrupt that was not. It runs in CI *after* `mise run test`, because it takes
   the files' accuracy on trust and only the test establishes that.
+  `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
+  a tier measures with the census's own instrument rather than a copy that
+  drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers
+  what a parser saw, and `render`, `text_is_clean` and `classify_with` each
+  take the writer's `Ledger`, so a tier can hold the writer's source fixed and
+  vary one licensed cell instead of editing `markdown.rs` per experiment.
+  `census.rs` consumes it, and so does `tests/census_probe.rs` — an
+  `#[ignore]`d probe, run with
+  `cargo test -p kasane-writer --test census_probe -- --ignored --nocapture`,
+  that renders the whole length 1-3 census under each ledger cell in isolation
+  and prices what that one cell alone recovers from each structural file. A
+  probe in the repo rather than a script in a scratch directory is the point:
+  the last archived one produced a sub-split nobody could reproduce. Read what
+  it prints with the design spec's §2b beside it — its columns are length-3
+  figures, and the cells it prices lose recovered text at lengths 4-5.
   Design spec
   `2026-08-16-structural-census-design.md`; its §6 recorded the largest queued
   family, 2,002 shapes losing a level because

@@ -2,19 +2,40 @@ use crate::escape::{self, Ctx, Pos};
 use kasane_ir::{AssetBag, Block, Inline, RefTarget, Table};
 
 pub fn blocks_to_markdown(blocks: &[Block], assets: &AssetBag) -> String {
-    blocks_to_markdown_at(blocks, assets, 0)
+    blocks_to_markdown_with_ledger(blocks, assets, Ledger::LICENSED)
 }
 
-fn blocks_to_markdown_at(blocks: &[Block], assets: &AssetBag, depth: usize) -> String {
+/// Render under a chosen ledger. A test seam, not API — the same
+/// `#[doc(hidden)] pub` convention as `est_tokens` and `path_slug_of`, and for
+/// the same reason: design spec §2's probe needs today's output *and* the
+/// output under one isolated cell in the same process, and a copy of the
+/// writer's rules in a test would drift. §5's deep census was the seam's other
+/// intended consumer; it was never committed — that design was measured and
+/// abandoned, spec §2b and §5.4.
+#[doc(hidden)]
+pub fn blocks_to_markdown_with_ledger(
+    blocks: &[Block],
+    assets: &AssetBag,
+    ledger: Ledger,
+) -> String {
+    blocks_to_markdown_at(blocks, assets, 0, ledger)
+}
+
+fn blocks_to_markdown_at(
+    blocks: &[Block],
+    assets: &AssetBag,
+    depth: usize,
+    ledger: Ledger,
+) -> String {
     let mut out = String::new();
     for b in blocks {
-        render_block(b, assets, &mut out, depth);
+        render_block(b, assets, &mut out, depth, ledger);
         out.push('\n');
     }
     out
 }
 
-fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
+fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize, ledger: Ledger) {
     // Defence in depth: section::clone_block already truncated anything that
     // reached the engine through an adapter or a caller into a shallow
     // Block::Raw, so this guard is not a second truncation stacked on that
@@ -32,12 +53,12 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
             out.push(' ');
             let inlines = escape::fold_inline_newlines(inlines);
             out.push_str(&escape::atx_closing(&kasane_gfm::fold_newlines(
-                &inlines_to_md(&inlines, Ctx::Flow, Pos::Mid),
+                &inlines_to_md(&inlines, Ctx::Flow, Pos::Mid, ledger),
             )));
             out.push('\n');
         }
         Block::Para(inls) => {
-            out.push_str(&inlines_to_md(inls, Ctx::Flow, Pos::LineStart));
+            out.push_str(&inlines_to_md(inls, Ctx::Flow, Pos::LineStart, ledger));
             out.push('\n');
         }
         Block::List { ordered, items } => {
@@ -49,7 +70,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 };
                 let mut inner = String::new();
                 for bb in item {
-                    render_block(bb, assets, &mut inner, depth + 1);
+                    render_block(bb, assets, &mut inner, depth + 1, ledger);
                 }
                 // Continuation lines are indented by the marker's own width;
                 // without it an item holding a paragraph and a nested list
@@ -62,7 +83,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 out.push('\n');
             }
         }
-        Block::Table(t) => render_table(t, out),
+        Block::Table(t) => render_table(t, out, ledger),
         Block::Figure {
             image,
             caption,
@@ -75,7 +96,8 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
                 .map(|a| a.filename.as_str())
                 .unwrap_or("missing");
             let caption = escape::fold_inline_newlines(caption);
-            let alt = kasane_gfm::fold_newlines(&inlines_to_md(&caption, Ctx::Flow, Pos::Mid));
+            let alt =
+                kasane_gfm::fold_newlines(&inlines_to_md(&caption, Ctx::Flow, Pos::Mid, ledger));
             out.push_str(&format!(
                 "![{}](_assets/{})\n",
                 alt,
@@ -104,7 +126,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
             // body of more than one line puts its second line at column zero,
             // outside the definition, where it becomes a sibling paragraph
             // (§4.2).
-            let body = blocks_to_markdown_at(blocks, assets, depth + 1);
+            let body = blocks_to_markdown_at(blocks, assets, depth + 1, ledger);
             let body = body.trim();
             out.push_str(&format!(
                 "[^{}]: {}\n",
@@ -116,7 +138,7 @@ fn render_block(b: &Block, assets: &AssetBag, out: &mut String, depth: usize) {
     }
 }
 
-fn render_table(t: &Table, out: &mut String) {
+fn render_table(t: &Table, out: &mut String, ledger: Ledger) {
     if t.has_merged {
         // An HTML block's content is raw: GFM parses no Markdown inside it, so
         // the inlines must be emitted as HTML tags and the text HTML-escaped.
@@ -141,7 +163,7 @@ fn render_table(t: &Table, out: &mut String) {
     let cells = |row: &Vec<Vec<Inline>>| {
         let joined: Vec<String> = row
             .iter()
-            .map(|c| escape::cell_edges(&inlines_to_md(c, Ctx::Cell, Pos::LineStart)))
+            .map(|c| escape::cell_edges(&inlines_to_md(c, Ctx::Cell, Pos::LineStart, ledger)))
             .collect();
         format!("| {} |", joined.join(" | "))
     };
@@ -194,8 +216,8 @@ fn inlines_to_html(inls: &[Inline], depth: usize) -> String {
     s
 }
 
-pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos) -> String {
-    inlines_to_md_at(inls, 0, ctx, pos)
+pub(crate) fn inlines_to_md(inls: &[Inline], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+    inlines_to_md_at(inls, 0, ctx, pos, ledger)
 }
 
 /// One element of the flattened view the run scan walks: an inline, and the
@@ -245,10 +267,10 @@ fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
 /// Render an inline sequence, building the flattened view [`inlines_to_md_flat`]
 /// scans. The depth guard lives in [`flatten_into`], which yields an empty view
 /// at or past the bound.
-fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String {
+fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut view = Vec::new();
     flatten_into(inls, depth, &mut view);
-    inlines_to_md_flat(&view, ctx, pos)
+    inlines_to_md_flat(&view, ctx, pos, ledger)
 }
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
@@ -274,7 +296,7 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos) -> String
 /// fused emphasis run's members' children are siblings too. Scanning IR
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
-fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
+fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut s = String::new();
     let mut pos = pos;
     let mut i = 0;
@@ -282,7 +304,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
         let (inline, depth) = items[i];
         let before = pos;
         let len_before = s.len();
-        let end = run_end(items, i);
+        let end = run_end(items, i, ledger);
         let members = &items[i..end];
         // The run's class comes from its first *printing* member, not its
         // first member outright: a vacuous leading `Emph` prints no
@@ -311,6 +333,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
                     markup,
                     before_class,
                     after_class,
+                    ledger,
                 ))
             }
             // `delim` said this inline prints no delimiter that can collide,
@@ -330,7 +353,8 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
                         &escape::fold_inline_newlines(inlines),
                         depth + 1,
                         ctx,
-                        pos
+                        pos,
+                        ledger
                     )),
                     escape::dest_url(u)
                 )),
@@ -354,7 +378,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos) -> String {
                         false,
                         "a transparent link reached the emit loop; flatten_into must splice it"
                     );
-                    s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos))
+                    s.push_str(&inlines_to_md_at(inlines, depth + 1, ctx, pos, ledger))
                 }
             },
         }
@@ -416,6 +440,129 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
     }
 }
 
+/// Where in the printed stream an abutment would happen.
+///
+/// Structural positions, not descriptions of the text: [`may_abut`] must be
+/// answerable from this plus two classes and nothing else. See design spec
+/// §3.3 — an arm that needs more than its three parameters is the
+/// delimiter-pairing mirror re-entering by the back door.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Site {
+    /// The inner container is the run's entire printing content.
+    WholeRun,
+    /// The inner container is the run's first printing child, of several.
+    HeadEdge,
+    /// The inner container is the run's last printing child, of several.
+    TailEdge,
+    /// The inner container sits between other printing content.
+    Interior,
+    /// The boundary between two adjacent runs, which [`run_end`] is deciding
+    /// whether to fuse.
+    RunSeam,
+}
+
+/// One licensed abutment, as a bit in a [`Ledger`].
+///
+/// Named constants rather than an enum so [`Ledger::CELLS`] can hand a test a
+/// `(name, bit)` pair without exposing `escape::Delim`, which is `pub(crate)`.
+mod cell {
+    pub(super) const EMPH_OVER_STRONG_WHOLE_RUN: u32 = 1 << 0;
+    pub(super) const EMPH_OVER_STRONG_HEAD_EDGE: u32 = 1 << 1;
+    pub(super) const EMPH_OVER_STRONG_TAIL_EDGE: u32 = 1 << 2;
+    pub(super) const STRONG_OVER_EMPH_HEAD_EDGE: u32 = 1 << 3;
+    pub(super) const STRONG_OVER_EMPH_TAIL_EDGE: u32 = 1 << 4;
+    pub(super) const EMPH_BESIDE_STRONG_RUN_SEAM: u32 = 1 << 5;
+    pub(super) const STRONG_BESIDE_EMPH_RUN_SEAM: u32 = 1 << 6;
+}
+
+/// The set of abutments the writer is licensed to leave standing.
+///
+/// A bitset rather than a two-value mode, because design spec §2's probe has
+/// to price each cell *separately*: the last probe's finer split was cut for
+/// being unreproducible, and a mode that only says "old" or "new" reproduces
+/// exactly that failure. `CONSERVATIVE` is the empty set and reproduces
+/// pre-`0ac2c48` output — one cell below what `main` ships as `LICENSED`.
+#[doc(hidden)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ledger(u32);
+
+impl Ledger {
+    /// No abutment licensed: every rule collapses, as before this item.
+    pub const CONSERVATIVE: Ledger = Ledger(0);
+
+    /// What the writer ships with.
+    pub const LICENSED: Ledger = Ledger(cell::EMPH_OVER_STRONG_WHOLE_RUN);
+
+    /// Every cell, named, for a probe that measures them one at a time.
+    pub const CELLS: &'static [(&'static str, u32)] = &[
+        (
+            "emph_over_strong_whole_run",
+            cell::EMPH_OVER_STRONG_WHOLE_RUN,
+        ),
+        (
+            "emph_over_strong_head_edge",
+            cell::EMPH_OVER_STRONG_HEAD_EDGE,
+        ),
+        (
+            "emph_over_strong_tail_edge",
+            cell::EMPH_OVER_STRONG_TAIL_EDGE,
+        ),
+        (
+            "strong_over_emph_head_edge",
+            cell::STRONG_OVER_EMPH_HEAD_EDGE,
+        ),
+        (
+            "strong_over_emph_tail_edge",
+            cell::STRONG_OVER_EMPH_TAIL_EDGE,
+        ),
+        (
+            "emph_beside_strong_run_seam",
+            cell::EMPH_BESIDE_STRONG_RUN_SEAM,
+        ),
+        (
+            "strong_beside_emph_run_seam",
+            cell::STRONG_BESIDE_EMPH_RUN_SEAM,
+        ),
+    ];
+
+    pub fn from_bits(bits: u32) -> Ledger {
+        Ledger(bits)
+    }
+
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+/// The bit a triple corresponds to, or `None` when the triple is unlisted.
+///
+/// This `match` is the table. It reads no text, takes no buffer, and computes
+/// nothing — every arm is a measured row (design spec §3.2), and the `None`
+/// fallthrough is what keeps an unlisted triple conservative by default.
+fn bit_for(outer: escape::Delim, inner: escape::Delim, site: Site) -> Option<u32> {
+    use escape::Delim::{Emph, Strong};
+    Some(match (outer, inner, site) {
+        // `*` wrapping nothing but `**` prints `***x***`, and the merged run's
+        // tie-break resolves em-outermost, which is what the IR meant.
+        (Emph, Strong, Site::WholeRun) => cell::EMPH_OVER_STRONG_WHOLE_RUN,
+        (Emph, Strong, Site::HeadEdge) => cell::EMPH_OVER_STRONG_HEAD_EDGE,
+        (Emph, Strong, Site::TailEdge) => cell::EMPH_OVER_STRONG_TAIL_EDGE,
+        (Strong, Emph, Site::HeadEdge) => cell::STRONG_OVER_EMPH_HEAD_EDGE,
+        (Strong, Emph, Site::TailEdge) => cell::STRONG_OVER_EMPH_TAIL_EDGE,
+        (Emph, Strong, Site::RunSeam) => cell::EMPH_BESIDE_STRONG_RUN_SEAM,
+        (Strong, Emph, Site::RunSeam) => cell::STRONG_BESIDE_EMPH_RUN_SEAM,
+        // Everything else, including every same-`Delim` pair at every site and
+        // `Strong` over `Emph` spanning a whole run, stays collapsed.
+        _ => return None,
+    })
+}
+
+/// May a run of `inner`'s class stand adjacent to a run of `outer`'s class at
+/// this site, or must it be collapsed?
+fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site, ledger: Ledger) -> bool {
+    bit_for(outer, inner, site).is_some_and(|b| ledger.0 & b != 0)
+}
+
 /// The exclusive end of the run of same-delimiter inlines starting at `start`.
 ///
 /// A vacuous inline is stepped over rather than ending the run: it puts no
@@ -450,17 +597,39 @@ fn renders_empty(i: &Inline, depth: usize) -> bool {
 /// emit loop answers it from the run's first *printing* member rather than
 /// from `items[i]`, because vacuity does bite there: an empty leading `Emph`
 /// must not downgrade a real trailing `Strong`
-/// (`a_vacuous_leading_member_does_not_downgrade_the_run_class`).
-fn run_end(items: &[Flat<'_>], start: usize) -> usize {
+/// (`a_vacuous_leading_member_does_not_downgrade_the_run_class`). This walk now
+/// tracks that same class too, as `class_so_far`, so it can consult the seam
+/// at each candidate join without waiting for the emit loop's own
+/// re-derivation — see design spec §4.2 for why the left-to-right walk makes
+/// that tracking well-defined rather than circular.
+fn run_end(items: &[Flat<'_>], start: usize, ledger: Ledger) -> usize {
     let Some(d) = escape::delim(items[start].0) else {
         return start + 1;
     };
     let ch = d.ch();
+    // The run's class, decided by its first *printing* member — `None` while
+    // every member so far is vacuous. This is what makes a class-keyed seam
+    // answerable from inside `run_end` without circularity: the walk is left
+    // to right, so the first printing member is fixed before any later member
+    // is considered (design spec §4.2's ordering note). While it is `None` the
+    // seam is not consulted, which is correct — a run of purely vacuous
+    // members prints nothing, so there is no abutment to license.
+    let mut class_so_far = (!renders_empty(items[start].0, items[start].1)).then_some(d);
     let mut k = start + 1;
-    while k < items.len()
-        && (renders_empty(items[k].0, items[k].1)
-            || escape::delim(items[k].0).map(escape::Delim::ch) == Some(ch))
-    {
+    while k < items.len() {
+        let (el, depth) = items[k];
+        if renders_empty(el, depth) {
+            k += 1;
+            continue;
+        }
+        let Some(next) = escape::delim(el) else { break };
+        if next.ch() != ch {
+            break;
+        }
+        if class_so_far.is_some_and(|cls| may_abut(cls, next, Site::RunSeam, ledger)) {
+            break;
+        }
+        class_so_far = class_so_far.or(Some(next));
         k += 1;
     }
     k
@@ -499,62 +668,38 @@ fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
 
 /// The index of a leading or trailing printing element that collides at an
 /// edge, sharing a character with the run's own delimiter, or `None` when
-/// neither edge does — or when the one edge that would collide is the
-/// canonical nesting [`sole_child_nests_canonically`] exempts.
+/// neither edge does — or when [`may_abut`] licenses the one edge that would
+/// collide.
 ///
 /// Takes the run's `Delim` rather than its bare character even though the
-/// collision *test* is still on the character. The exemption is the reason:
-/// `*` and `**` abut identically, and only the class tells the shape that
-/// round-trips from the one that does not.
+/// collision *test* is still on the character. The `may_abut` check is the
+/// reason: `*` and `**` abut identically, and only the class tells the shape
+/// that round-trips from the one that does not.
 ///
 /// One of two sources [`splice_children`] draws splice candidates from — see
 /// its doc for why this one tests the character and stops at the edges, while
 /// [`same_delim_to_splice`] is keyed on the `Delim` and looks everywhere.
-fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<usize> {
+fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) -> Option<usize> {
     let ch = want.ch();
     let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
     let first = children.iter().position(printing);
     let last = children.iter().rposition(printing);
     [first, last].into_iter().flatten().find(|&idx| {
-        escape::delim(children[idx].0).map(escape::Delim::ch) == Some(ch)
-            && !sole_child_nests_canonically(children, idx, want)
+        let Some(inner) = escape::delim(children[idx].0) else {
+            return false;
+        };
+        if inner.ch() != ch {
+            return false;
+        }
+        let site = if first == last {
+            Site::WholeRun
+        } else if Some(idx) == first {
+            Site::HeadEdge
+        } else {
+            Site::TailEdge
+        };
+        !may_abut(want, inner, site, ledger)
     })
-}
-
-/// Whether the edge candidate at `idx` is the run's entire content and nests
-/// the one way `*` alone can spell.
-///
-/// `Emph` wrapping nothing but a `Strong` prints `***x***`, and a parser
-/// splitting that run resolves it em-outermost — which is what the IR meant, so
-/// splicing would destroy a shape that round-trips. The converse does not hold:
-/// `Strong` wrapping nothing but an `Emph` prints the same `***x***` and
-/// resolves the same way, *against* the IR, so it keeps splicing and the census
-/// files it inexpressible.
-///
-/// All three conditions are load-bearing. Without the class check this would
-/// also decline for `Emph[Emph[x]]`, where the behaviour would stay correct
-/// only because `same_delim_to_splice` catches that shape a moment later —
-/// true by the ordering of two other rules rather than by construction. The
-/// single-printing-child check is what keeps this to the configuration the
-/// census can prove: the wider single-edge cases (`*a**b***`) also round-trip,
-/// but most of what that would license is unreachable by the census alphabet,
-/// so it is deliberately left out (design spec §3.2 and §3.4).
-///
-/// Relies on a caller invariant: with `want == Delim::Emph`, a child with no
-/// `Delim` at all (e.g. `Backtick`) would pass both checks above and reach
-/// the sole-printing-child test undistinguished from a real `Strong` — it is
-/// excluded only because [`edge_to_splice`] calls this after already
-/// filtering `idx` on `escape::delim(children[idx].0).map(escape::Delim::ch)
-/// == Some(ch)`, which no `Backtick` satisfies.
-fn sole_child_nests_canonically(children: &[Flat<'_>], idx: usize, want: escape::Delim) -> bool {
-    if want != escape::Delim::Emph || escape::delim(children[idx].0) == Some(want) {
-        return false;
-    }
-    let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
-    children
-        .iter()
-        .enumerate()
-        .all(|(i, c)| i == idx || !printing(c))
 }
 
 /// The index of any element, anywhere in a run's children, whose own `Delim`
@@ -564,10 +709,27 @@ fn sole_child_nests_canonically(children: &[Flat<'_>], idx: usize, want: escape:
 /// [`edge_to_splice`] this does not stop at the first and last printing
 /// element — position is irrelevant to the collision this closes, so every
 /// element is a candidate.
-fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<usize> {
-    children
-        .iter()
-        .position(|&(i, _)| escape::delim(i) == Some(want))
+///
+/// The `may_abut` query below is position-blind by construction: it always
+/// asks `Site::Interior`, even for a child [`edge_to_splice`] would have
+/// asked about with `HeadEdge`/`TailEdge`/`WholeRun` first. That is
+/// behaviour-neutral today, since no same-`Delim` triple has an arm at any
+/// site, but it is a live hazard for later widening — `edge_to_splice` runs
+/// first and only defers a child when `may_abut` licenses it there, so
+/// licensing a same-`Delim` cell at `WholeRun` (say) would make
+/// `edge_to_splice` decline that child while this function, asking the same
+/// child under the unlicensed `Interior`, splices it anyway on the very next
+/// loop iteration of `splice_children`. A future cell here has to widen
+/// *this* site, or teach this function the candidate's edge position too, not
+/// just add an arm to `bit_for`.
+fn same_delim_to_splice(
+    children: &[Flat<'_>],
+    want: escape::Delim,
+    ledger: Ledger,
+) -> Option<usize> {
+    children.iter().position(|&(i, _)| {
+        escape::delim(i) == Some(want) && !may_abut(want, want, Site::Interior, ledger)
+    })
 }
 
 /// Splice a run's children wherever a container collides with the run's own
@@ -581,16 +743,10 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 ///   the writer did not intend — `*` and `**` collapse into `***`. A
 ///   container *between* other content has nothing adjacent to abut, which is
 ///   why this rule only ever looks at the first and last printing element
-///   (design spec § Confirmed).
-///   One configuration is exempt: an `Emph` run whose *entire* content is a
-///   single `Strong` prints `***x***`, which is the canonical spelling of
-///   that nesting and round-trips — the merged run's tie-break resolves
-///   em-outermost, which is what the IR meant. See
-///   [`sole_child_nests_canonically`], and
-///   `2026-08-16-cross-class-edge-splice-design.md` §2 for the measurements
-///   that draw the boundary. The exemption is directional: `Strong` over
-///   `Emph` prints the same bytes and the same tie-break destroys it, so it
-///   keeps splicing.
+///   (design spec § Confirmed). Whether a given edge collision is left
+///   standing rather than spliced is [`may_abut`]'s question alone, asked with
+///   the site (`WholeRun`, `HeadEdge`, or `TailEdge`) the candidate occupies —
+///   this function does not itself know which triples are licensed.
 /// - **Anywhere, keyed on the *`Delim`* itself** ([`same_delim_to_splice`]).
 ///   A container whose `Delim` equals the run's own is spliced wherever it
 ///   sits, even though same-`Delim` nesting is sometimes expressible:
@@ -603,10 +759,11 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 ///   — means reasoning about how a parser pairs delimiters at splice time:
 ///   the hand-mirrored CommonMark rule design spec §7 approach A rejects,
 ///   and which this run scan exists to retire rather than reimplement one
-///   seam at a time. So this rule splices unconditionally and pays the cost
-///   on shapes it did not strictly have to — the same trade
-///   `fusing_adjacent_runs_costs_a_structural_boundary` pins for the run
-///   fuse, paid here for the same reason and pinned by
+///   seam at a time. This rule also asks [`may_abut`] (`Site::Interior`)
+///   rather than splicing unconditionally, but no triple licenses that site
+///   yet, so it still pays the cost on shapes it did not strictly have to —
+///   the same trade `fusing_adjacent_runs_costs_a_structural_boundary` pins
+///   for the run fuse, paid here for the same reason and pinned by
 ///   `splicing_mid_buffer_costs_a_span_that_would_round_trip` (design spec §
 ///   Confirmed). A container of a *different* length is unaffected and stays
 ///   where it is — `*a**b**c*` is exactly how
@@ -638,9 +795,13 @@ fn same_delim_to_splice(children: &[Flat<'_>], want: escape::Delim) -> Option<us
 ///
 /// Only pointers move: `flatten_into` borrows, and `Vec::splice` shuffles
 /// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
-fn splice_children<'a>(mut children: Vec<Flat<'a>>, want: escape::Delim) -> Vec<Flat<'a>> {
-    while let Some(idx) =
-        edge_to_splice(&children, want).or_else(|| same_delim_to_splice(&children, want))
+fn splice_children<'a>(
+    mut children: Vec<Flat<'a>>,
+    want: escape::Delim,
+    ledger: Ledger,
+) -> Vec<Flat<'a>> {
+    while let Some(idx) = edge_to_splice(&children, want, ledger)
+        .or_else(|| same_delim_to_splice(&children, want, ledger))
     {
         let (inline, depth) = children[idx];
         let (Inline::Emph(x) | Inline::Strong(x)) = inline else {
@@ -730,6 +891,10 @@ fn can_close(before: Flank, after: Flank) -> bool {
 /// There is no per-member `pos` bookkeeping: the scan below owns the four `Pos`
 /// rules and applies them once per run member exactly as the outer loop does
 /// for any other neighbour.
+// Eight plain params, each threaded straight through from `inlines_to_md_flat`'s
+// one call site with no natural sub-grouping; a struct would just relocate the
+// noise.
+#[allow(clippy::too_many_arguments)]
 fn emphasis_run<'a>(
     members: &[Flat<'a>],
     want: escape::Delim,
@@ -738,9 +903,10 @@ fn emphasis_run<'a>(
     markup: &str,
     before: Flank,
     after: Flank,
+    ledger: Ledger,
 ) -> String {
-    let children = splice_children(run_children(members), want);
-    let inner = inlines_to_md_flat(&children, ctx, pos);
+    let children = splice_children(run_children(members), want, ledger);
+    let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
     let core = inner.trim();
     // An all-whitespace or empty inner buffer gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
@@ -2459,11 +2625,12 @@ mod tests {
         assert_eq!(recovered(inls), "a");
     }
 
-    /// The control for `sole_child_nests_canonically`'s second condition. A
-    /// same-class sole child is *not* the canonical nesting and must keep
-    /// splicing; `same_delim_to_splice` would catch it anyway, which is
-    /// precisely why the predicate states the condition rather than relying on
-    /// the other rule's ordering (design spec §3.2).
+    /// The control for `bit_for`'s absence of an `(Emph, Emph, WholeRun)` arm.
+    /// A same-class sole child is *not* licensed to abut and must keep
+    /// splicing; `same_delim_to_splice` would catch it anyway (its own
+    /// `Site::Interior` query, unconditionally true today), which is
+    /// precisely why `edge_to_splice` tests the site itself rather than
+    /// relying on the other rule's ordering (design spec §3.2).
     #[test]
     fn an_emph_run_wrapping_only_an_emph_is_still_spliced() {
         let inls = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
@@ -2479,8 +2646,9 @@ mod tests {
     /// here or nowhere (design spec §3.3).
     ///
     /// The outer `Emph` run declines and keeps its `Strong`; the inner
-    /// `Strong` run does not qualify — condition 3 fails — so it splices its
-    /// `Emph` and prints `**b**`; the whole prints `***b***`. The innermost
+    /// `Strong` run does not qualify — `bit_for` has no `(Strong, Emph,
+    /// WholeRun)` arm, so `Site::WholeRun` is unlicensed for that pair — so it
+    /// splices its `Emph` and prints `**b**`; the whole prints `***b***`. The innermost
     /// `Emph` is lost, but that is the `Strong`-outer limit reappearing one
     /// level down, not a new corruption, and Task 2 files the shape permanent
     /// on the strength of the `Strong[Emph[…]]` it contains. A `****b****`
@@ -2493,5 +2661,86 @@ mod tests {
         assert_eq!(para(inls.clone()), "***b***");
         assert_eq!(recovered_html(inls.clone()), "<em><strong>b</strong></em>");
         assert_eq!(recovered(inls), "b");
+    }
+
+    /// The default arm is the whole safety argument: an unlisted triple is
+    /// `false`, which is the conservative rule this item started from. If a
+    /// widening ever makes an unlisted triple `true` by accident, this fails.
+    #[test]
+    fn an_unlisted_triple_is_refused() {
+        use escape::Delim::{Emph, Strong};
+        // Same-`Delim` anywhere: `splice_children`'s `Delim` rule, unchanged.
+        assert!(!may_abut(Emph, Emph, Site::Interior, Ledger::LICENSED));
+        assert!(!may_abut(Strong, Strong, Site::Interior, Ledger::LICENSED));
+        assert!(!may_abut(Emph, Emph, Site::WholeRun, Ledger::LICENSED));
+        // The tie-break row: `Strong` over `Emph` spanning a whole run prints
+        // `***x***`, which always resolves em-outermost, against the IR.
+        assert!(!may_abut(Strong, Emph, Site::WholeRun, Ledger::LICENSED));
+    }
+
+    /// The one cell Task 1 licenses, and the only one: it reproduces
+    /// `sole_child_nests_canonically`, which this task deletes.
+    #[test]
+    fn the_conservative_ledger_licenses_nothing_and_licensed_starts_at_one_cell() {
+        use escape::Delim::{Emph, Strong};
+        assert!(!may_abut(
+            Emph,
+            Strong,
+            Site::WholeRun,
+            Ledger::CONSERVATIVE
+        ));
+        assert!(may_abut(Emph, Strong, Site::WholeRun, Ledger::LICENSED));
+        assert_eq!(Ledger::LICENSED.bits().count_ones(), 1);
+    }
+
+    /// Every cell in `CELLS` must be reachable from some triple, or the probe in
+    /// Task 3 would measure a bit nothing can ever set.
+    #[test]
+    fn every_named_cell_is_reachable_from_a_triple() {
+        use escape::Delim::{Emph, Strong};
+        let mut seen = 0u32;
+        for outer in [Emph, Strong] {
+            for inner in [Emph, Strong] {
+                for site in [
+                    Site::WholeRun,
+                    Site::HeadEdge,
+                    Site::TailEdge,
+                    Site::Interior,
+                    Site::RunSeam,
+                ] {
+                    if let Some(bit) = bit_for(outer, inner, site) {
+                        seen |= bit;
+                    }
+                }
+            }
+        }
+        for (name, bit) in Ledger::CELLS {
+            assert!(seen & bit != 0, "cell {name} is named but unreachable");
+        }
+    }
+
+    /// The threading itself, not just the table: `blocks_to_markdown_with_ledger`
+    /// must actually carry `ledger` down to the rule, not silently substitute
+    /// `Ledger::LICENSED` at some call site along the way -- the exact failure
+    /// every other test in this file cannot see, since the census and every
+    /// existing render test run under `LICENSED` alone. Under `CONSERVATIVE`
+    /// the sole-child `Strong` must still splice, exactly as it did before this
+    /// task (and as `sole_child_nests_canonically` did on `main`); under
+    /// `LICENSED` (`para`, which renders through the public `blocks_to_markdown`)
+    /// it must not.
+    #[test]
+    fn the_ledger_parameter_actually_reaches_the_rules() {
+        let inls = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Text(
+            "a".into(),
+        )])])];
+        assert_eq!(para(inls.clone()), "***a***");
+        assert_eq!(
+            blocks_to_markdown_with_ledger(
+                &[Block::Para(inls)],
+                &AssetBag::default(),
+                Ledger::CONSERVATIVE
+            ),
+            "*a*\n\n"
+        );
     }
 }
