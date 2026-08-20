@@ -1,0 +1,237 @@
+diff --git a/crates/kasane-writer/src/markdown.rs b/crates/kasane-writer/src/markdown.rs
+index 840f8a8..d79dd60 100644
+--- a/crates/kasane-writer/src/markdown.rs
++++ b/crates/kasane-writer/src/markdown.rs
+@@ -489,7 +489,13 @@ impl Ledger {
+     pub const CONSERVATIVE: Ledger = Ledger(0);
+ 
+     /// What the writer ships with.
+-    pub const LICENSED: Ledger = Ledger(cell::EMPH_OVER_STRONG_WHOLE_RUN);
++    pub const LICENSED: Ledger = Ledger(
++        cell::EMPH_OVER_STRONG_WHOLE_RUN
++            | cell::EMPH_OVER_STRONG_HEAD_EDGE
++            | cell::EMPH_OVER_STRONG_TAIL_EDGE
++            | cell::STRONG_OVER_EMPH_HEAD_EDGE
++            | cell::STRONG_OVER_EMPH_TAIL_EDGE,
++    );
+ 
+     /// Every cell, named, for a probe that measures them one at a time.
+     pub const CELLS: &'static [(&'static str, u32)] = &[
+@@ -2623,6 +2629,71 @@ mod tests {
+         assert_eq!(recovered(inls), "a");
+     }
+ 
++    /// `Emph` with a `Strong` at one edge and other content beside it. The
++    /// un-spliced spelling is the canonical one and round-trips (design spec §3.2,
++    /// rows 2, 3 and 6 of the edge-splice table).
++    #[test]
++    fn a_strong_at_one_edge_of_an_emph_run_keeps_its_delimiters() {
++        assert_eq!(
++            para(vec![Inline::Emph(vec![
++                Inline::Text("a".into()),
++                Inline::Strong(vec![Inline::Text("b".into())]),
++            ])]),
++            "*a**b***"
++        );
++    }
++
++    #[test]
++    fn a_strong_at_the_head_of_an_emph_run_keeps_its_delimiters() {
++        assert_eq!(
++            para(vec![Inline::Emph(vec![
++                Inline::Strong(vec![Inline::Text("b".into())]),
++                Inline::Text("a".into()),
++            ])]),
++            "***b**a*"
++        );
++    }
++
++    #[test]
++    fn an_emph_at_one_edge_of_a_strong_run_keeps_its_delimiters() {
++        assert_eq!(
++            para(vec![Inline::Strong(vec![
++                Inline::Text("a".into()),
++                Inline::Emph(vec![Inline::Text("b".into())]),
++            ])]),
++            "**a*b***"
++        );
++    }
++
++    #[test]
++    fn an_emph_at_the_head_of_a_strong_run_keeps_its_delimiters() {
++        assert_eq!(
++            para(vec![Inline::Strong(vec![
++                Inline::Emph(vec![Inline::Text("b".into())]),
++                Inline::Text("a".into()),
++            ])]),
++            "***b*a**"
++        );
++    }
++
++    /// The refusal that stays, and the reason the exemption is directional: a
++    /// `Strong` wrapping nothing but an `Emph` prints the same `***x***` and the
++    /// tie-break resolves it em-outermost, against the IR.
++    ///
++    /// The same refusal `a_strong_run_wrapping_only_an_emph_still_loses_its_emph`
++    /// pins; kept beside the four edge cells above because it is the control
++    /// that makes them readable as *edge* licences rather than a blanket
++    /// cross-class one.
++    #[test]
++    fn a_strong_wrapping_only_an_emph_still_splices() {
++        assert_eq!(
++            para(vec![Inline::Strong(vec![Inline::Emph(vec![
++                Inline::Text("b".into())
++            ])])]),
++            "**b**"
++        );
++    }
++
+     /// The control for `bit_for`'s absence of an `(Emph, Emph, WholeRun)` arm.
+     /// A same-class sole child is *not* licensed to abut and must keep
+     /// splicing; `same_delim_to_splice` would catch it anyway (its own
+@@ -2676,10 +2747,10 @@ mod tests {
+         assert!(!may_abut(Strong, Emph, Site::WholeRun, Ledger::LICENSED));
+     }
+ 
+-    /// The one cell Task 1 licenses, and the only one: it reproduces
+-    /// `sole_child_nests_canonically`, which this task deletes.
++    /// The one cell Task 1 licenses: it reproduces
++    /// `sole_child_nests_canonically`, which that task deleted.
+     #[test]
+-    fn the_conservative_ledger_licenses_nothing_and_licensed_starts_at_one_cell() {
++    fn the_conservative_ledger_licenses_nothing() {
+         use escape::Delim::{Emph, Strong};
+         assert!(!may_abut(
+             Emph,
+@@ -2688,7 +2759,6 @@ mod tests {
+             Ledger::CONSERVATIVE
+         ));
+         assert!(may_abut(Emph, Strong, Site::WholeRun, Ledger::LICENSED));
+-        assert_eq!(Ledger::LICENSED.bits().count_ones(), 1);
+     }
+ 
+     /// Every cell in `CELLS` must be reachable from some triple, or the probe in
+diff --git a/crates/kasane-writer/tests/census_deep.rs b/crates/kasane-writer/tests/census_deep.rs
+new file mode 100644
+index 0000000..76639c5
+--- /dev/null
++++ b/crates/kasane-writer/tests/census_deep.rs
+@@ -0,0 +1,109 @@
++//! Design spec §5: every spelling this item newly licensed round-trips.
++//!
++//! A second corpus, seven delimiter-bearing elements at lengths 4 and 5. Each
++//! shape renders twice — under `Ledger::LICENSED` and under
++//! `Ledger::CONSERVATIVE` — and **only shapes whose renderings differ** are
++//! kept and asserted clean. The kept set is therefore exactly the spellings
++//! this item licensed, computed by differencing rather than by matching cases
++//! someone anticipated. That is deliberate: design spec §4.3's flanking
++//! interaction changes the rendering, so it lands in the kept set whether or
++//! not anyone predicted it.
++//!
++//! No allowlist and no queue. A corrupt shape here is a wrong cell in
++//! `may_abut`, not a residual.
++//!
++//! Lengths 4 and 5 rather than 3 because the licensed configurations appear at
++//! length 3 but their *consequences* do not: a flanking flip needs a licensed
++//! abutment with a neighbour on both sides (four elements), and a second
++//! abutment whose flank class the first one's shortened run changed needs five.
++
++mod census_support;
++
++use census_support::{classify_with, render, text_is_clean, Structure};
++use kasane_ir::Inline;
++use kasane_writer::Ledger;
++
++/// Seven elements, chosen to put both emphasis classes beside each other and
++/// beside a non-emphasis delimiter. Smaller than the length-3 census's
++/// nineteen because 7^5 is already 16,807 shapes.
++fn deep_alphabet() -> Vec<Inline> {
++    let t = |s: &str| Inline::Text(s.to_string());
++    let em = |i: Inline| Inline::Emph(vec![i]);
++    let st = |i: Inline| Inline::Strong(vec![i]);
++    vec![
++        t("a"),
++        t("*"),
++        Inline::Code("x".into()),
++        em(t("a")),
++        st(t("a")),
++        em(st(t("a"))),
++        st(em(t("a"))),
++    ]
++}
++
++/// Every sequence of length 4 and 5 over [`deep_alphabet`].
++///
++/// 7^4 + 7^5 = 2,401 + 16,807 = 19,208 shapes. Each index is one digit of a
++/// base-7 counter, which is simply an exhaustive product and is worth keeping
++/// obviously correct: a subtly wrong generator would silently shrink the
++/// corpus, and this tier's only guard against that is `kept > 0`.
++fn deep_shapes() -> Vec<Vec<Inline>> {
++    let a = deep_alphabet();
++    let n = a.len();
++    let mut out = Vec::new();
++    for len in 4..=5u32 {
++        for code in 0..n.pow(len) {
++            let mut code = code;
++            let mut seq = Vec::with_capacity(len as usize);
++            for _ in 0..len {
++                seq.push(a[code % n].clone());
++                code /= n;
++            }
++            out.push(seq);
++        }
++    }
++    out
++}
++
++#[test]
++fn every_newly_licensed_spelling_round_trips() {
++    let mut kept = 0usize;
++    let mut bad: Vec<String> = Vec::new();
++
++    for seq in deep_shapes() {
++        let licensed = render(&seq, Ledger::LICENSED);
++        if licensed == render(&seq, Ledger::CONSERVATIVE) {
++            continue;
++        }
++        kept += 1;
++
++        // Both tiers, and the text tier first: `classify_with` returns `Clean`
++        // when the text is already corrupt, because the length-3 census gates
++        // structure on text and names text corruption with its own assertion.
++        // Nothing here names it, so this must ask both questions.
++        if !text_is_clean(&seq, Ledger::LICENSED) {
++            bad.push(format!("text: {seq:?} -> {licensed:?}"));
++        } else if classify_with(&seq, Ledger::LICENSED) != Structure::Clean {
++            bad.push(format!("structure: {seq:?} -> {licensed:?}"));
++        }
++    }
++
++    // The filter is the tier. If it ever matches nothing -- a cell turned off,
++    // a corpus that stopped reaching the licensed configurations -- this test
++    // would pass vacuously and go on passing forever.
++    assert!(
++        kept > 0,
++        "the differencing filter matched no shapes, so this tier proved nothing"
++    );
++
++    assert!(
++        bad.is_empty(),
++        "{} newly-licensed spelling(s) do not round-trip -- a cell in \
++         `may_abut` is wrong, not a residual to be recorded:\n{}",
++        bad.len(),
++        bad.iter()
++            .take(10)
++            .map(|s| format!("  {s}\n"))
++            .collect::<String>()
++    );
++}
+diff --git a/crates/kasane-writer/tests/properties.proptest-regressions b/crates/kasane-writer/tests/properties.proptest-regressions
+index 9e33b99..b12c2e5 100644
+--- a/crates/kasane-writer/tests/properties.proptest-regressions
++++ b/crates/kasane-writer/tests/properties.proptest-regressions
+@@ -11,3 +11,4 @@ cc 114228a3d7a9ef9cd062ba01a1c8af5da310d46aabe0915b5f6e3eb3351fd496 # shrinks to
+ cc 9ffd4072184e80a1ef694753f4736836b7970816c1ce2cbefcc1d01677884640 # shrinks to case = Case { doc: Document { meta: DocMeta { title: "Generated Book", authors: [], language: None, source_format: "epub", source_path: "generated.epub" }, nodes: [Node { block: Table(Table { header: [[Text("col"), Code("|pipe|")]], rows: [[[Text("zq0000 *star*"), Code("|pipe|")]]], has_merged: false }), prov: Provenance { source_pages: None, source_href: None } }] }, opts: Options { max_tokens: 40, min_tokens: 5 }, assets: AssetBag { items: [] }, sentinels: [Sentinel { token: "zq0000", payload: "zq0000 *star*", expect: Exactly(1), is_comment: false }] }
+ cc 39c804ca6b4734d9bad38c21bef758b7b96377f81202b185b2e727f2626a6fc6 # shrinks to case = Case { doc: Document { meta: DocMeta { title: "Generated Book", authors: [], language: None, source_format: "epub", source_path: "generated.epub" }, nodes: [Node { block: Heading { level: 1, id: BlockId(0), inlines: [Text("zq0000 *star*"), Text("alpha")] }, prov: Provenance { source_pages: None, source_href: None } }, Node { block: Heading { level: 2, id: BlockId(1), inlines: [Text("zq0001 a\r\nb"), Code("the a\n\nb")] }, prov: Provenance { source_pages: None, source_href: None } }, Node { block: Para([Text("zq0002 $math$"), Text("beta section beta alpha"), Link { target: Internal(BlockId(1)), inlines: [Text("see")] }]), prov: Provenance { source_pages: None, source_href: None } }] }, opts: Options { max_tokens: 92, min_tokens: 28 }, assets: AssetBag { items: [] }, sentinels: [Sentinel { token: "zq0000", payload: "zq0000 *star*", expect: AtLeast(1), is_comment: false }, Sentinel { token: "zq0001", payload: "zq0001 a\r\nb", expect: AtLeast(1), is_comment: false }, Sentinel { token: "zq0002", payload: "zq0002 $math$", expect: Exactly(1), is_comment: false }] }
+ cc 3b2224da1b95049e33b8f7e9cf7b9a090360ff56af2bd761608bccce484fb00f # shrinks to case = Case { doc: Document { meta: DocMeta { title: "Generated Book", authors: [], language: None, source_format: "epub", source_path: "generated.epub" }, nodes: [Node { block: Table(Table { header: [[Text("col"), Math("|pipe|")]], rows: [[[Text("zq0000 *star*"), Math("|pipe|")]]], has_merged: false }), prov: Provenance { source_pages: None, source_href: None } }] }, opts: Options { max_tokens: 40, min_tokens: 5 }, assets: AssetBag { items: [] }, sentinels: [Sentinel { token: "zq0000", payload: "zq0000 *star*", expect: Exactly(1), is_comment: false }] }
++cc db40924940a6103804c7c5be075047ab76297d40d185c72444554b21545d9af1 # shrinks to inlines = [Strong([Emph([Text("a")])]), Emph([Text("a")]), Emph([Emph([Text("a")])])]

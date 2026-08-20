@@ -138,12 +138,13 @@ shipped (§5.1). The cells did not: exactly one cell is licensed on branch
 and no census file moved. **No cell set is safe to license**, and the reason is
 the ledger's key, not its arms.
 
-The evidence is two working documents, **not committed to this repository** —
-`.superpowers/` is git-excluded, so every figure they carry is reproduced in
-§2b and §5.4 rather than cited by reference. They are
-`.superpowers/sdd/2026-08-18-abutment-ledger/`'s: the blocked implementer's
-measurements (`task-4-report.md`) and a second agent's independent verification
-in an isolated worktree (`task-4-verification.md`), which reproduced the
+The evidence is two working documents, archived under
+`docs/superpowers/evidence/2026-08-18-abutment-ledger/` along with the harnesses
+that produced the figures. Every figure they carry is also reproduced in §2b and
+§5.4, so this section stands on its own and the archive is for re-derivation
+rather than for reading. They are the blocked implementer's measurements
+(`measurements-task-4.md`) and a second agent's independent verification in an
+isolated worktree (`measurements-verification.md`), which reproduced the
 length-3 table cell for cell and then measured what nobody had — lengths 4-7,
 and the census's own 19-element alphabet. Where they differ, the verification
 governs. **The baseline throughout is the shipped ledger** (bit 0 alone, what
@@ -589,8 +590,11 @@ program has followed since the 2a item.
 ### 5.4 Correction: the tier as designed cannot run, and its corpus is blind
 
 `crates/kasane-writer/tests/census_deep.rs` was written verbatim from §5.2 and
-§5.3, measured, and **never committed**. It has two defects, either one
-disqualifying.
+§5.3, measured, and **never committed as a test**. It has two defects, either
+one disqualifying. The file itself is archived at
+`docs/superpowers/evidence/2026-08-18-abutment-ledger/harnesses/census_deep.rs`
+— as the artifact this section is about, not as a tier anyone should run and
+believe.
 
 **Its differencing filter baselines against the wrong ledger.** §5.3 keeps the
 shapes whose `LICENSED` and `CONSERVATIVE` renderings differ, which isolates
@@ -732,8 +736,8 @@ move; the reported failure string — `***ab***` where the test pins `*ab*` — 
 case 2, `[Emph[Strong[a]], Emph[Strong[b]]]`, and that one is a genuine
 recovery. Case 3, `[Strong[Emph[a]], Strong[Emph[b]]]`, pins `**ab**` and is a
 regression: `Inexpressible` -> `Corrupt`, em/strong order inverted rather than a
-level erased. Point 2 of this list is moot — the deep census was never committed
-(§5.4) — and point 5 is violated: P13 fails with the cells on (§2b.5).
+level erased. Point 2 of this list is moot — the deep census never
+shipped as a test (§5.4) — and point 5 is violated: P13 fails with the cells on (§2b.5).
 
 ## 8. Non-goals
 
@@ -763,8 +767,8 @@ level erased. Point 2 of this list is moot — the deep census was never committ
 `mise run lint && mise run test` green, with `lint` covering `--all-targets`
 plus `fmt --check`, then `mise run census-ratchet`. The proof specific to this
 item is the bless diff plus the deep tier, both read rather than accepted.
-**Neither exists.** No bless was made and the deep tier was never committed
-(§5.4); what stands in their place is §2's committed probe, the measurements in
+**Neither exists.** No bless was made and the deep tier never shipped as a
+test (§5.4); what stands in their place is §2's committed probe, the measurements in
 §2b, and the fact that the branch's rendered output is byte-identical to `main`.
 
 Risks, in the order they deserve worry:
