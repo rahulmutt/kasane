@@ -137,7 +137,7 @@ done
 # regression hide as a reclassification.
 tq="$(basename "$queue")"; tp="$(basename "$perm")"; tt="$(basename "$text")"
 for side in base head; do
-  LC_ALL=C sort -u "$tmp/$side.$tq" "$tmp/$side.$tp" > "$tmp/$side.union"
+  LC_ALL=C sort -u "$tmp/$side.$tq" "$tmp/$side.$tp" "$tmp/$side.$tt" > "$tmp/$side.union"
 done
 
 fail=0
