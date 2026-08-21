@@ -1002,14 +1002,23 @@ impl Edge {
 /// inner run's own emit/decline choice and, through it, the enclosing run's
 /// `first_class`/`last_class`. A nested run's own recursive call is passed
 /// its own `running_before`/`after_ctx` (computed below) as *its* outer
-/// context, so the threading is exact at every depth: an interior run's
-/// local neighbours never depend on anything outside `children` (proven
-/// separately -- `next_class`/the accumulated `acc` already answer for
-/// those), and only a run genuinely at `children`'s own head or tail needs
-/// the caller's context, which is exactly what it receives. This makes the
-/// function exact for the reason its name claims, not merely close: every
-/// run's own flanking decision matches what the real splice+rescan would
-/// reach, at any nesting depth and under any `Ledger`.
+/// context, so the threading propagates correctly at every depth.
+///
+/// The fallback to `outer_before`/`outer_after` fires exactly when *nothing
+/// local is available to answer at all* -- `!acc.prints` on the opening
+/// side (an empty accumulated buffer has no last character), or an
+/// exhausted `children[end..]` on the closing side -- never merely because
+/// the local answer happens to be `Flank::Space`. A buffer that has printed
+/// something which itself ends in whitespace is a *local* answer, not a
+/// boundary case: `Flank::Space` on its own account, regardless of what the
+/// caller's neighbour is (review round 3 fixed a regression that conflated
+/// the two on the opening side; see `running_before` below). With that
+/// distinction kept, an interior run's local neighbours never depend on
+/// anything outside `children`, and only a run genuinely at `children`'s own
+/// head or tail -- with nothing local at all on that side -- consults the
+/// caller's context. That is what makes the function exact for the reason
+/// its name claims: every run's own flanking decision matches what the real
+/// splice+rescan would reach, at any nesting depth and under any `Ledger`.
 fn probe_edges(
     children: &[Flat<'_>],
     ctx: Ctx,
@@ -1045,16 +1054,41 @@ fn probe_edges(
                 // before/after this run would have. Mirrors
                 // `s.chars().next_back()` (`running_before`) and
                 // `inlines_to_md_flat`'s own `after_class = next_class(...)`
-                // (`after_ctx`), but falls back to *this* view's own outer
-                // context -- `outer_before`/`outer_after` -- rather than
-                // `Flank::Space`, exactly when there is nothing local (within
-                // `children`) left to consult. See this function's doc.
-                let running_before = if !acc.prints || acc.trailing_ws {
+                // (`after_ctx`).
+                //
+                // `running_before` falls back to `outer_before` only when
+                // *nothing has printed yet* on this side -- `!acc.prints` --
+                // which is the one case `s.chars().next_back()` cannot answer
+                // locally (an empty buffer has no last character, so the real
+                // answer genuinely lives outside `children`). A buffer that
+                // *has* printed but ends in whitespace (`acc.trailing_ws`) has
+                // a perfectly good local answer already: the printed
+                // whitespace itself is `Flank::Space`, full stop, regardless
+                // of what the caller's own neighbour is. Review round 3 on
+                // this branch found that conflating the two -- falling back to
+                // `outer_before` for `acc.trailing_ws` too -- discarded that
+                // local answer and substituted the enclosing context instead,
+                // an accidental, unmeasured re-pricing of
+                // `strong_over_emph_tail_edge` no census or fuzz run caught
+                // because none had exercised a whitespace-trailing `Text`
+                // immediately before a tail-edge-exempt container.
+                let running_before = if !acc.prints {
                     outer_before
+                } else if acc.trailing_ws {
+                    Flank::Space
                 } else {
                     acc.last_class
                         .expect("an Edge that does not trail whitespace always has a last_class")
                 };
+                // `after_ctx` has no equivalent three-way split: `next_class`
+                // does its own exact classification of whatever comes next
+                // (including answering `Flank::Space` itself when the next
+                // printing content genuinely is whitespace-classed), so
+                // there is no separate "local but not yet consulted" state
+                // to conflate with "nothing local" the way an *already
+                // printed* buffer's trailing whitespace is. `outer_after`
+                // only ever substitutes for a `next_class(&[])` on a
+                // genuinely empty local remainder.
                 let after_ctx = if end < children.len() {
                     next_class(&children[end..])
                 } else {
@@ -2923,6 +2957,45 @@ mod tests {
             Ledger::from_bits(cell::EMPH_OVER_STRONG_WHOLE_RUN | cell::STRONG_OVER_EMPH_HEAD_EDGE);
         let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
         assert_eq!(md.trim_end(), "z**a`x`a**z");
+    }
+
+    /// `running_before`'s fallback to `outer_before` must fire only when
+    /// nothing has printed yet on the opening side, never merely because the
+    /// locally accumulated buffer ends in whitespace -- review round 3 on
+    /// this branch found a regression where it did the latter too, silently
+    /// changing whether the *outer* `Strong` below opened and closed.
+    ///
+    /// `Text("a ")` ends in a real space, so `running_before` for the `Emph`
+    /// that follows it has a perfectly good local answer already
+    /// (`Flank::Space`) and must not consult `outer_before` (the class of
+    /// `Text("z")` before the outer `Strong`) instead. Reachable only under a
+    /// ledger licensing `strong_over_emph_tail_edge` (so the inner `Emph`
+    /// survives unspliced as the outer `Strong`'s tail child) --
+    /// `Ledger::LICENSED` does not hold that cell, so this shape is not
+    /// reachable in shipped output today, but a future licensing change must
+    /// not resurrect this defect silently.
+    ///
+    /// Pinned against the pre-`probe_edges` renderer's own output (both
+    /// `2e49c28` and the round-2 fix at `e3397af` agree on it):
+    /// `"za *`x`b*z"` keeps the inner `Emph` (the buffer's own trailing space
+    /// makes it flank correctly against the real local neighbour); the
+    /// regression this test guards against instead consulted `outer_before`
+    /// (`z`, alphanumeric) and produced `"z**a *`x`b***z"`, an unmeasured
+    /// re-pricing of `strong_over_emph_tail_edge` that dropped no text but
+    /// silently changed which containers survive.
+    #[test]
+    fn a_local_trailing_whitespace_answers_before_the_outer_context_does() {
+        let seq = vec![
+            Inline::Text("z".into()),
+            Inline::Strong(vec![
+                Inline::Text("a ".into()),
+                Inline::Emph(vec![Inline::Code("x".into()), Inline::Text("b".into())]),
+            ]),
+            Inline::Text("z".into()),
+        ];
+        let ledger = Ledger::from_bits(cell::STRONG_OVER_EMPH_TAIL_EDGE);
+        let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
+        assert_eq!(md.trim_end(), "za *`x`b*z");
     }
 
     /// A container of the run's own class sitting *between* other content is
