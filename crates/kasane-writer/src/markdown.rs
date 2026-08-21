@@ -2825,10 +2825,12 @@ mod tests {
     /// exposed at its tail fuses with the one that follows instead of colliding
     /// with it in the buffer.
     ///
-    /// `[Text("a"), Emph([Code("x")]), Code("x")]` used to print `` a*`x``x` ``,
-    /// in which a parser reads one code span over both backtick pairs and recovers
-    /// `ax``x` — text the IR never held. With the rescan the two spans meet in the
-    /// view, `run_end` groups them, and the line is `` a`xx` ``.
+    /// `[Text("a"), Emph([Code("x")]), Code("x")]` used to print `` a`x``x` ``
+    /// (the `Emph` declined -- no `*` -- so its rendered `Code` child sat
+    /// directly beside the following one), in which a parser reads one code
+    /// span over both backtick pairs and recovers `ax``x` — text the IR
+    /// never held. With the rescan the two spans meet in the view, `run_end`
+    /// groups them, and the line is `` a`xx` ``.
     ///
     /// This is the tail half of the 32-shape family (design spec §2.3). The head
     /// half needs Task 2's rollback and is pinned there.
