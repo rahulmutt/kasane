@@ -982,20 +982,42 @@ impl Edge {
 /// bytes. A leaf's own escaping (`escape::text`, `escape::code_span` via
 /// [`Edge::FIXED_PUNCT`], `escape::math_span`, the link and footnote formats)
 /// is not itself recursive, so calling it directly for one flat run costs
-/// nothing extra and stays exact — `escape::text` is called for real, not
-/// approximated, which is what lets this replace the old code's exact
-/// `inner.trim()` edges with no change in which runs open or close. Only a
-/// nested `Emph`/`Strong` run recurses into this function instead of
-/// [`inlines_to_md_flat`], which is what keeps a chain of `k` nested declines
-/// linear instead of `2^k` (see [`Edge`]'s doc).
+/// nothing extra and stays exact. Only a nested `Emph`/`Strong` run recurses
+/// into this function instead of [`inlines_to_md_flat`], which is what keeps
+/// a chain of `k` nested declines linear instead of `2^k` (see [`Edge`]'s
+/// doc).
 ///
-/// The forward context for a nested run's own flanking check still comes from
-/// [`next_class`], unchanged — that already approximates a not-yet-decided
-/// container as `Flank::Punct` today, and this function has to reach the same
-/// decision the shipped renderer does, not a more exact one; only the *self*
-/// edges this function exists to compute were ever derived from a full
-/// render.
-fn probe_edges(children: &[Flat<'_>], ctx: Ctx, pos: Pos, ledger: Ledger) -> Edge {
+/// `outer_before`/`outer_after` are what the *caller's own* `before`/`after`
+/// are: the class that would actually flank `children`'s first/last run if
+/// every container between here and the caller declined and this view's own
+/// edges ended up spliced all the way out to the caller's neighbours — which
+/// is exactly what happens for real when a decline's `RunOut::Declined` is
+/// spliced into the enclosing view and rescanned. Review round 2 on this
+/// branch found the bug in *not* threading these: with a hard-coded
+/// `Flank::Space`/exhausted-view default at every level's own boundary, a
+/// declining nested run's tail sub-run was flanked against "end of an
+/// isolated view" instead of the real forward neighbour it would actually
+/// land beside, so `can_close(Flank::Punct, Flank::Space)` (true) fired where
+/// `can_close(Flank::Punct, Flank::Other)` (false) should have -- flipping an
+/// inner run's own emit/decline choice and, through it, the enclosing run's
+/// `first_class`/`last_class`. A nested run's own recursive call is passed
+/// its own `running_before`/`after_ctx` (computed below) as *its* outer
+/// context, so the threading is exact at every depth: an interior run's
+/// local neighbours never depend on anything outside `children` (proven
+/// separately -- `next_class`/the accumulated `acc` already answer for
+/// those), and only a run genuinely at `children`'s own head or tail needs
+/// the caller's context, which is exactly what it receives. This makes the
+/// function exact for the reason its name claims, not merely close: every
+/// run's own flanking decision matches what the real splice+rescan would
+/// reach, at any nesting depth and under any `Ledger`.
+fn probe_edges(
+    children: &[Flat<'_>],
+    ctx: Ctx,
+    pos: Pos,
+    ledger: Ledger,
+    outer_before: Flank,
+    outer_after: Flank,
+) -> Edge {
     let mut acc = Edge::NONE;
     let mut pos = pos;
     let mut i = 0;
@@ -1016,7 +1038,29 @@ fn probe_edges(children: &[Flat<'_>], ctx: Ctx, pos: Pos, ledger: Ledger) -> Edg
             Some(escape::Delim::Backtick) => Edge::FIXED_PUNCT,
             Some(want @ (escape::Delim::Emph | escape::Delim::Strong)) => {
                 let inner_children = splice_children(run_children(members), want, ledger);
-                let sub = probe_edges(&inner_children, ctx, pos, ledger);
+                // Computed *before* the recursive call, not just before the
+                // flanking check below: they are this run's own outer
+                // context, and if this run itself declines, its children
+                // take its exact place, so they must see the exact same
+                // before/after this run would have. Mirrors
+                // `s.chars().next_back()` (`running_before`) and
+                // `inlines_to_md_flat`'s own `after_class = next_class(...)`
+                // (`after_ctx`), but falls back to *this* view's own outer
+                // context -- `outer_before`/`outer_after` -- rather than
+                // `Flank::Space`, exactly when there is nothing local (within
+                // `children`) left to consult. See this function's doc.
+                let running_before = if !acc.prints || acc.trailing_ws {
+                    outer_before
+                } else {
+                    acc.last_class
+                        .expect("an Edge that does not trail whitespace always has a last_class")
+                };
+                let after_ctx = if end < children.len() {
+                    next_class(&children[end..])
+                } else {
+                    outer_after
+                };
+                let sub = probe_edges(&inner_children, ctx, pos, ledger, running_before, after_ctx);
                 // Mirrors `emphasis_run`'s own `core.is_empty()` early return:
                 // an all-whitespace or empty sub-view gets no delimiters
                 // either way, so it never reaches the flanking question and
@@ -1025,26 +1069,11 @@ fn probe_edges(children: &[Flat<'_>], ctx: Ctx, pos: Pos, ledger: Ledger) -> Edg
                 if let (true, Some(sub_first), Some(sub_last)) =
                     (sub.prints, sub.first_class, sub.last_class)
                 {
-                    // Mirrors `s.chars().next_back()`, but from tracked
-                    // classes instead of a buffer: `Flank::Space` if nothing
-                    // has printed yet or the last thing printed ended in
-                    // whitespace, else the class of the last non-whitespace
-                    // character printed so far -- which `Edge`'s own
-                    // invariant guarantees is `Some` whenever `trailing_ws`
-                    // is `false`.
-                    let running_before = if !acc.prints || acc.trailing_ws {
-                        Flank::Space
-                    } else {
-                        acc.last_class.expect(
-                            "an Edge that does not trail whitespace always has a last_class",
-                        )
-                    };
                     let open_before = if sub.leading_ws {
                         Flank::Space
                     } else {
                         running_before
                     };
-                    let after_ctx = next_class(&children[end..]);
                     let close_after = if sub.trailing_ws {
                         Flank::Space
                     } else {
@@ -1128,7 +1157,7 @@ fn probe_edges(children: &[Flat<'_>], ctx: Ctx, pos: Pos, ledger: Ledger) -> Edg
                     );
                     let mut view = Vec::new();
                     flatten_into(inlines, depth + 1, &mut view);
-                    probe_edges(&view, ctx, pos, ledger)
+                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after)
                 }
             },
         };
@@ -1194,7 +1223,7 @@ fn emphasis_run<'a>(
     // read four characters off the result, then on a decline throw the
     // whole rendered string away and have the caller re-render the same
     // subtree) cost `2^depth` for a chain of `depth` nested declines.
-    let edge = probe_edges(&children, ctx, pos, ledger);
+    let edge = probe_edges(&children, ctx, pos, ledger, before, after);
     // An all-whitespace or empty view gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
     // classify, so the flanking question does not arise. This is the one
@@ -1231,6 +1260,16 @@ fn emphasis_run<'a>(
         // Only an emitting run needs the real bytes; this render happens
         // exactly once and becomes the answer directly; it is not a trial
         // that might be discarded.
+        //
+        // Known asymptotic cost, not fixed here: a chain of `k` nested
+        // *emitting* runs now pays for both a `probe_edges` walk and this
+        // render at every level, and the render below recurses into the
+        // same pair one level down -- O(k) probes of O(k) width apiece, so
+        // O(k^2) total against the pre-`probe_edges` renderer's O(k) (review
+        // round 2 measured ~40x at depth 240: 12.2ms vs 299us). Bounded by
+        // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
+        // context-threading fix in this same round did not remove it for
+        // free, and restructuring further was out of scope for the round.
         let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
         RunOut::Emitted(emphasize(&inner, markup))
     } else {
@@ -2843,6 +2882,47 @@ mod tests {
         ];
         assert_eq!(para(seq.clone()), "a`xx`");
         assert_eq!(recovered(seq), "axx");
+    }
+
+    /// `probe_edges` must reach the same emit/decline decision the real
+    /// splice+rescan would at every depth, not just the outermost one --
+    /// review round 2 on this branch found a case where it did not: a nested
+    /// run's own tail sub-run was flanked against "end of an isolated view"
+    /// (`Flank::Space`) instead of the real forward neighbour it would
+    /// actually land beside once spliced out to the enclosing view, which
+    /// silently changed whether the *outer* `Strong` below opened and closed
+    /// at all.
+    ///
+    /// Reachable only under a ledger licensing both `emph_over_strong_whole_run`
+    /// (so the innermost `Strong([Text("a"), Code("x")])` survives unspliced as
+    /// the sole child of the `Emph` wrapping it) and `strong_over_emph_head_edge`
+    /// (so that `Emph` in turn survives unspliced as the *first* child of the
+    /// outer `Strong`) -- `Ledger::LICENSED` holds only the first, so this
+    /// shape is not reachable in shipped output today, but a future licensing
+    /// change must not resurrect this defect silently.
+    ///
+    /// Pinned against the pre-`probe_edges` renderer's own output (commit
+    /// `2e49c28`), not just "some string": `"z**a`x`a**z"` is what a real
+    /// splice+rescan produces (the outer `Strong` opens and closes, keeping
+    /// its `**`), against the `"za`x`az"` the un-threaded probe produced
+    /// instead -- losing the whole outer emphasis span.
+    #[test]
+    fn a_nested_decline_flanks_against_the_real_enclosing_neighbour() {
+        let seq = vec![
+            Inline::Text("z".into()),
+            Inline::Strong(vec![
+                Inline::Emph(vec![Inline::Strong(vec![
+                    Inline::Text("a".into()),
+                    Inline::Code("x".into()),
+                ])]),
+                Inline::Text("a".into()),
+            ]),
+            Inline::Text("z".into()),
+        ];
+        let ledger =
+            Ledger::from_bits(cell::EMPH_OVER_STRONG_WHOLE_RUN | cell::STRONG_OVER_EMPH_HEAD_EDGE);
+        let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
+        assert_eq!(md.trim_end(), "z**a`x`a**z");
     }
 
     /// A container of the run's own class sitting *between* other content is
