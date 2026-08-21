@@ -161,3 +161,100 @@ fn cross_class_nesting_truncates_no_earlier_than_same_class() {
          exemption (design spec §3) must not cost headroom against MAX_INLINE_DEPTH"
     );
 }
+
+/// A chain of `depth` nested `Emph`/`Strong` runs, every one of which
+/// actually *declines* rather than folding into a same-class or single-child
+/// base case — the shape neither `nested` nor `nested_alternating` above
+/// covers, and the one review round 1 on `declined-run-rescan` used to find
+/// that `markdown.rs`'s decline handling cost `2^depth`, not `depth`.
+///
+/// Three properties, each closing off an escape hatch the other tests above
+/// leave open:
+/// - **Alternating class** (`Emph` over `Strong` over `Emph`...) so
+///   `same_delim_to_splice` cannot collapse a level away before rendering
+///   ever gets to a flanking decision, the way it does to every level of
+///   `nested`.
+/// - **The recursive member sandwiched between two `Code("x")` siblings**,
+///   not at an edge, so `edge_to_splice` cannot collapse it either — unlike
+///   `nested_alternating`'s single-child members, which have nothing on
+///   either side to be an edge relative to.
+/// - **A trailing `Text("a")` in the same children list**, which forces
+///   `can_close(Flank::Punct, Flank::Other) == false` at every level: the
+///   run's own last character (the tail `Code("x")`'s closing backtick) is
+///   punctuation, and `Text("a")` right after it is alphanumeric, so the
+///   flanking check fails and the run *declines* — every level, not just the
+///   outermost one.
+fn declining_chain(depth: usize) -> Inline {
+    fn level(k: usize, depth: usize) -> Inline {
+        let member = if k == depth {
+            Inline::Text("a".into())
+        } else {
+            level(k + 1, depth)
+        };
+        let wrap: fn(Vec<Inline>) -> Inline = if k.is_multiple_of(2) {
+            Inline::Emph
+        } else {
+            Inline::Strong
+        };
+        wrap(vec![
+            Inline::Code("x".into()),
+            member,
+            Inline::Text("a".into()),
+            Inline::Code("x".into()),
+        ])
+    }
+    level(1, depth)
+}
+
+/// Review round 1 on `declined-run-rescan` measured this exact shape: 10.3ms
+/// at depth 12, 155ms at depth 16, 2.48s at depth 20, 9.86s at depth 22 —
+/// doubling per level against a base (pre-Task-1) time of microseconds at
+/// every depth, output length growing linearly throughout. Depth ~30 was
+/// projected at ~40 minutes; `kasane_ir::MAX_INLINE_DEPTH` is 256, so a real
+/// document is not far from this shape at all.
+///
+/// The cause: `emphasis_run` used to render a declined run's children in
+/// full (`inner = inlines_to_md_flat(&children, ...)`) just to read the
+/// flanking classes off `inner.trim()`'s edges, then threw `inner` away and
+/// had `inlines_to_md_flat`'s splice+rescan render the very same subtree
+/// again. Every nested decline repeated that doubling one level deeper. The
+/// fix (`probe_edges` in `markdown.rs`) computes those same edges without a
+/// trial render, so a decline has nothing expensive to discard.
+///
+/// This runs on a background thread with a bounded wait rather than calling
+/// `blocks_to_markdown` directly and asserting on elapsed time: a
+/// reintroduced exponential would not finish in any reasonable bound, and a
+/// test that just sits there is a stalled CI run, not a failure a person
+/// notices and reads. `recv_timeout` turns "hangs forever" into "fails in
+/// 10s with this message" — `nested`/`nested_alternating`'s own
+/// `deep_*_nesting_does_not_abort` tests don't need this, since neither ever
+/// reaches a decline at more than the outermost level, so neither could
+/// regress into this cost even before this fix existed.
+#[test]
+fn an_alternating_decline_chain_stays_linear() {
+    let depth = 40;
+    let para = Block::Para(vec![declining_chain(depth), Inline::Text("a".into())]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let md = kasane_writer::blocks_to_markdown(&[para], &AssetBag::default());
+        // The channel may have no receiver left if the assertion below
+        // already timed out; that is not this thread's failure to report.
+        let _ = tx.send((md, start.elapsed()));
+    });
+    let (md, elapsed) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or_else(|_| {
+            panic!(
+                "rendering a {depth}-level alternating decline chain did not finish within \
+                 10s -- this is the exponential in decline-chain depth from review round 1 \
+                 again"
+            )
+        });
+    assert!(!md.is_empty(), "rendering must produce output, not nothing");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "rendering a {depth}-level decline chain took {elapsed:?}; a linear pass should be \
+         milliseconds, not seconds -- this shape was 9.86s at depth 22 alone before the fix"
+    );
+}

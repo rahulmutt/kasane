@@ -889,6 +889,267 @@ fn can_close(before: Flank, after: Flank) -> bool {
     before != Flank::Space && (before != Flank::Punct || after != Flank::Other)
 }
 
+/// The four characters [`emphasis_run`]'s flanking check needs from a
+/// flattened view's own rendering, without the rendering itself.
+///
+/// Review round 1 on this branch found that computing these by rendering —
+/// `inner = inlines_to_md_flat(&children, ...)`, then reading `core.trim()`'s
+/// edges off it, then *discarding `inner` on a decline* and having the
+/// splice+rescan render the same subtree again — costs `2^depth` for a chain
+/// of `depth` nested declines, not `depth`: `inner`'s own construction
+/// already resolves every nested run's emit-vs-decline choice in full, and a
+/// decline throws that resolution away only to redo it. `probe_edges` below
+/// walks the same view [`inlines_to_md_flat`] would and reaches the same
+/// decision for every nested run, but never keeps more than these four
+/// fields, so a decline has nothing expensive to discard. See
+/// `an_alternating_decline_chain_stays_linear` (`inline_depth.rs`) for the
+/// measurement.
+#[derive(Clone, Copy)]
+struct Edge {
+    /// `false` iff the view printed nothing at all. The other four fields
+    /// are meaningful only when this is `true`.
+    prints: bool,
+    /// Does the printed text start with an actual whitespace character?
+    leading_ws: bool,
+    /// The class of the first non-whitespace character printed, or `None`
+    /// when every character printed is whitespace (`prints` can still be
+    /// `true` — an all-whitespace view still printed something).
+    first_class: Option<Flank>,
+    /// Does the printed text end with an actual whitespace character?
+    trailing_ws: bool,
+    last_class: Option<Flank>,
+    /// Meaningful only when `trailing_ws`: does the text end specifically in
+    /// `\n`, as opposed to some other whitespace? [`inlines_to_md_flat`]'s
+    /// four `Pos` rules key on that distinction, not on whitespace in
+    /// general, so `probe_edges` has to track it to keep `pos` correct for
+    /// whatever it renders next.
+    trailing_newline: bool,
+}
+
+impl Edge {
+    /// The view printed nothing.
+    const NONE: Edge = Edge {
+        prints: false,
+        leading_ws: false,
+        first_class: None,
+        trailing_ws: false,
+        last_class: None,
+        trailing_newline: false,
+    };
+
+    /// A contribution whose printed text always begins and ends with the same
+    /// fixed punctuation regardless of its content: a code span's fence, a
+    /// non-degrading math span's `$`, an external link's brackets, a
+    /// footnote reference's brackets. None of these four constructs can ever
+    /// start or end in whitespace or in `\n` — the markup itself is the
+    /// first and last character every time.
+    const FIXED_PUNCT: Edge = Edge {
+        prints: true,
+        leading_ws: false,
+        first_class: Some(Flank::Punct),
+        trailing_ws: false,
+        last_class: Some(Flank::Punct),
+        trailing_newline: false,
+    };
+
+    /// Fold `next`'s contribution on after everything already accumulated in
+    /// `self`, left to right — mirrors how [`inlines_to_md_flat`] appends one
+    /// run's rendered output to its buffer at a time.
+    fn then(self, next: Edge) -> Edge {
+        if !next.prints {
+            return self;
+        }
+        if !self.prints {
+            return next;
+        }
+        Edge {
+            prints: true,
+            leading_ws: self.leading_ws,
+            first_class: self.first_class.or(next.first_class),
+            trailing_ws: next.trailing_ws,
+            last_class: next.last_class.or(self.last_class),
+            trailing_newline: next.trailing_newline,
+        }
+    }
+}
+
+/// The edges [`inlines_to_md_flat`]`(children, ctx, pos, ledger)` would print,
+/// computed without building that string.
+///
+/// Walks `children` exactly as [`inlines_to_md_flat`] does — the same
+/// [`run_end`] grouping, the same `repr`/`escape::delim` dispatch, the same
+/// four `Pos` rules — but keeps only an [`Edge`] per run instead of its
+/// bytes. A leaf's own escaping (`escape::text`, `escape::code_span` via
+/// [`Edge::FIXED_PUNCT`], `escape::math_span`, the link and footnote formats)
+/// is not itself recursive, so calling it directly for one flat run costs
+/// nothing extra and stays exact — `escape::text` is called for real, not
+/// approximated, which is what lets this replace the old code's exact
+/// `inner.trim()` edges with no change in which runs open or close. Only a
+/// nested `Emph`/`Strong` run recurses into this function instead of
+/// [`inlines_to_md_flat`], which is what keeps a chain of `k` nested declines
+/// linear instead of `2^k` (see [`Edge`]'s doc).
+///
+/// The forward context for a nested run's own flanking check still comes from
+/// [`next_class`], unchanged — that already approximates a not-yet-decided
+/// container as `Flank::Punct` today, and this function has to reach the same
+/// decision the shipped renderer does, not a more exact one; only the *self*
+/// edges this function exists to compute were ever derived from a full
+/// render.
+fn probe_edges(children: &[Flat<'_>], ctx: Ctx, pos: Pos, ledger: Ledger) -> Edge {
+    let mut acc = Edge::NONE;
+    let mut pos = pos;
+    let mut i = 0;
+    while i < children.len() {
+        let (inline, depth) = children[i];
+        let end = run_end(children, i, ledger);
+        let members = &children[i..end];
+        // Mirrors `inlines_to_md_flat`'s own `repr` derivation exactly (down
+        // to falling back to `inline`, which is the only member of a
+        // None-delim "run": `run_end` returns `start + 1` before it ever
+        // consults vacuity for one of those).
+        let repr = members
+            .iter()
+            .find(|&&(el, d)| !renders_empty(el, d))
+            .map_or(inline, |&(el, _)| el);
+        let before_this_run = pos;
+        let contribution = match escape::delim(repr) {
+            Some(escape::Delim::Backtick) => Edge::FIXED_PUNCT,
+            Some(want @ (escape::Delim::Emph | escape::Delim::Strong)) => {
+                let inner_children = splice_children(run_children(members), want, ledger);
+                let sub = probe_edges(&inner_children, ctx, pos, ledger);
+                // Mirrors `emphasis_run`'s own `core.is_empty()` early return:
+                // an all-whitespace or empty sub-view gets no delimiters
+                // either way, so it never reaches the flanking question and
+                // is passed through exactly as `RunOut::Emitted(inner)` would
+                // be.
+                if let (true, Some(sub_first), Some(sub_last)) =
+                    (sub.prints, sub.first_class, sub.last_class)
+                {
+                    // Mirrors `s.chars().next_back()`, but from tracked
+                    // classes instead of a buffer: `Flank::Space` if nothing
+                    // has printed yet or the last thing printed ended in
+                    // whitespace, else the class of the last non-whitespace
+                    // character printed so far -- which `Edge`'s own
+                    // invariant guarantees is `Some` whenever `trailing_ws`
+                    // is `false`.
+                    let running_before = if !acc.prints || acc.trailing_ws {
+                        Flank::Space
+                    } else {
+                        acc.last_class.expect(
+                            "an Edge that does not trail whitespace always has a last_class",
+                        )
+                    };
+                    let open_before = if sub.leading_ws {
+                        Flank::Space
+                    } else {
+                        running_before
+                    };
+                    let after_ctx = next_class(&children[end..]);
+                    let close_after = if sub.trailing_ws {
+                        Flank::Space
+                    } else {
+                        after_ctx
+                    };
+                    let opens = can_open(open_before, sub_first);
+                    let closes = can_close(sub_last, close_after);
+                    if opens && closes {
+                        Edge {
+                            prints: true,
+                            leading_ws: sub.leading_ws,
+                            first_class: Some(Flank::Punct),
+                            trailing_ws: sub.trailing_ws,
+                            last_class: Some(Flank::Punct),
+                            trailing_newline: sub.trailing_newline,
+                        }
+                    } else {
+                        // Declines: contributes exactly `sub`, unchanged --
+                        // the run prints no delimiter, so its own edges are
+                        // its children's edges.
+                        sub
+                    }
+                } else {
+                    sub
+                }
+            }
+            // `delim` said this inline prints no delimiter that can collide,
+            // so the run is this inline alone -- `repr == inline` here, as
+            // established above.
+            None => match inline {
+                Inline::Text(t) => {
+                    // The one place this function actually escapes text, and
+                    // for the same reason `inlines_to_md_flat` is the one
+                    // place that calls `escape::text` at all: a `Text` leaf
+                    // is not itself recursive, so escaping it for real costs
+                    // nothing extra and stays exact where `next_class`'s own
+                    // approximation (used only for forward context, above)
+                    // would not be safe to reuse here.
+                    let escaped = escape::text(t, ctx, pos);
+                    if escaped.is_empty() {
+                        Edge::NONE
+                    } else {
+                        Edge {
+                            prints: true,
+                            leading_ws: escaped.starts_with(char::is_whitespace),
+                            first_class: escaped.chars().find(|c| !c.is_whitespace()).map(class_of),
+                            trailing_ws: escaped.ends_with(char::is_whitespace),
+                            last_class: escaped
+                                .chars()
+                                .rev()
+                                .find(|c| !c.is_whitespace())
+                                .map(class_of),
+                            trailing_newline: escaped.ends_with('\n'),
+                        }
+                    }
+                }
+                // Non-degrading -- `escape::delim` returned `None`, which for
+                // `Math` means exactly that -- so `math_span` always prints
+                // `$...$`, fixed punctuation at both edges regardless of
+                // content.
+                Inline::Math(_) => Edge::FIXED_PUNCT,
+                Inline::Link {
+                    target: RefTarget::External(_),
+                    ..
+                } => Edge::FIXED_PUNCT,
+                Inline::FootnoteRef(_) => Edge::FIXED_PUNCT,
+                // Unreachable, mirroring `inlines_to_md_flat`'s own asserted
+                // dead branches: `delim` returns `Some` for all three, and a
+                // transparent link never reaches a view at all.
+                Inline::Code(_) | Inline::Emph(_) | Inline::Strong(_) => {
+                    debug_assert!(
+                        escape::delim(inline).is_some(),
+                        "escape::delim narrowed; this inline's content would be dropped"
+                    );
+                    Edge::NONE
+                }
+                Inline::Link { inlines, .. } => {
+                    debug_assert!(
+                        false,
+                        "a transparent link reached the emit loop; flatten_into must splice it"
+                    );
+                    let mut view = Vec::new();
+                    flatten_into(inlines, depth + 1, &mut view);
+                    probe_edges(&view, ctx, pos, ledger)
+                }
+            },
+        };
+        // The same four rules `inlines_to_md_flat` applies to `pos`, applied
+        // here to `contribution` instead of to a buffer's own length and
+        // trailing byte.
+        pos = if !contribution.prints {
+            pos
+        } else if contribution.trailing_newline {
+            Pos::LineStart
+        } else if matches!(inline, Inline::FootnoteRef(_)) && before_this_run == Pos::LineStart {
+            Pos::AfterFootnoteRef
+        } else {
+            Pos::Mid
+        };
+        acc = acc.then(contribution);
+        i = end;
+    }
+    acc
+}
+
 /// What one emphasis run contributed: either printed text, or the children it
 /// declined to wrap, handed back for re-entry into the outer view.
 ///
@@ -927,14 +1188,26 @@ fn emphasis_run<'a>(
     ledger: Ledger,
 ) -> RunOut<'a> {
     let children = splice_children(run_children(members), want, ledger);
-    let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
-    let core = inner.trim();
-    // An all-whitespace or empty inner buffer gets no delimiters anyway --
+    // `probe_edges` reaches the same open/close decision `inner.trim()`'s own
+    // first and last characters used to, without rendering `inner` to get
+    // there -- see its doc, and `Edge`'s, for why the old order (render,
+    // read four characters off the result, then on a decline throw the
+    // whole rendered string away and have the caller re-render the same
+    // subtree) cost `2^depth` for a chain of `depth` nested declines.
+    let edge = probe_edges(&children, ctx, pos, ledger);
+    // An all-whitespace or empty view gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
-    // classify, so the flanking question does not arise.
-    if core.is_empty() {
-        return RunOut::Emitted(inner);
-    }
+    // classify, so the flanking question does not arise. This is the one
+    // path that still has to render: there is no cheaper way to hand back
+    // the actual (possibly all-whitespace) bytes `RunOut::Emitted` needs, and
+    // unlike a decline this path never gets re-rendered by a caller, so it
+    // does not reintroduce the doubling. `Edge` guarantees `first_class` and
+    // `last_class` are `Some` together or `None` together (both empty and
+    // "prints, but only whitespace" leave neither field set), so matching
+    // both at once is exhaustive, not just convenient.
+    let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
+        return RunOut::Emitted(inlines_to_md_flat(&children, ctx, pos, ledger));
+    };
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
     // whatever the buffer or the following view held -- is the character that
@@ -942,19 +1215,23 @@ fn emphasis_run<'a>(
     // against `before`/`after` unconditionally produces a false decline: a
     // legal, correctly-flanking delimiter reads as illegal because the check
     // looked past the whitespace `emphasize` was about to interpose.
-    let open_before = if inner.starts_with(char::is_whitespace) {
+    let open_before = if edge.leading_ws {
         Flank::Space
     } else {
         before
     };
-    let close_after = if inner.ends_with(char::is_whitespace) {
+    let close_after = if edge.trailing_ws {
         Flank::Space
     } else {
         after
     };
-    let opens = can_open(open_before, class_of(core.chars().next().unwrap()));
-    let closes = can_close(class_of(core.chars().next_back().unwrap()), close_after);
+    let opens = can_open(open_before, first_class);
+    let closes = can_close(last_class, close_after);
     if opens && closes {
+        // Only an emitting run needs the real bytes; this render happens
+        // exactly once and becomes the answer directly; it is not a trial
+        // that might be discarded.
+        let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
         RunOut::Emitted(emphasize(&inner, markup))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
