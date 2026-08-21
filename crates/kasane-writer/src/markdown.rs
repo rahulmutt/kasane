@@ -297,6 +297,9 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
 fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+    // Owned, because a declined run rewrites it: the run's slot is replaced by
+    // the children it would have wrapped, and the loop re-scans them in place.
+    let mut items: Vec<Flat<'a>> = items.to_vec();
     let mut s = String::new();
     let mut pos = pos;
     let mut i = 0;
@@ -304,7 +307,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
         let (inline, depth) = items[i];
         let before = pos;
         let len_before = s.len();
-        let end = run_end(items, i, ledger);
+        let end = run_end(&items, i, ledger);
         let members = &items[i..end];
         // The run's class comes from its first *printing* member, not its
         // first member outright: a vacuous leading `Emph` prints no
@@ -325,7 +328,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
                 let after_class = next_class(&items[end..]);
                 let markup = if d == escape::Delim::Emph { "*" } else { "**" };
-                s.push_str(&emphasis_run(
+                match emphasis_run(
                     members,
                     d,
                     ctx,
@@ -334,7 +337,13 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                     before_class,
                     after_class,
                     ledger,
-                ))
+                ) {
+                    RunOut::Emitted(t) => s.push_str(&t),
+                    RunOut::Declined(children) => {
+                        items.splice(i..end, children);
+                        continue;
+                    }
+                }
             }
             // `delim` said this inline prints no delimiter that can collide,
             // so the run is this inline alone and it renders as it always has.
@@ -880,6 +889,18 @@ fn can_close(before: Flank, after: Flank) -> bool {
     before != Flank::Space && (before != Flank::Punct || after != Flank::Other)
 }
 
+/// What one emphasis run contributed: either printed text, or the children it
+/// declined to wrap, handed back for re-entry into the outer view.
+///
+/// A declined run printed no delimiter, so its children are not "the run's
+/// contents" in any sense a parser can see — they are plain neighbours in the
+/// printed line. Rendering them into the buffer asserts otherwise, and the
+/// 32-shape backtick family is what that assertion cost (design spec §3.1).
+enum RunOut<'a> {
+    Emitted(String),
+    Declined(Vec<Flat<'a>>),
+}
+
 /// Render a run of adjacent `Emph` (or `Strong`) elements as one emphasized
 /// span over the concatenation of their children, with both edges trimmed.
 ///
@@ -904,7 +925,7 @@ fn emphasis_run<'a>(
     before: Flank,
     after: Flank,
     ledger: Ledger,
-) -> String {
+) -> RunOut<'a> {
     let children = splice_children(run_children(members), want, ledger);
     let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
     let core = inner.trim();
@@ -912,7 +933,7 @@ fn emphasis_run<'a>(
     // `emphasize` says so itself -- and has no first or last character to
     // classify, so the flanking question does not arise.
     if core.is_empty() {
-        return inner;
+        return RunOut::Emitted(inner);
     }
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
@@ -934,34 +955,23 @@ fn emphasis_run<'a>(
     let opens = can_open(open_before, class_of(core.chars().next().unwrap()));
     let closes = can_close(class_of(core.chars().next_back().unwrap()), close_after);
     if opens && closes {
-        emphasize(&inner, markup)
+        RunOut::Emitted(emphasize(&inner, markup))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
         // it as a literal asterisk in the middle of the prose. The text is the
-        // invariant and the span is not: render the children bare (design spec
-        // §2.3).
+        // invariant and the span is not: hand the children back rather than
+        // rendering them (design spec §2.3).
         //
-        // This re-exposes the run's own edge content to whatever sits beside
-        // it in the outer view, and nothing re-scans that new seam -- the
-        // decline happens after `run_end` already fixed the run's boundaries,
-        // and `inlines_to_md_flat`'s own loop has moved past them by the time
-        // this string lands in its buffer. That is not proven safe in
-        // general -- a code span exposed at the run's tail can go on to fuse
-        // with a following one, which is exactly how a false decline can cost
-        // *text* and not just structure. It is left unscanned anyway on a
-        // measured claim, not an architectural one: no shape in the census
-        // corpus is corrupt *only* because of this decline. For
-        // `[Code("x"), Emph([Code("x")]), Text("a")]` the two seams do differ
-        // -- with a delimiter the line is `` `x`*`x`*a `` (the asterisks
-        // don't flank either, so they survive as literal text: `x*x*a`);
-        // declined, it's `` `x``x`a `` (the backticks fuse instead: `x``xa`)
-        // -- but every shape whose exposed seam fuses this way was already
-        // corrupt before this decline existed, by a different mechanism, not
-        // a new corruption this branch introduces. This is the residual
-        // 32-shape family the census allowlist still names (design spec §8's
-        // residual-risk bullets); a future shape corrupt only through this
-        // seam would not be caught by anything here.
-        inner
+        // `inlines_to_md_flat` splices these children over the run's slot and
+        // re-scans, so the run's own edge content meets whatever sits beside it
+        // in the outer view -- via `run_end` -- instead of colliding with it
+        // pre-rendered in the buffer. That closes the tail half of the
+        // 32-shape backtick family described on `RunOut` above. The head half
+        // survives this task: a forward-only rescan cannot reach a seam that
+        // was already fused *before* this run's own content joined it, which
+        // needs a buffer rollback, not just a re-scan (design spec §2.3;
+        // Task 2).
+        RunOut::Declined(children)
     }
 }
 
@@ -2532,6 +2542,28 @@ mod tests {
             ]),
             "a `cd"
         );
+    }
+
+    /// A declined run's children re-enter the outer view, so the code span it
+    /// exposed at its tail fuses with the one that follows instead of colliding
+    /// with it in the buffer.
+    ///
+    /// `[Text("a"), Emph([Code("x")]), Code("x")]` used to print `` a*`x``x` ``,
+    /// in which a parser reads one code span over both backtick pairs and recovers
+    /// `ax``x` — text the IR never held. With the rescan the two spans meet in the
+    /// view, `run_end` groups them, and the line is `` a`xx` ``.
+    ///
+    /// This is the tail half of the 32-shape family (design spec §2.3). The head
+    /// half needs Task 2's rollback and is pinned there.
+    #[test]
+    fn a_declined_runs_children_rejoin_the_view_and_fuse_forward() {
+        let seq = vec![
+            Inline::Text("a".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Code("x".into()),
+        ];
+        assert_eq!(para(seq.clone()), "a`xx`");
+        assert_eq!(recovered(seq), "axx");
     }
 
     /// A container of the run's own class sitting *between* other content is
