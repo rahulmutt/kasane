@@ -219,17 +219,17 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `can_open`/`can_close`, the only place CommonMark's own rules are spelled
   out, and the ledger reads no text. That split is load-bearing rather than
   tidy, and the disproof below records two distinct failures across it, with
-  distinct causes: a licensed abutment can re-flank the run around it and send
-  `emphasis_run` down its decline branch -- which at the time printed children
-  bare, costing the 37 permanent-to-queue moves and the tail cells' 800
-  code-span text losses; a declined run's children now return to the
-  flattened view instead, and `inlines_to_md_flat` re-scans that seam in both
-  directions -- forward by splicing over the run's slot, backward by rolling
-  the output buffer back one run, since forward alone closed only half of it
-  (`2026-08-21-declined-run-rescan-design.md` §2.3) -- or it can leave a
-  three-character delimiter run whose pairing depends on what follows it,
-  which is not a flanking question at all (the head cells' 2,528 asterisk
-  mis-pairings). CommonMark
+  distinct causes. A licensed abutment can re-flank the run around it and send
+  `emphasis_run` down its decline branch, or it can leave a three-character
+  delimiter run whose pairing depends on what follows it, which is not a
+  flanking question at all (the head cells' 2,528 asterisk mis-pairings). That
+  decline branch printed the children bare at the time, costing the 37
+  permanent-to-queue moves and the tail cells' 800 code-span text losses; a
+  declined run's children now return to the flattened view instead, and
+  `inlines_to_md_flat` re-scans that seam in both directions -- forward by
+  splicing over the run's slot, backward by rolling the output buffer back one
+  run, since forward alone closed only half of it
+  (`2026-08-21-declined-run-rescan-design.md` §2.3). CommonMark
   can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
   expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
   container can nest safely when its own delimiters are one-sided-flanking (`*a
@@ -305,6 +305,8 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 
 ## Workflows
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
+- `mise run census-ratchet` — the census allowlists may only shrink against `main`
+- `mise run census-ratchet-cases` — both directions of the queue gate, including the negative one
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
 - In this sandbox, `mise run fuzz <target>` false-positives as a crash for
   every target, not just `slug`: LeakSanitizer's atexit leak scan needs
@@ -378,21 +380,28 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   it, which is the one claim here nothing downstream re-examines, and it is the
   claim that went wrong for 748 shapes at once. `mise run census-ratchet` is
   the other half — it compares the committed files against the merge base with
-  `main` and fails if the text or structure queue, or their union with the
-  permanent file, gained any shape. The union is what makes reclassification
-  safe to allow: a shape may move between the two files, but none may become
-  corrupt that was not. The union spans all three shape files including the
-  text queue, and the queue gate admits a growth only where the same shapes
-  left the text queue in the same commit. Both follow from the tiers being
-  ordered: `classify_with` returns `Clean` when the text is corrupt, so a
-  text-corrupt shape is structurally *unclassified* — the worst state this
-  census records — and a union without it would read a text fix as a fresh
-  corruption (`2026-08-21-declined-run-rescan-design.md` §5). Add
-  `crates/kasane-writer/tests/census_len4.rs` to the tiers named above: the
-  text tier at length 4, asserting zero, with no allowlist because the
-  answer is zero. `mise run census-ratchet` runs in CI *after* `mise run
-  test`, because it takes the files' accuracy on trust and only the test
-  establishes that.
+  `main`, under three gates. The **text** queue may not gain a shape at all.
+  The **structure** queue may, but only where the same shapes left the text
+  queue in the same commit: text-corrupt → structure-corrupt is a promotion,
+  since text is the invariant and the span boundary is not, and every other
+  growth still fails. And the **union** of all three shape files, text queue
+  included, may not gain a shape by any route. The union is what makes
+  reclassification safe to allow: a shape may move between any two of the three
+  files, but none may become corrupt that was not. Keeping the text queue
+  inside it follows from the tiers being ordered — `classify_with` returns
+  `Clean` when the text is corrupt, so a text-corrupt shape is structurally
+  *unclassified*, the worst state this census records, and a union without it
+  would read a text fix as a fresh corruption
+  (`2026-08-21-declined-run-rescan-design.md` §5). A third tier joins the two
+  above: `crates/kasane-writer/tests/census_len4.rs`, the text tier at length
+  4, asserting zero, with no allowlist because the answer is zero. `mise run
+  census-ratchet` runs in CI *after* `mise run test`, because it takes the
+  files' accuracy on trust and only the test establishes that; `mise run
+  census-ratchet-cases` runs after both and is the queue gate's *negative*
+  direction, injecting an unjustified growth and failing if the gate accepts
+  it (`crates/kasane-writer/tests/ratchet_gate_cases.sh`). The ratchet task on
+  its own only ever exercises the gate where it passes, which is
+  indistinguishable from a gate that always passes.
   `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
   a tier measures with the census's own instrument rather than a copy that
   drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers
@@ -424,6 +433,14 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `kasane_ir::MAX_INLINE_DEPTH` (256) is a safety bound in the core and writer's
   recursive walks, which adapter-produced IR can never reach. Unbounded, deep
   nesting aborts the process on a stack overflow.
+  Nesting depth is the bounded axis; a paragraph's **breadth** is not. Nothing
+  caps how many inlines an adapter puts in one `Block::Para`, so a cost in the
+  writer that grows faster than the input does is reachable from an untrusted
+  file in a way a depth cost is not. `kasane-writer/tests/inline_depth.rs`
+  guards the first axis and `inline_breadth.rs` the second; the latter exists
+  because `inlines_to_md_flat`'s declined-run splice was quadratic in breadth
+  until the final review of `declined-run-rescan`
+  (`2026-08-21-declined-run-rescan-design.md` §3.2).
   BLOCK nesting (`Block::List`/`Block::Footnote`) is bounded the same way, and
   by the same two-constant shape: `epub::xhtml::MAX_BLOCK_DEPTH` is the
   fidelity bound that flattens without losing content (and covers MOBI/AZW3
