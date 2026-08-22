@@ -859,6 +859,60 @@ Design spec §7."
 
 ---
 
+## Amendments during execution
+
+Precedent: `2026-08-15-emphasis-seam.md`'s own section of this name. The steps
+above are left exactly as written — a plan that is silently rewritten to match
+what happened stops being evidence of what was predicted. Recorded here instead
+are the three places where execution, or the reviews that followed it, found a
+step's own claim false.
+
+1. **Task 2 Step 4's mutation claim is false.** Step 1's doc-comment block and
+   Step 4's verification both state that removing `pos = ppos` produces exactly
+   one failure, `a_rollback_restores_the_escaping_position_it_rewound_past`,
+   printing `` [^1]:`x`a `` and recovering `""`. Instrumenting the decline arm
+   on that exact shape counts `declines=1, rollbacks=0, skips=1`: `Text(":")`
+   is the declining `Emph`'s predecessor, `Text`'s `run_end` never moves, so
+   the guard takes the **skip** path and nothing is re-rendered at all. The
+   test would not fail, and the mutation Step 4 asks for is not a red state.
+   The live case for the `Pos` restore is the `predecessor_is_emphasis`
+   rollback branch instead, pinned by
+   `a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render`
+   under `Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM)` — measured
+   `declines=2, rollbacks=1, skips=1`, and with `pos = ppos` removed it prints
+   `` [^1]:b`y`a `` instead of `` [^1]\:b`y`a ``, which a footnote-enabled
+   parser reads as a footnote *definition*. The code comment at the skip
+   branch says all of this, and the final review of the branch renamed the two
+   tests whose names still asserted the falsified claims:
+   `a_rollback_restores_the_escaping_position_it_rewound_past` →
+   `a_skipped_rollback_leaves_an_already_escaped_predecessor_alone`, and
+   `a_rollback_cascades_through_a_predecessor_that_then_declines` →
+   `a_fused_emph_strong_run_declines_once_and_rolls_back_into_its_code_predecessor`.
+   Every name this plan quotes for those two therefore names a test that no
+   longer exists under that name.
+
+2. **Task 5 Step 3 could not work as written.** It verifies the new tier's red
+   state with `git stash push -- crates/kasane-writer/src/markdown.rs`, which
+   assumes the writer changes are uncommitted. By Task 5 they are committed
+   (Tasks 1 and 2 each end in a commit), so the stash saves nothing, the tier
+   runs against the fixed writer and passes — the exact opposite of the step's
+   own stop condition, and a step that reports green where it demanded red is
+   worse than no step. The red state was verified out-of-tree instead, against
+   the merge base `3188c5b`, and gave exactly the 1,344 the spec's §2.2 table
+   predicts. Any future step of this shape must name the revision it wants to
+   measure rather than assume a dirty tree.
+
+3. **Task 4 Step 1's `ratchet_gate_cases.sh` could leave a tracked census file
+   mutated.** As drafted its `trap 'rm -rf "$tmp"' EXIT` deletes the backup
+   before either explicit restore can run, so a signal during the mutation or
+   during the `mise run` call would leave the injected line in
+   `census-known-structure-corrupt.txt` with nothing left to recover it from.
+   The shipped script puts the restore inside the trap, ahead of the cleanup,
+   so the ordering cannot invert. (An `EXIT` trap does not survive `SIGKILL`;
+   what is guaranteed is every exit path the shell still controls.)
+
+---
+
 ## Self-Review
 
 **Spec coverage.** §1 → Tasks 1-3. §2 → the plan argues from it; §2.3's measured 16/32 split is pinned by Task 1 Step 5 and recorded in Task 6. §2.4 (approach E) → no task, correctly: it is a record of something not to build. §3.1 → Task 1. §3.2-§3.3 → Task 2, including the no-predecessor case and the cascade. §4 → Task 3. §5.1-§5.2 → Task 4; §5.3 (permanent file and ceiling unchanged) → Task 3 Step 2's stop condition. §6 → Task 5. §7 → Task 6. §8's five tests → Task 1 Step 1, Task 2 Step 1 (three), Task 4 Step 1, Task 5 Step 1. §9 is non-goals. §10's risks → risk 1 is Task 2's third test, risk 3 is Task 5 Step 4, risk 4 is Task 2's cascade test.

@@ -179,6 +179,56 @@ handle one level and silently mis-handle two.
 zero at every length through 6. Backing up further has no measured benefit and
 would enlarge the re-render window for nothing.
 
+> **Amended, 2026-08-22 — the view is split at the cursor, not one vector.**
+> This section's `items.to_vec()` + `items.splice(i..end, children)` is the
+> shape that shipped, and the final review of this branch found it quadratic in
+> paragraph **breadth**. A container that declines and hands back more than one
+> child grows the vector, and `Vec::splice` then memmoves the whole untouched
+> tail; with `k` such declines in one paragraph the cost is O(k·n). Measured in
+> release on `[Code("x"), Emph([Code("x"), Code("y")]), Text("a")]` repeated
+> `n` times: 27ms / 102ms / 419ms / 1.66s at n = 8k/16k/32k/64k — 4.0x per
+> doubling against the pre-decline renderer's exact 2.0x. The single-child
+> control (`Emph([Code("x")])`, an equal-length splice `Vec::splice` fills
+> without shifting anything) stayed linear at 5.5 / 12.5 / 23 / 49ms over the
+> same range, which is what isolates the growing splice from the rollback and
+> from `run_end`.
+>
+> This one is unlike the other two costs this branch recorded: both of those
+> are bounded by `MAX_INLINE_DEPTH`. Nothing bounds how many inlines an adapter
+> puts in a single `Block::Para`, and this writer sits behind the
+> EPUB/PDF/DjVu/MOBI untrusted-input boundary, so it is reachable from a
+> hostile file.
+>
+> The view is now two vectors split at the cursor: `scanned`, the consumed
+> prefix in forward order, and `pending`, the unscanned remainder held
+> **reversed**. A decline truncates `pending` to the run's own slot and pushes
+> the children back on reversed, which is O(children) and never touches the
+> tail. `scanned.len()` *is* the cursor's logical index, so the checkpoint
+> stack keeps the same plain indices into the same logical view this section
+> describes; a rollback moves the predecessor's items back across the split,
+> O(that run's own length). `run_end` and `next_class` grew iterator forms
+> (`run_len`, `next_class_of`) so the reversed half asks the same code the
+> forward half does, rather than keeping a second copy of either walk in step
+> by hand. Steps 1-3 above are otherwise unchanged, and so is every word of the
+> reasoning around them.
+>
+> Output is unchanged, which is the only thing that lets this land against a
+> branch whose whole evidence base is measured counts: a differential render
+> against the pre-fix commit over 1,518,937 renders — the census alphabet at
+> lengths 3 and 4 across all 128 ledgers, a 13-element multi-child alphabet at
+> lengths 3 and 4, and the breadth shapes themselves — diverges **zero** times.
+> The same four breadths now read 7.4 / 14.6 / 26.8 / 54.4ms, 2.0x per
+> doubling, matching the control. Guarded by
+> `crates/kasane-writer/tests/inline_breadth.rs`, which is red on the pre-fix
+> commit (3.28x at the first doubling) and green after.
+>
+> **What the census could not have caught.** Every container in the census
+> alphabet has exactly one child, so every census decline splices one slot into
+> one slot. Instrumented over that alphabet at lengths 3 and 4 across all 128
+> ledgers: 61,864 declines, **zero** growing splices. The defect was
+> structurally invisible to the branch's own primary instrument, which is why
+> the new test carries its own multi-child corpus.
+
 ### 3.3 Termination
 
 Each decline permanently removes at least one emphasis container from `items`,
@@ -310,6 +360,27 @@ minutes, not seconds.
 here because it is a real +29%, and because ledger Risk 3 is the precedent for
 measuring a tier's wall-clock before committing to it rather than after.
 
+> **Corrected, 2026-08-22.** Both halves of that figure were wrong, in the same
+> direction. Measured after the tier shipped, by running `cargo test
+> --workspace` with and without `census_len4.rs` and summing the per-binary
+> times libtest reports (both configurations excluding `inline_breadth.rs`,
+> which the same wave added): the final review of this branch got a tier cost of
+> ~2.6-2.9s against a ~6.35s baseline; the fix wave that followed re-measured
+> on its own machine and got 3.05s against 5.68s (8.73s vs 5.68s, two runs
+> each, spread under 0.05s). So the tier is **+43% to +54%**, not +29% — a
+> larger absolute delta than the ~2.3s predicted *and* against a smaller
+> baseline than the 7.9s assumed. Do not attribute the whole gap to the
+> baseline: normalising the measured delta back onto this section's own 7.9s
+> figure still gives +33% to +39%. Machines differ, which is why the ratio is
+> stated as a range and the method is stated with it.
+>
+> The verdict is unchanged and this is not a re-litigation of the tier: it
+> buys an exhaustive text guard one length past where every previous
+> instrument stopped, which is the length the abutment ledger's losses lived
+> at (ledger §2b.5). The point is that a price paid is worth stating
+> accurately, per this plan's own Task 5 Step 4 — a materially larger number is
+> worth reporting rather than absorbing.
+
 This tier is also the reason §5's repair can be trusted going forward: with a
 text gate at length 4 in CI, a future change that trades text for structure
 fails loudly instead of arriving as a queue growth someone has to adjudicate.
@@ -400,6 +471,15 @@ Risks, in the order they deserve worry:
    88% of it was wrong.
 3. **Suite wall-clock, +29%** (§6). Mitigation: measured before committing, and
    the tier is text-only at a single length for exactly this reason.
+
+   > **Corrected, 2026-08-22.** +43% to +54%, measured after the tier shipped;
+   > see §6's own correction block for the figures and the method. The
+   > mitigation stands and so does the tier — the correction is to the price,
+   > not to the decision. What it does cost this entry is the weight it put on
+   > "measured before committing": the pre-commit figure was ~1.5x low on the
+   > delta and ~1.3x high on the baseline, so a design-time measurement is
+   > evidence that the cost is bounded, not evidence of what the cost is. The
+   > figure that binds is the one taken after, against the assembled suite.
 4. **Termination.** Argued in §3.3 and swept to length 6. The argument depends
    on the splice strictly removing a container; a future edit that has
    `Declined` hand back anything containing the run's own members would break
