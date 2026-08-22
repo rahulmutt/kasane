@@ -47,6 +47,15 @@ jobs:
       - name: Census ratchet
         run: mise run census-ratchet
 
+      # Direction 2. The step above only ever runs the gate where it passes,
+      # and a gate exercised only in its passing direction is the silent-gate
+      # failure mode this repo has recorded twice. This one injects an
+      # unjustified queue growth and fails if the gate accepts it. It mutates a
+      # tracked census file and restores it in its own EXIT trap, checked
+      # rather than silenced, so the restore is exercised on every run.
+      - name: Census ratchet, negative direction
+        run: mise run census-ratchet-cases
+
   ocr:
     runs-on: ubuntu-latest
     steps:

@@ -270,7 +270,7 @@ fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut view = Vec::new();
     flatten_into(inls, depth, &mut view);
-    inlines_to_md_flat(&view, ctx, pos, ledger)
+    inlines_to_md_flat(view, ctx, pos, ledger)
 }
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
@@ -296,16 +296,69 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// fused emphasis run's members' children are siblings too. Scanning IR
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
-fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+    // The view is split at the cursor rather than held as one vector with an
+    // index, and `pending` is held *reversed*, because a declined run rewrites
+    // the view at the cursor and the obvious spelling of that rewrite is
+    // quadratic in paragraph breadth. `items.splice(i..end, children)` over a
+    // one-slot container with two or more children grows the vector and
+    // memmoves the whole untouched tail; with `k` such declines in one
+    // paragraph that is O(k*n). Measured in release on
+    // `[Code("x"), Emph([Code("x"), Code("y")]), Text("a")]` repeated `n`
+    // times: 27ms / 102ms / 419ms / 1.66s at n = 8k/16k/32k/64k -- 4x per
+    // doubling -- against 5.2ms / 10.3ms for the pre-decline renderer's exact
+    // 2x. Unlike this branch's other two blowups it is bounded by nothing:
+    // `MAX_INLINE_DEPTH` caps nesting, not how many inlines an adapter puts in
+    // one `Block::Para`, and this writer sits behind the EPUB/PDF/DjVu/MOBI
+    // untrusted-input boundary. Splicing at the *end* of `pending` instead
+    // touches only the run's own slot and its children, so the cost is
+    // O(children) and the tail never moves. See
+    // `inline_breadth.rs::a_paragraph_of_declining_multi_child_containers_scales_with_its_breadth`.
+    //
+    // `scanned` is the consumed prefix in forward order, so `scanned.len()` is
+    // the cursor's own logical index and the checkpoints below stay plain
+    // indices into the same logical view they always were. It is a prefix, not
+    // history that could be dropped: a rollback re-scans from an earlier
+    // checkpoint, so every consumed item stays reachable.
+    let mut scanned: Vec<Flat<'a>> = Vec::with_capacity(items.len());
+    let mut pending: Vec<Flat<'a>> = items;
+    pending.reverse();
+    // One run's members in forward order, reused across iterations so the
+    // per-run copy out of the reversed `pending` allocates once for the call.
+    let mut members: Vec<Flat<'a>> = Vec::new();
     let mut s = String::new();
     let mut pos = pos;
-    let mut i = 0;
-    while i < items.len() {
-        let (inline, depth) = items[i];
+    // One checkpoint per iteration: where the run started, how long the buffer
+    // was before it, and the escaping position it opened at. A decline pops
+    // its own and its predecessor's, so the exposed edge is re-scanned beside
+    // the run that already printed next to it. An emitted run's own mark is
+    // never popped, so this grows by one 24-byte triple per surviving run for
+    // the life of the call -- intentional, not a leak. The view's own length
+    // is not the bound: a decline splices a container's children over its
+    // one slot, so `Emph([a, b, c])` turns one item into three and the view
+    // can grow. The bound is the *total node count* in the
+    // original tree instead -- a splice only ever redistributes nodes this
+    // function has already visited once (an `Emph`/`Strong` wrapper is
+    // consumed, its children take its place), it never invents new ones, so
+    // `marks` is bounded by the same paragraph-sized input the rest of this
+    // function is already linear in.
+    //
+    // A stack rather than one saved slot, because a rollback can cascade: the
+    // re-rendered predecessor may itself decline, and the stack pops into
+    // *its* predecessor (design spec §3.2).
+    let mut marks: Vec<(usize, usize, Pos)> = Vec::new();
+    while let Some(&(inline, depth)) = pending.last() {
         let before = pos;
         let len_before = s.len();
-        let end = run_end(items, i, ledger);
-        let members = &items[i..end];
+        marks.push((scanned.len(), len_before, before));
+        // The run's *length* rather than its end index: the cursor is
+        // `scanned.len()`, and `pending` runs backwards from it, so a count is
+        // the coordinate both sides of the split can use.
+        let run = run_len(pending.iter().rev().copied(), ledger);
+        let tail = pending.len() - run;
+        members.clear();
+        members.extend(pending[tail..].iter().rev().copied());
+        let members = &members[..];
         // The run's class comes from its first *printing* member, not its
         // first member outright: a vacuous leading `Emph` prints no
         // delimiter, so it must not dictate `*` over `**` for a `Strong`
@@ -323,9 +376,9 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
             }
             Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
-                let after_class = next_class(&items[end..]);
+                let after_class = next_class_of(pending[..tail].iter().rev().copied());
                 let markup = if d == escape::Delim::Emph { "*" } else { "**" };
-                s.push_str(&emphasis_run(
+                match emphasis_run(
                     members,
                     d,
                     ctx,
@@ -334,7 +387,108 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                     before_class,
                     after_class,
                     ledger,
-                ))
+                ) {
+                    RunOut::Emitted(t) => s.push_str(&t),
+                    RunOut::Declined(children) => {
+                        // The splice, at the cursor end of `pending`: drop the
+                        // run's own slots and push its children back on in
+                        // reverse, so the next iteration re-scans them in the
+                        // run's place. O(run + children); the tail below
+                        // `tail` is never touched.
+                        pending.truncate(tail);
+                        pending.extend(children.into_iter().rev());
+                        marks.pop();
+                        // No predecessor means the run opened the view: there
+                        // is nothing behind it to fuse with, so leave the
+                        // buffer alone and re-scan from the cursor. The splice
+                        // above is what makes progress in that case.
+                        //
+                        // A predecessor is only worth rolling back into if
+                        // the splice could actually change its own render.
+                        // Two cases roll back unconditionally rather than
+                        // trusting `run_end` alone:
+                        //
+                        // The predecessor is itself an emphasis run. Under
+                        // every *shipped* ledger this cannot happen --
+                        // `run_end` already fuses two touching emphasis runs
+                        // into one, so a star-class predecessor and a
+                        // declining star-class run are never left as
+                        // separately adjacent runs -- but `Ledger::from_bits`
+                        // can license a run-seam cell that keeps them apart
+                        // for testing, and an emphasis run's own flanking
+                        // decision depends on the *class* of whatever comes
+                        // after it (`next_class`), which the splice can
+                        // change -- a spliced-in `Text` is class-visible in a
+                        // way the container it replaced never was -- without
+                        // moving `run_end`'s boundary at all. Skipping here
+                        // would leave that run's stale first-pass decision
+                        // standing. See
+                        // `a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale`.
+                        //
+                        // KNOWN, UNFIXED, under the same non-shipped
+                        // precondition: this branch rolls back into an
+                        // emphasis predecessor *unconditionally*, and if that
+                        // predecessor's own content recurses (e.g. wraps a
+                        // `Link`), the re-render is not free. Measured on
+                        // `nest(d) = [Emph([Link(nest(d-1))]), Strong([Text("b"),
+                        // Code("y")]), Text("a")]` under
+                        // `Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM)`:
+                        // 2.6ms at d=10, 83ms at d=15, 2.6s at d=20 -- the
+                        // same doubling this task's guard exists to close on
+                        // the other branch, surviving here because closing
+                        // it needs the predecessor's own re-render to be
+                        // skippable exactly when it would decline identically
+                        // either way, which -- unlike the `run_end`-only
+                        // case above -- is not a boundary check away for an
+                        // emphasis predecessor. The same shape under
+                        // `Ledger::LICENSED` is linear (30-80us across the
+                        // same range), because that predecessor can never be
+                        // emphasis-class there at all. Anyone licensing a
+                        // run-seam cell for real needs to know this before
+                        // this branch, not this comment, is what they find
+                        // out the hard way.
+                        //
+                        // Otherwise the predecessor is never itself an
+                        // emphasis run -- `run_end` would already have fused
+                        // an adjacent one into *this* run under the ledger in
+                        // force here -- so its render depends only on its own
+                        // members, `ctx`, and `pos`, none of which the splice
+                        // touched. If its run still stops at the same place,
+                        // the splice exposed nothing for it to fuse with and
+                        // re-rendering it is provably byte-identical, so skip
+                        // the rollback rather than pay for it. Left unchecked
+                        // this reintroduces the doubling `probe_edges` exists
+                        // to avoid, this time through a predecessor that
+                        // itself recurses -- an external link's children --
+                        // so a chain of `depth` nested declining links each
+                        // preceding a declining run cost `2^depth` re-renders
+                        // before this check (review round 1 on this task).
+                        if let Some(&(pi, plen, ppos)) = marks.last() {
+                            let predecessor_is_emphasis = matches!(
+                                escape::delim(scanned[pi].0),
+                                Some(escape::Delim::Emph | escape::Delim::Strong)
+                            );
+                            // The predecessor's run has to be re-measured from
+                            // `pi`, which sits behind the cursor, so rewind it
+                            // across the split first and measure from there.
+                            // Rewinding is O(the predecessor run's own length)
+                            // and is undone below on the skip path, so the
+                            // check costs the same either way.
+                            let pred = scanned.len() - pi;
+                            rewind(&mut scanned, &mut pending, pred);
+                            if predecessor_is_emphasis
+                                || run_len(pending.iter().rev().copied(), ledger) != pred
+                            {
+                                marks.pop();
+                                s.truncate(plen);
+                                pos = ppos;
+                            } else {
+                                advance(&mut scanned, &mut pending, pred);
+                            }
+                        }
+                        continue;
+                    }
+                }
             }
             // `delim` said this inline prints no delimiter that can collide,
             // so the run is this inline alone and it renders as it always has.
@@ -396,9 +550,27 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                 Pos::Mid
             };
         }
-        i = end;
+        advance(&mut scanned, &mut pending, run);
     }
     s
+}
+
+/// Move `n` items across the cursor of [`inlines_to_md_flat`]'s split view,
+/// from the unscanned side to the scanned one.
+///
+/// `pending` is stored reversed, so its last `n` entries are the next `n`
+/// logical items in reverse; reversing them again is what puts them into
+/// `scanned` in forward order.
+fn advance<'a>(scanned: &mut Vec<Flat<'a>>, pending: &mut Vec<Flat<'a>>, n: usize) {
+    let k = pending.len() - n;
+    scanned.extend(pending.drain(k..).rev());
+}
+
+/// The exact inverse of [`advance`]: move the last `n` scanned items back to
+/// the unscanned side, which is what a rollback into a predecessor run does.
+fn rewind<'a>(scanned: &mut Vec<Flat<'a>>, pending: &mut Vec<Flat<'a>>, n: usize) {
+    let k = scanned.len() - n;
+    pending.extend(scanned.drain(k..).rev());
 }
 
 /// Whether this inline prints nothing at all.
@@ -603,8 +775,24 @@ fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site, ledger: Ledg
 /// re-derivation — see design spec §4.2 for why the left-to-right walk makes
 /// that tracking well-defined rather than circular.
 fn run_end(items: &[Flat<'_>], start: usize, ledger: Ledger) -> usize {
-    let Some(d) = escape::delim(items[start].0) else {
-        return start + 1;
+    start + run_len(items[start..].iter().copied(), ledger)
+}
+
+/// [`run_end`] over an iterator rather than a slice and a start index, so that
+/// [`inlines_to_md_flat`]'s split view — whose unscanned half is stored
+/// reversed — can ask the same question of the same code instead of keeping a
+/// second copy of this walk in step by hand.
+///
+/// Returns the run's *length* in items, counting the vacuous members it steps
+/// over. Zero for an exhausted iterator, which [`run_end`]'s own callers never
+/// produce.
+fn run_len<'a>(items: impl IntoIterator<Item = Flat<'a>>, ledger: Ledger) -> usize {
+    let mut it = items.into_iter();
+    let Some((first, first_depth)) = it.next() else {
+        return 0;
+    };
+    let Some(d) = escape::delim(first) else {
+        return 1;
     };
     let ch = d.ch();
     // The run's class, decided by its first *printing* member — `None` while
@@ -614,10 +802,9 @@ fn run_end(items: &[Flat<'_>], start: usize, ledger: Ledger) -> usize {
     // is considered (design spec §4.2's ordering note). While it is `None` the
     // seam is not consulted, which is correct — a run of purely vacuous
     // members prints nothing, so there is no abutment to license.
-    let mut class_so_far = (!renders_empty(items[start].0, items[start].1)).then_some(d);
-    let mut k = start + 1;
-    while k < items.len() {
-        let (el, depth) = items[k];
+    let mut class_so_far = (!renders_empty(first, first_depth)).then_some(d);
+    let mut k = 1;
+    for (el, depth) in it {
         if renders_empty(el, depth) {
             k += 1;
             continue;
@@ -819,7 +1006,11 @@ fn splice_children<'a>(
 }
 
 /// CommonMark's three character classes for the flanking rules.
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` for the same reason [`Pos`] and [`Site`] carry it: [`Edge`] is made
+/// of these, and the one failure a reader most wants printed is a
+/// probe/render disagreement over exactly these classes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flank {
     Space,
     Punct,
@@ -855,7 +1046,14 @@ fn class_of(c: char) -> Flank {
 /// punctuation and so is anything it escapes. An exhausted view is the end of
 /// the line, which CommonMark counts as whitespace.
 fn next_class(rest: &[Flat<'_>]) -> Flank {
-    for &(i, d) in rest {
+    next_class_of(rest.iter().copied())
+}
+
+/// [`next_class`] over an iterator, for the same reason [`run_len`] exists:
+/// [`inlines_to_md_flat`] holds the unscanned half of its view reversed and has
+/// to ask this question of the same code, not of a second copy of it.
+fn next_class_of<'a>(rest: impl IntoIterator<Item = Flat<'a>>) -> Flank {
+    for (i, d) in rest {
         if renders_empty(i, d) {
             continue;
         }
@@ -878,6 +1076,378 @@ fn can_open(before: Flank, after: Flank) -> bool {
 /// which is the mirror of [`can_open`].
 fn can_close(before: Flank, after: Flank) -> bool {
     before != Flank::Space && (before != Flank::Punct || after != Flank::Other)
+}
+
+/// The four characters [`emphasis_run`]'s flanking check needs from a
+/// flattened view's own rendering, without the rendering itself.
+///
+/// Review round 1 on this branch found that computing these by rendering —
+/// `inner = inlines_to_md_flat(&children, ...)`, then reading `core.trim()`'s
+/// edges off it, then *discarding `inner` on a decline* and having the
+/// splice+rescan render the same subtree again — costs `2^depth` for a chain
+/// of `depth` nested declines: `inner`'s own construction
+/// already resolves every nested run's emit-vs-decline choice in full, and a
+/// decline throws that resolution away only to redo it. `probe_edges` below
+/// walks the same view [`inlines_to_md_flat`] would and reaches the same
+/// decision for every nested run, but never keeps more than these four
+/// fields, so a decline has nothing expensive to discard. What is left is
+/// **polynomial, not linear**: the same chain is O(k^2) in `k`, measured in
+/// release at 218us/785us/2.48ms/9.58ms for depth 30/60/120/240, because a
+/// chain of `k` nested *emitting* runs still pays for a probe walk and a
+/// render at every level — the cost [`emphasis_run`]'s own emit path records
+/// beside it, bounded by `MAX_INLINE_DEPTH`. Removing an exponential is the
+/// claim; linearity never was. See
+/// `an_alternating_decline_chain_stays_polynomial` (`inline_depth.rs`) for
+/// the measurement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Edge {
+    /// `false` iff the view printed nothing at all. The other four fields
+    /// are meaningful only when this is `true`.
+    prints: bool,
+    /// Does the printed text start with an actual whitespace character?
+    leading_ws: bool,
+    /// The class of the first non-whitespace character printed, or `None`
+    /// when every character printed is whitespace (`prints` can still be
+    /// `true` — an all-whitespace view still printed something).
+    first_class: Option<Flank>,
+    /// Does the printed text end with an actual whitespace character?
+    trailing_ws: bool,
+    last_class: Option<Flank>,
+    /// Meaningful only when `trailing_ws`: does the text end specifically in
+    /// `\n`, as opposed to some other whitespace? [`inlines_to_md_flat`]'s
+    /// four `Pos` rules key on that distinction, not on whitespace in
+    /// general, so `probe_edges` has to track it to keep `pos` correct for
+    /// whatever it renders next.
+    trailing_newline: bool,
+}
+
+impl Edge {
+    /// The view printed nothing.
+    const NONE: Edge = Edge {
+        prints: false,
+        leading_ws: false,
+        first_class: None,
+        trailing_ws: false,
+        last_class: None,
+        trailing_newline: false,
+    };
+
+    /// The edges of an already-rendered string.
+    ///
+    /// The single derivation of an [`Edge`] from real bytes, shared by
+    /// [`probe_edges`]'s `Text` arm (the one place the probe escapes text for
+    /// real) and by [`emphasis_run`]'s desync guard, which compares the
+    /// probe's answer against the render it stands in for. A second copy of
+    /// these six lines is exactly the drift the guard exists to catch, so
+    /// there is only one.
+    ///
+    /// [`Edge::then`] is the fold of this over concatenation: `of(a).then(of(b))
+    /// == of(a ++ b)` for every pair. That is what makes the guard a whole-
+    /// struct comparison rather than a field-by-field approximation.
+    fn of(text: &str) -> Edge {
+        if text.is_empty() {
+            return Edge::NONE;
+        }
+        Edge {
+            prints: true,
+            leading_ws: text.starts_with(char::is_whitespace),
+            first_class: text.chars().find(|c| !c.is_whitespace()).map(class_of),
+            trailing_ws: text.ends_with(char::is_whitespace),
+            last_class: text
+                .chars()
+                .rev()
+                .find(|c| !c.is_whitespace())
+                .map(class_of),
+            trailing_newline: text.ends_with('\n'),
+        }
+    }
+
+    /// A contribution whose printed text always begins and ends with the same
+    /// fixed punctuation regardless of its content: a code span's fence, a
+    /// non-degrading math span's `$`, an external link's brackets, a
+    /// footnote reference's brackets. None of these four constructs can ever
+    /// start or end in whitespace or in `\n` — the markup itself is the
+    /// first and last character every time.
+    const FIXED_PUNCT: Edge = Edge {
+        prints: true,
+        leading_ws: false,
+        first_class: Some(Flank::Punct),
+        trailing_ws: false,
+        last_class: Some(Flank::Punct),
+        trailing_newline: false,
+    };
+
+    /// Fold `next`'s contribution on after everything already accumulated in
+    /// `self`, left to right — mirrors how [`inlines_to_md_flat`] appends one
+    /// run's rendered output to its buffer at a time.
+    fn then(self, next: Edge) -> Edge {
+        if !next.prints {
+            return self;
+        }
+        if !self.prints {
+            return next;
+        }
+        Edge {
+            prints: true,
+            leading_ws: self.leading_ws,
+            first_class: self.first_class.or(next.first_class),
+            trailing_ws: next.trailing_ws,
+            last_class: next.last_class.or(self.last_class),
+            trailing_newline: next.trailing_newline,
+        }
+    }
+}
+
+/// The edges [`inlines_to_md_flat`]`(children, ctx, pos, ledger)` would print,
+/// computed without building that string.
+///
+/// Walks `children` exactly as [`inlines_to_md_flat`] does — the same
+/// [`run_end`] grouping, the same `repr`/`escape::delim` dispatch, the same
+/// four `Pos` rules — but keeps only an [`Edge`] per run instead of its
+/// bytes. A leaf's own escaping (`escape::text`, `escape::code_span` via
+/// [`Edge::FIXED_PUNCT`], `escape::math_span`, the link and footnote formats)
+/// is not itself recursive, so calling it directly for one flat run costs
+/// nothing extra and stays exact. Only a nested `Emph`/`Strong` run recurses
+/// into this function instead of [`inlines_to_md_flat`], which is what keeps
+/// a chain of `k` nested declines polynomial — O(k^2), measured — instead of
+/// `2^k` (see [`Edge`]'s doc, which carries the figures).
+///
+/// `outer_before`/`outer_after` are what the *caller's own* `before`/`after`
+/// are: the class that would actually flank `children`'s first/last run if
+/// every container between here and the caller declined and this view's own
+/// edges ended up spliced all the way out to the caller's neighbours — which
+/// is exactly what happens for real when a decline's `RunOut::Declined` is
+/// spliced into the enclosing view and rescanned. Review round 2 on this
+/// branch found the bug in *not* threading these: with a hard-coded
+/// `Flank::Space`/exhausted-view default at every level's own boundary, a
+/// declining nested run's tail sub-run was flanked against "end of an
+/// isolated view" instead of the real forward neighbour it would actually
+/// land beside, so `can_close(Flank::Punct, Flank::Space)` (true) fired where
+/// `can_close(Flank::Punct, Flank::Other)` (false) should have -- flipping an
+/// inner run's own emit/decline choice and, through it, the enclosing run's
+/// `first_class`/`last_class`. A nested run's own recursive call is passed
+/// its own `running_before`/`after_ctx` (computed below) as *its* outer
+/// context, so the threading propagates correctly at every depth.
+///
+/// The fallback to `outer_before`/`outer_after` fires on a precise
+/// structural predicate, not on "nothing local can answer": `!acc.prints` on
+/// the opening side (an empty accumulated buffer has no last character), and
+/// `end == children.len()` on the closing side -- this run sits at
+/// `children`'s own tail, nothing left in this slice to consult at all --
+/// never merely because the local answer happens to be `Flank::Space`. A
+/// buffer that has printed something which itself ends in whitespace is a
+/// *local* answer, not a boundary case: `Flank::Space` on its own account,
+/// regardless of what the caller's neighbour is (review round 3 fixed a
+/// regression that conflated the two on the opening side; see
+/// `running_before` below).
+///
+/// The closing-side predicate is narrower than "nothing local can answer"
+/// reads, and that gap is real: a `children[end..]` that is non-empty but
+/// renders entirely nothing -- every member `renders_empty` -- has nothing
+/// local to answer either, but `end != children.len()` sends it down the
+/// `next_class` path (below) instead of this fallback, and `next_class`
+/// defaults to `Flank::Space` on an exhausted scan where a real
+/// splice+rescan would keep looking past `children` and reach `outer_after`.
+/// Measured unobservable rather than argued away: review round 3's
+/// re-review rebuilt its own differential harness rather than trust the fix
+/// round's figure, and found 0 divergence from the real renderer across
+/// 5.73M renders over 128 ledgers, arguing the gap through rather than only
+/// sampling past it. With that qualification, the function is exact for the
+/// reason its name claims: every run's own flanking decision matches what the real
+/// splice+rescan would reach, at any nesting depth and under any `Ledger`.
+fn probe_edges(
+    children: &[Flat<'_>],
+    ctx: Ctx,
+    pos: Pos,
+    ledger: Ledger,
+    outer_before: Flank,
+    outer_after: Flank,
+) -> Edge {
+    let mut acc = Edge::NONE;
+    let mut pos = pos;
+    let mut i = 0;
+    while i < children.len() {
+        let (inline, depth) = children[i];
+        let end = run_end(children, i, ledger);
+        let members = &children[i..end];
+        // Mirrors `inlines_to_md_flat`'s own `repr` derivation exactly (down
+        // to falling back to `inline`, which is the only member of a
+        // None-delim "run": `run_end` returns `start + 1` before it ever
+        // consults vacuity for one of those).
+        let repr = members
+            .iter()
+            .find(|&&(el, d)| !renders_empty(el, d))
+            .map_or(inline, |&(el, _)| el);
+        let before_this_run = pos;
+        let contribution = match escape::delim(repr) {
+            Some(escape::Delim::Backtick) => Edge::FIXED_PUNCT,
+            Some(want @ (escape::Delim::Emph | escape::Delim::Strong)) => {
+                let inner_children = splice_children(run_children(members), want, ledger);
+                // Computed *before* the recursive call, not just before the
+                // flanking check below: they are this run's own outer
+                // context, and if this run itself declines, its children
+                // take its exact place, so they must see the exact same
+                // before/after this run would have. Mirrors
+                // `s.chars().next_back()` (`running_before`) and
+                // `inlines_to_md_flat`'s own `after_class = next_class(...)`
+                // (`after_ctx`).
+                //
+                // `running_before` falls back to `outer_before` only when
+                // *nothing has printed yet* on this side -- `!acc.prints` --
+                // which is the one case `s.chars().next_back()` cannot answer
+                // locally (an empty buffer has no last character, so the real
+                // answer genuinely lives outside `children`). A buffer that
+                // *has* printed but ends in whitespace (`acc.trailing_ws`) has
+                // a perfectly good local answer already: the printed
+                // whitespace itself is `Flank::Space`, full stop, regardless
+                // of what the caller's own neighbour is. Review round 3 on
+                // this branch found that conflating the two -- falling back to
+                // `outer_before` for `acc.trailing_ws` too -- discarded that
+                // local answer and substituted the enclosing context instead,
+                // an accidental, unmeasured re-pricing of
+                // `strong_over_emph_tail_edge` no census or fuzz run caught
+                // because none had exercised a whitespace-trailing `Text`
+                // immediately before a tail-edge-exempt container.
+                let running_before = if !acc.prints {
+                    outer_before
+                } else if acc.trailing_ws {
+                    Flank::Space
+                } else {
+                    acc.last_class
+                        .expect("an Edge that does not trail whitespace always has a last_class")
+                };
+                // `after_ctx` has no equivalent three-way split: `next_class`
+                // does its own classification of whatever comes next, so
+                // there is no separate "local but not yet consulted" state
+                // to conflate with "nothing local" the way an *already
+                // printed* buffer's trailing whitespace is. `outer_after`
+                // only substitutes when `end == children.len()` -- this run
+                // is at `children`'s own tail. `next_class` answers
+                // `Flank::Space` for two cases it does not itself
+                // distinguish: the next printing content genuinely is
+                // whitespace-classed, or `children[end..]` is non-empty but
+                // renders nothing at all, in which case a real splice+rescan
+                // would look past `children` and reach `outer_after` instead
+                // -- see `probe_edges`'s own doc for why that gap does not
+                // reach output.
+                let after_ctx = if end < children.len() {
+                    next_class(&children[end..])
+                } else {
+                    outer_after
+                };
+                let sub = probe_edges(&inner_children, ctx, pos, ledger, running_before, after_ctx);
+                // Mirrors `emphasis_run`'s own `core.is_empty()` early return:
+                // an all-whitespace or empty sub-view gets no delimiters
+                // either way, so it never reaches the flanking question and
+                // is passed through exactly as `RunOut::Emitted(inner)` would
+                // be.
+                if let (true, Some(sub_first), Some(sub_last)) =
+                    (sub.prints, sub.first_class, sub.last_class)
+                {
+                    let open_before = if sub.leading_ws {
+                        Flank::Space
+                    } else {
+                        running_before
+                    };
+                    let close_after = if sub.trailing_ws {
+                        Flank::Space
+                    } else {
+                        after_ctx
+                    };
+                    let opens = can_open(open_before, sub_first);
+                    let closes = can_close(sub_last, close_after);
+                    if opens && closes {
+                        Edge {
+                            prints: true,
+                            leading_ws: sub.leading_ws,
+                            first_class: Some(Flank::Punct),
+                            trailing_ws: sub.trailing_ws,
+                            last_class: Some(Flank::Punct),
+                            trailing_newline: sub.trailing_newline,
+                        }
+                    } else {
+                        // Declines: contributes exactly `sub`, unchanged --
+                        // the run prints no delimiter, so its own edges are
+                        // its children's edges.
+                        sub
+                    }
+                } else {
+                    sub
+                }
+            }
+            // `delim` said this inline prints no delimiter that can collide,
+            // so the run is this inline alone -- `repr == inline` here, as
+            // established above.
+            None => match inline {
+                Inline::Text(t) => {
+                    // The one place this function actually escapes text, and
+                    // for the same reason `inlines_to_md_flat` is the one
+                    // place that calls `escape::text` at all: a `Text` leaf
+                    // is not itself recursive, so escaping it for real costs
+                    // nothing extra and stays exact where `next_class`'s own
+                    // approximation (used only for forward context, above)
+                    // would not be safe to reuse here.
+                    Edge::of(&escape::text(t, ctx, pos))
+                }
+                // Non-degrading -- `escape::delim` returned `None`, which for
+                // `Math` means exactly that -- so `math_span` always prints
+                // `$...$`, fixed punctuation at both edges regardless of
+                // content.
+                Inline::Math(_) => Edge::FIXED_PUNCT,
+                Inline::Link {
+                    target: RefTarget::External(_),
+                    ..
+                } => Edge::FIXED_PUNCT,
+                Inline::FootnoteRef(_) => Edge::FIXED_PUNCT,
+                // Unreachable, mirroring `inlines_to_md_flat`'s own asserted
+                // dead branches: `delim` returns `Some` for all three, and a
+                // transparent link never reaches a view at all.
+                Inline::Code(_) | Inline::Emph(_) | Inline::Strong(_) => {
+                    debug_assert!(
+                        escape::delim(inline).is_some(),
+                        "escape::delim narrowed; this inline's content would be dropped"
+                    );
+                    Edge::NONE
+                }
+                Inline::Link { inlines, .. } => {
+                    debug_assert!(
+                        false,
+                        "a transparent link reached the emit loop; flatten_into must splice it"
+                    );
+                    let mut view = Vec::new();
+                    flatten_into(inlines, depth + 1, &mut view);
+                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after)
+                }
+            },
+        };
+        // The same four rules `inlines_to_md_flat` applies to `pos`, applied
+        // here to `contribution` instead of to a buffer's own length and
+        // trailing byte.
+        pos = if !contribution.prints {
+            pos
+        } else if contribution.trailing_newline {
+            Pos::LineStart
+        } else if matches!(inline, Inline::FootnoteRef(_)) && before_this_run == Pos::LineStart {
+            Pos::AfterFootnoteRef
+        } else {
+            Pos::Mid
+        };
+        acc = acc.then(contribution);
+        i = end;
+    }
+    acc
+}
+
+/// What one emphasis run contributed: either printed text, or the children it
+/// declined to wrap, handed back for re-entry into the outer view.
+///
+/// A declined run printed no delimiter, so its children are not "the run's
+/// contents" in any sense a parser can see — they are plain neighbours in the
+/// printed line. Rendering them into the buffer asserts otherwise, and the
+/// 32-shape backtick family is what that assertion cost (design spec §3.1).
+enum RunOut<'a> {
+    Emitted(String),
+    Declined(Vec<Flat<'a>>),
 }
 
 /// Render a run of adjacent `Emph` (or `Strong`) elements as one emphasized
@@ -904,16 +1474,28 @@ fn emphasis_run<'a>(
     before: Flank,
     after: Flank,
     ledger: Ledger,
-) -> String {
+) -> RunOut<'a> {
     let children = splice_children(run_children(members), want, ledger);
-    let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
-    let core = inner.trim();
-    // An all-whitespace or empty inner buffer gets no delimiters anyway --
+    // `probe_edges` reaches the same open/close decision `inner.trim()`'s own
+    // first and last characters used to, without rendering `inner` to get
+    // there -- see its doc, and `Edge`'s, for why the old order (render,
+    // read four characters off the result, then on a decline throw the
+    // whole rendered string away and have the caller re-render the same
+    // subtree) cost `2^depth` for a chain of `depth` nested declines.
+    let edge = probe_edges(&children, ctx, pos, ledger, before, after);
+    // An all-whitespace or empty view gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
-    // classify, so the flanking question does not arise.
-    if core.is_empty() {
-        return inner;
-    }
+    // classify, so the flanking question does not arise. This is the one
+    // path that still has to render: there is no cheaper way to hand back
+    // the actual (possibly all-whitespace) bytes `RunOut::Emitted` needs, and
+    // unlike a decline this path never gets re-rendered by a caller, so it
+    // does not reintroduce the doubling. `Edge` guarantees `first_class` and
+    // `last_class` are `Some` together or `None` together (both empty and
+    // "prints, but only whitespace" leave neither field set), so matching
+    // both at once is exhaustive, not just convenient.
+    let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
+        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger));
+    };
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
     // whatever the buffer or the following view held -- is the character that
@@ -921,47 +1503,79 @@ fn emphasis_run<'a>(
     // against `before`/`after` unconditionally produces a false decline: a
     // legal, correctly-flanking delimiter reads as illegal because the check
     // looked past the whitespace `emphasize` was about to interpose.
-    let open_before = if inner.starts_with(char::is_whitespace) {
+    let open_before = if edge.leading_ws {
         Flank::Space
     } else {
         before
     };
-    let close_after = if inner.ends_with(char::is_whitespace) {
+    let close_after = if edge.trailing_ws {
         Flank::Space
     } else {
         after
     };
-    let opens = can_open(open_before, class_of(core.chars().next().unwrap()));
-    let closes = can_close(class_of(core.chars().next_back().unwrap()), close_after);
+    let opens = can_open(open_before, first_class);
+    let closes = can_close(last_class, close_after);
     if opens && closes {
-        emphasize(&inner, markup)
+        // Only an emitting run needs the real bytes; this render happens
+        // exactly once and becomes the answer directly; it is not a trial
+        // that might be discarded.
+        //
+        // Known asymptotic cost, not fixed here: a chain of `k` nested
+        // *emitting* runs now pays for both a `probe_edges` walk and this
+        // render at every level, and the render below recurses into the
+        // same pair one level down -- O(k) probes of O(k) width apiece, so
+        // O(k^2) total against the pre-`probe_edges` renderer's O(k) (review
+        // round 2 measured ~40x at depth 240: 12.2ms vs 299us). Bounded by
+        // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
+        // context-threading fix in this same round did not remove it for
+        // free, and restructuring further was out of scope for the round.
+        let inner = inlines_to_md_flat(children, ctx, pos, ledger);
+        // The one maintainability cost of computing the flanking edges without
+        // rendering is that two functions now have to agree about them, and an
+        // edit to either could desynchronise them in silence. This path
+        // renders `inner` anyway, so on the emit half of the decision the
+        // agreement is checkable for free -- `debug_assert_eq!` compiles out
+        // of release entirely, and in debug the census (lengths 1-3), the
+        // 130,321-shape length-4 tier, the property tier, `inline_depth` and
+        // the fuzz corpus all check it on every run. It converts "these two
+        // must agree" from a comment into an invariant with a test suite
+        // behind it. Run as a *hard* `assert!` over the whole writer suite and
+        // over a 120,000-render four-ledger sweep including two ledgers
+        // licensing `EMPH_BESIDE_STRONG_RUN_SEAM`: zero divergence.
+        //
+        // Only the emit half. A declining run never renders `inner`, which is
+        // the entire point of `probe_edges`, so there is nothing to compare it
+        // against there without reintroducing the cost the probe removed.
+        debug_assert_eq!(
+            edge,
+            Edge::of(&inner),
+            "probe_edges disagreed with the render it stands in for on {inner:?}: left is \
+             probe_edges' Edge for this run's children, right is the same children's edges \
+             read off inlines_to_md_flat's own output. These two must agree, or a run's \
+             emit/decline choice depends on which one was asked"
+        );
+        RunOut::Emitted(emphasize(&inner, markup))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
         // it as a literal asterisk in the middle of the prose. The text is the
-        // invariant and the span is not: render the children bare (design spec
-        // §2.3).
+        // invariant and the span is not: hand the children back to the outer
+        // view rather than printing them (design spec §2.3).
         //
-        // This re-exposes the run's own edge content to whatever sits beside
-        // it in the outer view, and nothing re-scans that new seam -- the
-        // decline happens after `run_end` already fixed the run's boundaries,
-        // and `inlines_to_md_flat`'s own loop has moved past them by the time
-        // this string lands in its buffer. That is not proven safe in
-        // general -- a code span exposed at the run's tail can go on to fuse
-        // with a following one, which is exactly how a false decline can cost
-        // *text* and not just structure. It is left unscanned anyway on a
-        // measured claim, not an architectural one: no shape in the census
-        // corpus is corrupt *only* because of this decline. For
-        // `[Code("x"), Emph([Code("x")]), Text("a")]` the two seams do differ
-        // -- with a delimiter the line is `` `x`*`x`*a `` (the asterisks
-        // don't flank either, so they survive as literal text: `x*x*a`);
-        // declined, it's `` `x``x`a `` (the backticks fuse instead: `x``xa`)
-        // -- but every shape whose exposed seam fuses this way was already
-        // corrupt before this decline existed, by a different mechanism, not
-        // a new corruption this branch introduces. This is the residual
-        // 32-shape family the census allowlist still names (design spec §8's
-        // residual-risk bullets); a future shape corrupt only through this
-        // seam would not be caught by anything here.
-        inner
+        // Handing them back rather than rendering them is what closed the
+        // 32-shape backtick family. A declined run prints no delimiter, so its
+        // children are plain neighbours in the printed line, and rendering them
+        // into the buffer asserted otherwise: for
+        // `[Code("x"), Emph([Code("x")]), Text("a")]` the buffer held
+        // `` `x``x`a ``, in which a parser reads one code span over both
+        // backtick pairs and recovers `x``xa` where the IR said `xxa`.
+        //
+        // `inlines_to_md_flat` re-scans the seam in both directions -- forward
+        // by splicing over the run's slot, backward by rolling the buffer back
+        // one run -- because a forward-only rescan closes only the half whose
+        // collision is with what follows (design spec §2.3, measured at 16 of
+        // 32). `census_len4.rs` is the guard: zero text loss over the census
+        // alphabet at length 4, where the census's own tiers stop at 3.
+        RunOut::Declined(children)
     }
 }
 
@@ -2532,6 +3146,397 @@ mod tests {
             ]),
             "a `cd"
         );
+    }
+
+    /// A declined run's children re-enter the outer view, so the code span it
+    /// exposed at its tail fuses with the one that follows instead of colliding
+    /// with it in the buffer.
+    ///
+    /// `[Text("a"), Emph([Code("x")]), Code("x")]` used to print `` a`x``x` ``
+    /// (the `Emph` declined -- no `*` -- so its rendered `Code` child sat
+    /// directly beside the following one), in which a parser reads one code
+    /// span over both backtick pairs and recovers `ax``x` — text the IR
+    /// never held. With the rescan the two spans meet in the view, `run_end`
+    /// groups them, and the line is `` a`xx` ``.
+    ///
+    /// This is the tail half of the 32-shape family (design spec §2.3). The head
+    /// half needs a buffer rollback rather than a forward rescan, and is pinned
+    /// by `a_declined_run_rolls_the_buffer_back_so_the_preceding_span_can_fuse`
+    /// below.
+    #[test]
+    fn a_declined_runs_children_rejoin_the_view_and_fuse_forward() {
+        let seq = vec![
+            Inline::Text("a".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Code("x".into()),
+        ];
+        assert_eq!(para(seq.clone()), "a`xx`");
+        assert_eq!(recovered(seq), "axx");
+    }
+
+    /// The head half of the 32-shape family: the collision is with output that
+    /// has already landed in the buffer, so the rescan has to reach backwards.
+    ///
+    /// `[Code("x"), Emph([Code("x")]), Text("a")]` printed `` `x``x`a ``, which a
+    /// parser reads as one code span over `` x``x `` -- recovering `x``xa` where
+    /// the IR said `xxa`. Rolling the buffer back one run lets the two spans
+    /// meet in the view and print `` `xx`a `` (design spec §2.3).
+    #[test]
+    fn a_declined_run_rolls_the_buffer_back_so_the_preceding_span_can_fuse() {
+        let seq = vec![
+            Inline::Code("x".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The recovered text is the invariant; the spelling is how this
+        // writer reaches it. Assert the invariant first, consistent with the
+        // rest of this rollback test group -- if the spelling below ever
+        // needs updating, this line is what says whether the update is
+        // legitimate.
+        assert_eq!(recovered(seq.clone()), "xxa");
+        assert_eq!(para(seq), "`xx`a");
+    }
+
+    /// A declining run can itself be the fusion of *two* IR containers:
+    /// under `Ledger::LICENSED`, `run_end` fuses any touching `Emph`/`Strong`
+    /// pair into one run regardless of order, so `Emph([Code("x")])`
+    /// immediately followed by `Strong([Code("y")])` here is a single run,
+    /// declining once as a unit because its own last character (`y`'s
+    /// closing backtick, punct) precedes the trailing `Text("a")` (alnum).
+    /// The stack's rollback into the leading `Code` predecessor still has to
+    /// fuse *both* containers' spliced children with it in one pass.
+    ///
+    /// This shape does not, on measurement, exercise a genuine two-level
+    /// cascade or distinguish the stack from a single saved slot -- an
+    /// earlier version of this doc comment claimed it did, which review
+    /// round 1 on this task found false, and the final review of this branch
+    /// renamed the test from
+    /// `a_rollback_cascades_through_a_predecessor_that_then_declines`
+    /// accordingly: instrumenting the decline arm on
+    /// this exact shape counts one decline and one rollback, not two, because
+    /// the fused `Emph`+`Strong` run declines once as the single unit
+    /// described above, not as two separate declines. Under every *shipped*
+    /// ledger (`LICENSED` and `CONSERVATIVE` both license no run-seam cell)
+    /// `run_end` fuses any touching `Emph`/`Strong` pair unconditionally, so
+    /// two containers can never surface as separate checkpoints for a
+    /// same-shape sequence to cascade through in the first place.
+    /// `a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale`
+    /// (below) is the shape that genuinely pops the checkpoint stack twice --
+    /// measured the same way -- and where an out-of-tree single-slot variant
+    /// demonstrably corrupts the text; reaching it needs a ledger that
+    /// licenses a run-seam cell to keep two emphasis runs from fusing, which
+    /// no shipped ledger does (design spec §3.2).
+    #[test]
+    fn a_fused_emph_strong_run_declines_once_and_rolls_back_into_its_code_predecessor() {
+        let seq = vec![
+            Inline::Code("x".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Strong(vec![Inline::Code("y".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The recovered text is the invariant; the spelling is how this writer
+        // reaches it. Assert the invariant first -- if the spelling below ever
+        // needs updating, this line is what says whether the update is
+        // legitimate.
+        assert_eq!(recovered(seq.clone()), "xxya");
+        assert_eq!(para(seq), "`xxy`a");
+    }
+
+    /// This shape does *not* restore `Pos`, on measurement -- review round 2
+    /// on this task found that claim false, and the final review of this
+    /// branch renamed the test from
+    /// `a_rollback_restores_the_escaping_position_it_rewound_past`, which
+    /// asserted the opposite of its own corrected comment. `Text(":")` here is
+    /// the
+    /// declining `Emph`'s predecessor, and `Text`'s `run_end` never moves
+    /// (`escape::delim` gives it no delimiter to fuse with anything, so
+    /// `run_end` always returns `pi + 1`, splice or no splice): the decline
+    /// arm's guard sees `run_end(&items, pi, ledger) == i` and
+    /// `predecessor_is_emphasis == false`, and takes the **skip** path --
+    /// instrumented on this exact shape: `declines=1, rollbacks=0, skips=1`.
+    /// `Text(":")` was correctly escaped once, during its own single pass at
+    /// `Pos::AfterFootnoteRef`, and is never re-rendered at all, so there is
+    /// nothing here for `pos = ppos` to restore.
+    ///
+    /// This still pins something real: the output bytes on a shape whose
+    /// decline takes the skip path -- a plain, already-correctly-escaped
+    /// `Text` predecessor. It does *not* pin that skipping here is
+    /// necessary rather than merely harmless: the guard's own justification
+    /// is that the skip and rollback paths are byte-identical on this shape,
+    /// so removing the guard and rolling back unconditionally still passes
+    /// this test (and all 172 lib tests) and this test would not catch that
+    /// removal. It does *not* pin §10 risk 1 --
+    /// `a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render`
+    /// (below) is the shape that does, on the `predecessor_is_emphasis`
+    /// branch this task's guard added, which is the only place a `Pos`-aware
+    /// predecessor is genuinely re-rendered.
+    #[test]
+    fn a_skipped_rollback_leaves_an_already_escaped_predecessor_alone() {
+        let seq = vec![
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Text(":".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The recovered text is the invariant; the spelling is how this
+        // writer reaches it. Assert the invariant first, consistent with the
+        // rest of this rollback test group.
+        assert_eq!(recovered(seq.clone()), "[^1]:xa");
+        // `Text(":")` is escaped once, correctly, at `Pos::AfterFootnoteRef`
+        // -- and, per this comment's own claim above, is never re-rendered.
+        assert_eq!(para(seq), "[^1]\\:`x`a");
+    }
+
+    /// §10 risk 1, actually pinned -- but only under the non-shipped ledger
+    /// this test needs: the predecessor a rollback *genuinely re-renders*
+    /// must escape exactly as it did the first time, at the `Pos` it opened
+    /// with, not at whatever `Pos` happens to be current when the rollback
+    /// fires. Under any shipped ledger `pos = ppos` appears unobservable --
+    /// `predecessor_is_emphasis` (the only branch this restore matters on)
+    /// is unreachable there, since `run_end` fuses any touching
+    /// `Emph`/`Strong` pair before a decline ever sees them apart, and the
+    /// other disjunct's re-rendered predecessor can only be a backtick or
+    /// degrading-math run, whose escaping takes no `Pos` at all (design
+    /// spec §10 risk 1's status note).
+    ///
+    /// `Text(":")` alone (as in the test above) never re-renders -- its
+    /// `run_end` never moves, so the decline arm's guard always skips it.
+    /// The only branch that genuinely re-renders a predecessor is
+    /// `predecessor_is_emphasis`, so the predecessor here has to *be* an
+    /// `Emph`/`Strong` run wrapping the escapable `Text(":")`, under a ledger
+    /// that keeps it a separate run from the `Strong` beside it
+    /// (`EMPH_BESIDE_STRONG_RUN_SEAM`, unreachable under any shipped
+    /// ledger -- the same precondition
+    /// `a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale`
+    /// needs, and for the same reason).
+    ///
+    /// The `Strong` declines (its content ends on `` ` `` -- punct -- right
+    /// before the trailing `Text("a")`), rolling back into the `Emph`. The
+    /// `Emph` is re-scanned at `pos = ppos` -- `Pos::AfterFootnoteRef`,
+    /// restored to what it was when the `Emph` first opened, not
+    /// `Pos::Mid` (what `pos` holds at the moment the rollback fires, after
+    /// the `Strong`'s own processing) -- so `escape::text` escapes the `:`
+    /// exactly as it did the first time.
+    ///
+    /// Measured, not inferred: instrumenting the decline arm on this exact
+    /// shape counts `declines=2, rollbacks=1, skips=1`, so the
+    /// `predecessor_is_emphasis` branch genuinely fires here. With
+    /// `pos = ppos` replaced by `let _ = ppos` and nothing else changed, this
+    /// prints `` [^1]:b`y`a `` instead of `` [^1]\:b`y`a `` -- the unescaped
+    /// `[^1]:` at line start makes a footnote-enabled parser read the whole
+    /// paragraph as a footnote *definition* rather than a reference, which
+    /// the assertions below confirm directly (`FootnoteReference`/
+    /// `FootnoteDefinition` event counts), not just by string comparison.
+    #[test]
+    fn a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render() {
+        let seq = vec![
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Emph(vec![Inline::Text(":".into())]),
+            Inline::Strong(vec![Inline::Text("b".into()), Inline::Code("y".into())]),
+            Inline::Text("a".into()),
+        ];
+        assert_eq!(kasane_gfm::rendered_text(&seq), "[^1]:bya");
+        let ledger = Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM);
+        // A matching `Block::Footnote` definition has to be present or no
+        // footnote reference parses at all -- without one, `[^1]` decomposes
+        // into bare text and this test would measure the fixture rather than
+        // the escape (see `a_footnote_reference_at_column_zero_does_not_open_a_definition`
+        // above, which the assertions below mirror).
+        let blocks = vec![
+            Block::Para(seq),
+            Block::Footnote {
+                id: NoteId(1),
+                blocks: vec![Block::Para(vec![Inline::Text("the definition".into())])],
+            },
+        ];
+        let md = blocks_to_markdown_with_ledger(&blocks, &AssetBag::default(), ledger);
+        assert!(md.contains("[^1]\\:b`y`a"), "got:\n{md}");
+
+        use pulldown_cmark::{Event, Options, Parser, Tag};
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_FOOTNOTES);
+        let (mut refs, mut defs, mut text) = (0, 0, String::new());
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::FootnoteReference(_) => refs += 1,
+                Event::Start(Tag::FootnoteDefinition(_)) => defs += 1,
+                Event::Text(t) | Event::Code(t) => text.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            refs, 1,
+            "the escaped reference must survive as a reference:\n{md}"
+        );
+        assert_eq!(
+            defs, 1,
+            "only the real Block::Footnote may be a definition:\n{md}"
+        );
+        assert!(
+            text.contains("bya"),
+            "the paragraph text must survive intact:\n{md}"
+        );
+    }
+
+    /// `probe_edges` must reach the same emit/decline decision the real
+    /// splice+rescan would at every depth, not just the outermost one --
+    /// review round 2 on this branch found a case where it did not: a nested
+    /// run's own tail sub-run was flanked against "end of an isolated view"
+    /// (`Flank::Space`) instead of the real forward neighbour it would
+    /// actually land beside once spliced out to the enclosing view, which
+    /// silently changed whether the *outer* `Strong` below opened and closed
+    /// at all.
+    ///
+    /// Reachable only under a ledger licensing both `emph_over_strong_whole_run`
+    /// (so the innermost `Strong([Text("a"), Code("x")])` survives unspliced as
+    /// the sole child of the `Emph` wrapping it) and `strong_over_emph_head_edge`
+    /// (so that `Emph` in turn survives unspliced as the *first* child of the
+    /// outer `Strong`) -- `Ledger::LICENSED` holds only the first, so this
+    /// shape is not reachable in shipped output today, but a future licensing
+    /// change must not resurrect this defect silently.
+    ///
+    /// Pinned against the pre-`probe_edges` renderer's own output (commit
+    /// `2e49c28`), not just "some string": `"z**a`x`a**z"` is what a real
+    /// splice+rescan produces (the outer `Strong` opens and closes, keeping
+    /// its `**`), against the `"za`x`az"` the un-threaded probe produced
+    /// instead -- losing the whole outer emphasis span.
+    #[test]
+    fn a_nested_decline_flanks_against_the_real_enclosing_neighbour() {
+        let seq = vec![
+            Inline::Text("z".into()),
+            Inline::Strong(vec![
+                Inline::Emph(vec![Inline::Strong(vec![
+                    Inline::Text("a".into()),
+                    Inline::Code("x".into()),
+                ])]),
+                Inline::Text("a".into()),
+            ]),
+            Inline::Text("z".into()),
+        ];
+        let ledger =
+            Ledger::from_bits(cell::EMPH_OVER_STRONG_WHOLE_RUN | cell::STRONG_OVER_EMPH_HEAD_EDGE);
+        let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
+        assert_eq!(md.trim_end(), "z**a`x`a**z");
+    }
+
+    /// `running_before`'s fallback to `outer_before` must fire only when
+    /// nothing has printed yet on the opening side, never merely because the
+    /// locally accumulated buffer ends in whitespace -- review round 3 on
+    /// this branch found a regression where it did the latter too, silently
+    /// changing whether the *outer* `Strong` below opened and closed.
+    ///
+    /// `Text("a ")` ends in a real space, so `running_before` for the `Emph`
+    /// that follows it has a perfectly good local answer already
+    /// (`Flank::Space`) and must not consult `outer_before` (the class of
+    /// `Text("z")` before the outer `Strong`) instead. Reachable only under a
+    /// ledger licensing `strong_over_emph_tail_edge` (so the inner `Emph`
+    /// survives unspliced as the outer `Strong`'s tail child) --
+    /// `Ledger::LICENSED` does not hold that cell, so this shape is not
+    /// reachable in shipped output today, but a future licensing change must
+    /// not resurrect this defect silently.
+    ///
+    /// Pinned against the pre-`probe_edges` renderer's own output (both
+    /// `2e49c28` and the round-1 docs commit at `e3397af` agree on it --
+    /// the round-2 fix, `a3fb65a`, is the commit that disagrees):
+    /// `"za *`x`b*z"` keeps the inner `Emph` (the buffer's own trailing space
+    /// makes it flank correctly against the real local neighbour); the
+    /// regression this test guards against instead consulted `outer_before`
+    /// (`z`, alphanumeric) and produced `"z**a *`x`b***z"`, an unmeasured
+    /// re-pricing of `strong_over_emph_tail_edge` that dropped no text but
+    /// silently changed which containers survive.
+    #[test]
+    fn a_local_trailing_whitespace_answers_before_the_outer_context_does() {
+        let seq = vec![
+            Inline::Text("z".into()),
+            Inline::Strong(vec![
+                Inline::Text("a ".into()),
+                Inline::Emph(vec![Inline::Code("x".into()), Inline::Text("b".into())]),
+            ]),
+            Inline::Text("z".into()),
+        ];
+        let ledger = Ledger::from_bits(cell::STRONG_OVER_EMPH_TAIL_EDGE);
+        let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
+        assert_eq!(md.trim_end(), "za *`x`b*z");
+    }
+
+    /// A rollback's predecessor can itself be an emphasis run, and the
+    /// rollback into it can cascade a second level further -- both only
+    /// under a ledger that licenses a run-seam cell, never under a shipped
+    /// one.
+    ///
+    /// `run_end` fuses two touching `Emph`/`Strong` elements into one run
+    /// under every shipped ledger (`LICENSED` and `CONSERVATIVE` both hold no
+    /// run-seam cell), so a declining run's immediate predecessor is never
+    /// itself emphasis-class there -- it would already have been folded into
+    /// the same run. `EMPH_BESIDE_STRONG_RUN_SEAM` breaks that: it keeps the
+    /// `Emph` here a separate run from the `Strong` beside it, so both halves
+    /// of the rollback machinery this task adds are reachable in one shape:
+    ///
+    /// The `Strong` declines first (its content ends on `` ` `` -- punct --
+    /// right before the trailing `Text("a")`), rolling back into the `Emph`.
+    /// Re-scanned, the `Emph`'s own after-context is no longer "some other
+    /// container" (always `Flank::Punct` to `next_class`) but the spliced-in
+    /// `Text("b")` itself -- `Flank::Other` -- so the `Emph` now correctly
+    /// declines too, cascading a second rollback into the leading `Code`,
+    /// which fuses with the `Emph`'s own spliced `Code("x")` into one span.
+    ///
+    /// Both properties were measured, not inferred, on this exact shape:
+    /// instrumenting the decline arm counts 2 declines and 2 rollbacks, and
+    /// an out-of-tree single-slot variant (a `prev: Option<_>` updated only
+    /// on emit, in place of `marks: Vec<_>`) corrupts it to
+    /// `` `x``x`b`y`a `` -- a real single-backtick/double-backtick collision
+    /// a parser reads as one code span over `` x``x `` (`Code("x``x")`,
+    /// recovering `x``xbya` instead of `xxbya`) -- because the slot holds
+    /// only the `Emph` checkpoint by the time the `Emph`'s own decline needs
+    /// the `Code` checkpoint underneath it, which single assignment already
+    /// discarded. This is the shape
+    /// `a_fused_emph_strong_run_declines_once_and_rolls_back_into_its_code_predecessor`
+    /// was once meant to be and, under `Ledger::LICENSED`, cannot be: `run_end`'s
+    /// unconditional fusion under that ledger means an `Emph` immediately
+    /// followed by a `Strong` is always one run, so that test's `Emph` and
+    /// `Strong` never separate into two checkpoints and it pops the stack
+    /// only once (declines=1, rollbacks=1, measured the same way).
+    ///
+    /// Also pins the guard beside `run_end(&items, pi, ledger) != i` in the
+    /// decline arm: without checking whether the predecessor is itself
+    /// emphasis-class, the `Emph`'s stale first-pass decision (before
+    /// `Strong` declined) stands, and the run_end-only check does not catch
+    /// it -- `run_end` from the `Emph`'s own start is 1-wide either way,
+    /// since neither the `Strong` container nor the `Text` that replaces it
+    /// is star-class. Confirmed by mutation: removing
+    /// `predecessor_is_emphasis ||` from that condition makes this test
+    /// print stray literal `*` characters instead of declining (a real
+    /// parser reads them as literal text, not emphasis markup: `recovered`
+    /// comes back `"x*x*bya"`, not `"xxbya"`).
+    #[test]
+    fn a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale() {
+        let seq = vec![
+            Inline::Code("x".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Strong(vec![Inline::Text("b".into()), Inline::Code("y".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The invariant, independent of ledger: what a real parser recovers
+        // from the IR itself. `recovered` (defined below) is not it here --
+        // it renders through the crate's public `blocks_to_markdown`, which
+        // is hardwired to `Ledger::LICENSED`, and this test is specifically
+        // about a shape only a *different* ledger can reach.
+        assert_eq!(kasane_gfm::rendered_text(&seq), "xxbya");
+        let ledger = Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM);
+        let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
+        assert_eq!(md.trim_end(), "`xx`b`y`a");
+        // And the printed line must itself round-trip back to the same text
+        // through a real parser -- the whole point of this test.
+        use pulldown_cmark::{Event, Options, Parser};
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_MATH);
+        let mut out = String::new();
+        for ev in Parser::new_ext(&md, opts) {
+            if let Event::Text(t) | Event::Code(t) = ev {
+                out.push_str(&t);
+            }
+        }
+        assert_eq!(out, "xxbya");
     }
 
     /// A container of the run's own class sitting *between* other content is
