@@ -221,6 +221,20 @@ fn declining_chain(depth: usize) -> Inline {
 /// fix (`probe_edges` in `markdown.rs`) computes those same edges without a
 /// trial render, so a decline has nothing expensive to discard.
 ///
+/// **What is left is polynomial, not linear** — this test was called
+/// `an_alternating_decline_chain_stays_linear` until the final review of
+/// `declined-run-rescan` measured it. Release, on this file's own
+/// `declining_chain`: 218us at depth 30, 785us at 60, 2.48ms at 120, 9.58ms at
+/// 240 — 4x per doubling, so O(k^2) in chain depth. (Re-measured after that
+/// review's breadth fix: 186us / 618us / 2.33ms / 9.53ms, unchanged.) The
+/// quadratic is the one `emphasis_run` records at its own emit path — a chain
+/// of `k` nested runs pays for a probe walk *and* a render at every level, and
+/// the render recurses into the same pair one level down. It is bounded by
+/// `kasane_ir::MAX_INLINE_DEPTH`, which caps the whole shape at ~12ms, so it
+/// is debt rather than a denial of service. This test is unaffected by the
+/// correction: exponential is what it exists to catch, and 2^k clears any
+/// bound a k^2 shape fits inside by orders of magnitude.
+///
 /// This runs on a background thread with a bounded wait rather than calling
 /// `blocks_to_markdown` directly and asserting on elapsed time: a
 /// reintroduced exponential would not finish in any reasonable bound, and a
@@ -231,7 +245,7 @@ fn declining_chain(depth: usize) -> Inline {
 /// reaches a decline at more than the outermost level, so neither could
 /// regress into this cost even before this fix existed.
 #[test]
-fn an_alternating_decline_chain_stays_linear() {
+fn an_alternating_decline_chain_stays_polynomial() {
     let depth = 40;
     let para = Block::Para(vec![declining_chain(depth), Inline::Text("a".into())]);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -254,8 +268,10 @@ fn an_alternating_decline_chain_stays_linear() {
     assert!(!md.is_empty(), "rendering must produce output, not nothing");
     assert!(
         elapsed < std::time::Duration::from_secs(2),
-        "rendering a {depth}-level decline chain took {elapsed:?}; a linear pass should be \
-         milliseconds, not seconds -- this shape was 9.86s at depth 22 alone before the fix"
+        "rendering a {depth}-level decline chain took {elapsed:?}; this shape is O(depth^2), \
+         so depth {depth} should be microseconds and the whole bound (MAX_INLINE_DEPTH, 256) \
+         about 12ms -- seconds means the exponential is back, and this shape was 9.86s at \
+         depth 22 alone before the fix"
     );
 }
 

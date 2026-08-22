@@ -1085,14 +1085,20 @@ fn can_close(before: Flank, after: Flank) -> bool {
 /// `inner = inlines_to_md_flat(&children, ...)`, then reading `core.trim()`'s
 /// edges off it, then *discarding `inner` on a decline* and having the
 /// splice+rescan render the same subtree again — costs `2^depth` for a chain
-/// of `depth` nested declines, not `depth`: `inner`'s own construction
+/// of `depth` nested declines: `inner`'s own construction
 /// already resolves every nested run's emit-vs-decline choice in full, and a
 /// decline throws that resolution away only to redo it. `probe_edges` below
 /// walks the same view [`inlines_to_md_flat`] would and reaches the same
 /// decision for every nested run, but never keeps more than these four
-/// fields, so a decline has nothing expensive to discard. See
-/// `an_alternating_decline_chain_stays_linear` (`inline_depth.rs`) for the
-/// measurement.
+/// fields, so a decline has nothing expensive to discard. What is left is
+/// **polynomial, not linear**: the same chain is O(k^2) in `k`, measured in
+/// release at 218us/785us/2.48ms/9.58ms for depth 30/60/120/240, because a
+/// chain of `k` nested *emitting* runs still pays for a probe walk and a
+/// render at every level — the cost [`emphasis_run`]'s own emit path records
+/// beside it, bounded by `MAX_INLINE_DEPTH`. Removing an exponential is the
+/// claim; linearity never was. See
+/// `an_alternating_decline_chain_stays_polynomial` (`inline_depth.rs`) for
+/// the measurement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Edge {
     /// `false` iff the view printed nothing at all. The other four fields
@@ -1203,8 +1209,8 @@ impl Edge {
 /// is not itself recursive, so calling it directly for one flat run costs
 /// nothing extra and stays exact. Only a nested `Emph`/`Strong` run recurses
 /// into this function instead of [`inlines_to_md_flat`], which is what keeps
-/// a chain of `k` nested declines linear instead of `2^k` (see [`Edge`]'s
-/// doc).
+/// a chain of `k` nested declines polynomial — O(k^2), measured — instead of
+/// `2^k` (see [`Edge`]'s doc, which carries the figures).
 ///
 /// `outer_before`/`outer_after` are what the *caller's own* `before`/`after`
 /// are: the class that would actually flank `children`'s first/last run if
@@ -3203,7 +3209,10 @@ mod tests {
     /// This shape does not, on measurement, exercise a genuine two-level
     /// cascade or distinguish the stack from a single saved slot -- an
     /// earlier version of this doc comment claimed it did, which review
-    /// round 1 on this task found false: instrumenting the decline arm on
+    /// round 1 on this task found false, and the final review of this branch
+    /// renamed the test from
+    /// `a_rollback_cascades_through_a_predecessor_that_then_declines`
+    /// accordingly: instrumenting the decline arm on
     /// this exact shape counts one decline and one rollback, not two, because
     /// the fused `Emph`+`Strong` run declines once as the single unit
     /// described above, not as two separate declines. Under every *shipped*
@@ -3218,7 +3227,7 @@ mod tests {
     /// licenses a run-seam cell to keep two emphasis runs from fusing, which
     /// no shipped ledger does (design spec §3.2).
     #[test]
-    fn a_rollback_cascades_through_a_predecessor_that_then_declines() {
+    fn a_fused_emph_strong_run_declines_once_and_rolls_back_into_its_code_predecessor() {
         let seq = vec![
             Inline::Code("x".into()),
             Inline::Emph(vec![Inline::Code("x".into())]),
@@ -3233,9 +3242,12 @@ mod tests {
         assert_eq!(para(seq), "`xxy`a");
     }
 
-    /// This shape does *not* restore `Pos`, on measurement, despite its
-    /// name and its original doc comment both once claiming it did -- review
-    /// round 2 on this task found that false. `Text(":")` here is the
+    /// This shape does *not* restore `Pos`, on measurement -- review round 2
+    /// on this task found that claim false, and the final review of this
+    /// branch renamed the test from
+    /// `a_rollback_restores_the_escaping_position_it_rewound_past`, which
+    /// asserted the opposite of its own corrected comment. `Text(":")` here is
+    /// the
     /// declining `Emph`'s predecessor, and `Text`'s `run_end` never moves
     /// (`escape::delim` gives it no delimiter to fuse with anything, so
     /// `run_end` always returns `pi + 1`, splice or no splice): the decline
@@ -3259,7 +3271,7 @@ mod tests {
     /// branch this task's guard added, which is the only place a `Pos`-aware
     /// predecessor is genuinely re-rendered.
     #[test]
-    fn a_rollback_restores_the_escaping_position_it_rewound_past() {
+    fn a_skipped_rollback_leaves_an_already_escaped_predecessor_alone() {
         let seq = vec![
             Inline::FootnoteRef(NoteId(1)),
             Inline::Text(":".into()),
@@ -3477,8 +3489,9 @@ mod tests {
     /// recovering `x``xbya` instead of `xxbya`) -- because the slot holds
     /// only the `Emph` checkpoint by the time the `Emph`'s own decline needs
     /// the `Code` checkpoint underneath it, which single assignment already
-    /// discarded. This is the shape `a_rollback_cascades_through_a_predecessor_that_then_declines`
-    /// was meant to be and, under `Ledger::LICENSED`, cannot be: `run_end`'s
+    /// discarded. This is the shape
+    /// `a_fused_emph_strong_run_declines_once_and_rolls_back_into_its_code_predecessor`
+    /// was once meant to be and, under `Ledger::LICENSED`, cannot be: `run_end`'s
     /// unconditional fusion under that ledger means an `Emph` immediately
     /// followed by a `Strong` is always one run, so that test's `Emph` and
     /// `Strong` never separate into two checkpoints and it pops the stack
