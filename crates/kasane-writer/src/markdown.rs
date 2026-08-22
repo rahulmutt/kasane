@@ -1006,7 +1006,11 @@ fn splice_children<'a>(
 }
 
 /// CommonMark's three character classes for the flanking rules.
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` for the same reason [`Pos`] and [`Site`] carry it: [`Edge`] is made
+/// of these, and the one failure a reader most wants printed is a
+/// probe/render disagreement over exactly these classes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flank {
     Space,
     Punct,
@@ -1089,7 +1093,7 @@ fn can_close(before: Flank, after: Flank) -> bool {
 /// fields, so a decline has nothing expensive to discard. See
 /// `an_alternating_decline_chain_stays_linear` (`inline_depth.rs`) for the
 /// measurement.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Edge {
     /// `false` iff the view printed nothing at all. The other four fields
     /// are meaningful only when this is `true`.
@@ -1121,6 +1125,36 @@ impl Edge {
         last_class: None,
         trailing_newline: false,
     };
+
+    /// The edges of an already-rendered string.
+    ///
+    /// The single derivation of an [`Edge`] from real bytes, shared by
+    /// [`probe_edges`]'s `Text` arm (the one place the probe escapes text for
+    /// real) and by [`emphasis_run`]'s desync guard, which compares the
+    /// probe's answer against the render it stands in for. A second copy of
+    /// these six lines is exactly the drift the guard exists to catch, so
+    /// there is only one.
+    ///
+    /// [`Edge::then`] is the fold of this over concatenation: `of(a).then(of(b))
+    /// == of(a ++ b)` for every pair. That is what makes the guard a whole-
+    /// struct comparison rather than a field-by-field approximation.
+    fn of(text: &str) -> Edge {
+        if text.is_empty() {
+            return Edge::NONE;
+        }
+        Edge {
+            prints: true,
+            leading_ws: text.starts_with(char::is_whitespace),
+            first_class: text.chars().find(|c| !c.is_whitespace()).map(class_of),
+            trailing_ws: text.ends_with(char::is_whitespace),
+            last_class: text
+                .chars()
+                .rev()
+                .find(|c| !c.is_whitespace())
+                .map(class_of),
+            trailing_newline: text.ends_with('\n'),
+        }
+    }
 
     /// A contribution whose printed text always begins and ends with the same
     /// fixed punctuation regardless of its content: a code span's fence, a
@@ -1347,23 +1381,7 @@ fn probe_edges(
                     // nothing extra and stays exact where `next_class`'s own
                     // approximation (used only for forward context, above)
                     // would not be safe to reuse here.
-                    let escaped = escape::text(t, ctx, pos);
-                    if escaped.is_empty() {
-                        Edge::NONE
-                    } else {
-                        Edge {
-                            prints: true,
-                            leading_ws: escaped.starts_with(char::is_whitespace),
-                            first_class: escaped.chars().find(|c| !c.is_whitespace()).map(class_of),
-                            trailing_ws: escaped.ends_with(char::is_whitespace),
-                            last_class: escaped
-                                .chars()
-                                .rev()
-                                .find(|c| !c.is_whitespace())
-                                .map(class_of),
-                            trailing_newline: escaped.ends_with('\n'),
-                        }
-                    }
+                    Edge::of(&escape::text(t, ctx, pos))
                 }
                 // Non-degrading -- `escape::delim` returned `None`, which for
                 // `Math` means exactly that -- so `math_span` always prints
@@ -1506,6 +1524,30 @@ fn emphasis_run<'a>(
         // context-threading fix in this same round did not remove it for
         // free, and restructuring further was out of scope for the round.
         let inner = inlines_to_md_flat(children, ctx, pos, ledger);
+        // The one maintainability cost of computing the flanking edges without
+        // rendering is that two functions now have to agree about them, and an
+        // edit to either could desynchronise them in silence. This path
+        // renders `inner` anyway, so on the emit half of the decision the
+        // agreement is checkable for free -- `debug_assert_eq!` compiles out
+        // of release entirely, and in debug the census (lengths 1-3), the
+        // 130,321-shape length-4 tier, the property tier, `inline_depth` and
+        // the fuzz corpus all check it on every run. It converts "these two
+        // must agree" from a comment into an invariant with a test suite
+        // behind it. Run as a *hard* `assert!` over the whole writer suite and
+        // over a 120,000-render four-ledger sweep including two ledgers
+        // licensing `EMPH_BESIDE_STRONG_RUN_SEAM`: zero divergence.
+        //
+        // Only the emit half. A declining run never renders `inner`, which is
+        // the entire point of `probe_edges`, so there is nothing to compare it
+        // against there without reintroducing the cost the probe removed.
+        debug_assert_eq!(
+            edge,
+            Edge::of(&inner),
+            "probe_edges disagreed with the render it stands in for on {inner:?}: left is \
+             probe_edges' Edge for this run's children, right is the same children's edges \
+             read off inlines_to_md_flat's own output. These two must agree, or a run's \
+             emit/decline choice depends on which one was asked"
+        );
         RunOut::Emitted(emphasize(&inner, markup))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
