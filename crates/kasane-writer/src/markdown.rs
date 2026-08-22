@@ -303,10 +303,30 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
     let mut s = String::new();
     let mut pos = pos;
     let mut i = 0;
+    // One checkpoint per iteration: where the run started, how long the buffer
+    // was before it, and the escaping position it opened at. A decline pops
+    // its own and its predecessor's, so the exposed edge is re-scanned beside
+    // the run that already printed next to it. An emitted run's own mark is
+    // never popped, so this grows by one 24-byte triple per surviving run for
+    // the life of the call -- intentional, not a leak. `items.len()` itself
+    // is not the bound: a decline splices a container's children over its
+    // one slot, so `Emph([a, b, c])` turns one item into three and
+    // `items.len()` can grow. The bound is the *total node count* in the
+    // original tree instead -- a splice only ever redistributes nodes this
+    // function has already visited once (an `Emph`/`Strong` wrapper is
+    // consumed, its children take its place), it never invents new ones, so
+    // `marks` is bounded by the same paragraph-sized input the rest of this
+    // function is already linear in.
+    //
+    // A stack rather than one saved slot, because a rollback can cascade: the
+    // re-rendered predecessor may itself decline, and the stack pops into
+    // *its* predecessor (design spec §3.2).
+    let mut marks: Vec<(usize, usize, Pos)> = Vec::new();
     while i < items.len() {
         let (inline, depth) = items[i];
         let before = pos;
         let len_before = s.len();
+        marks.push((i, len_before, before));
         let end = run_end(&items, i, ledger);
         let members = &items[i..end];
         // The run's class comes from its first *printing* member, not its
@@ -341,6 +361,84 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                     RunOut::Emitted(t) => s.push_str(&t),
                     RunOut::Declined(children) => {
                         items.splice(i..end, children);
+                        marks.pop();
+                        // No predecessor means the run opened the view: there
+                        // is nothing behind it to fuse with, so leave the
+                        // buffer alone and re-scan from `i`. The splice above
+                        // is what makes progress in that case.
+                        //
+                        // A predecessor is only worth rolling back into if
+                        // the splice could actually change its own render.
+                        // Two cases roll back unconditionally rather than
+                        // trusting `run_end` alone:
+                        //
+                        // The predecessor is itself an emphasis run. Under
+                        // every *shipped* ledger this cannot happen --
+                        // `run_end` already fuses two touching emphasis runs
+                        // into one, so a star-class predecessor and a
+                        // declining star-class run are never left as
+                        // separately adjacent runs -- but `Ledger::from_bits`
+                        // can license a run-seam cell that keeps them apart
+                        // for testing, and an emphasis run's own flanking
+                        // decision depends on the *class* of whatever comes
+                        // after it (`next_class`), which the splice can
+                        // change -- a spliced-in `Text` is class-visible in a
+                        // way the container it replaced never was -- without
+                        // moving `run_end`'s boundary at all. Skipping here
+                        // would leave that run's stale first-pass decision
+                        // standing. See
+                        // `a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale`.
+                        //
+                        // KNOWN, UNFIXED, under the same non-shipped
+                        // precondition: this branch rolls back into an
+                        // emphasis predecessor *unconditionally*, and if that
+                        // predecessor's own content recurses (e.g. wraps a
+                        // `Link`), the re-render is not free. Measured on
+                        // `nest(d) = [Emph([Link(nest(d-1))]), Strong([Text("b"),
+                        // Code("y")]), Text("a")]` under
+                        // `Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM)`:
+                        // 2.6ms at d=10, 83ms at d=15, 2.6s at d=20 -- the
+                        // same doubling this task's guard exists to close on
+                        // the other branch, surviving here because closing
+                        // it needs the predecessor's own re-render to be
+                        // skippable exactly when it would decline identically
+                        // either way, which -- unlike the `run_end`-only
+                        // case above -- is not a boundary check away for an
+                        // emphasis predecessor. The same shape under
+                        // `Ledger::LICENSED` is linear (30-80us across the
+                        // same range), because that predecessor can never be
+                        // emphasis-class there at all. Anyone licensing a
+                        // run-seam cell for real needs to know this before
+                        // this branch, not this comment, is what they find
+                        // out the hard way.
+                        //
+                        // Otherwise the predecessor is never itself an
+                        // emphasis run -- `run_end` would already have fused
+                        // an adjacent one into *this* run under the ledger in
+                        // force here -- so its render depends only on its own
+                        // members, `ctx`, and `pos`, none of which the splice
+                        // touched. If its run still stops at the same place,
+                        // the splice exposed nothing for it to fuse with and
+                        // re-rendering it is provably byte-identical, so skip
+                        // the rollback rather than pay for it. Left unchecked
+                        // this reintroduces the doubling `probe_edges` exists
+                        // to avoid, this time through a predecessor that
+                        // itself recurses -- an external link's children --
+                        // so a chain of `depth` nested declining links each
+                        // preceding a declining run cost `2^depth` re-renders
+                        // before this check (review round 1 on this task).
+                        if let Some(&(pi, plen, ppos)) = marks.last() {
+                            let predecessor_is_emphasis = matches!(
+                                escape::delim(items[pi].0),
+                                Some(escape::Delim::Emph | escape::Delim::Strong)
+                            );
+                            if predecessor_is_emphasis || run_end(&items, pi, ledger) != i {
+                                marks.pop();
+                                s.truncate(plen);
+                                pos = ppos;
+                                i = pi;
+                            }
+                        }
                         continue;
                     }
                 }
@@ -2918,6 +3016,193 @@ mod tests {
         assert_eq!(recovered(seq), "axx");
     }
 
+    /// The head half of the 32-shape family: the collision is with output that
+    /// has already landed in the buffer, so the rescan has to reach backwards.
+    ///
+    /// `[Code("x"), Emph([Code("x")]), Text("a")]` printed `` `x``x`a ``, which a
+    /// parser reads as one code span over `` x``x `` -- recovering `x``xa` where
+    /// the IR said `xxa`. Rolling the buffer back one run lets the two spans
+    /// meet in the view and print `` `xx`a `` (design spec §2.3).
+    #[test]
+    fn a_declined_run_rolls_the_buffer_back_so_the_preceding_span_can_fuse() {
+        let seq = vec![
+            Inline::Code("x".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The recovered text is the invariant; the spelling is how this
+        // writer reaches it. Assert the invariant first, consistent with the
+        // rest of this rollback test group -- if the spelling below ever
+        // needs updating, this line is what says whether the update is
+        // legitimate.
+        assert_eq!(recovered(seq.clone()), "xxa");
+        assert_eq!(para(seq), "`xx`a");
+    }
+
+    /// A declining run can itself be the fusion of *two* IR containers:
+    /// under `Ledger::LICENSED`, `run_end` fuses any touching `Emph`/`Strong`
+    /// pair into one run regardless of order, so `Emph([Code("x")])`
+    /// immediately followed by `Strong([Code("y")])` here is a single run,
+    /// declining once as a unit because its own last character (`y`'s
+    /// closing backtick, punct) precedes the trailing `Text("a")` (alnum).
+    /// The stack's rollback into the leading `Code` predecessor still has to
+    /// fuse *both* containers' spliced children with it in one pass.
+    ///
+    /// This shape does not, on measurement, exercise a genuine two-level
+    /// cascade or distinguish the stack from a single saved slot -- an
+    /// earlier version of this doc comment claimed it did, which review
+    /// round 1 on this task found false: instrumenting the decline arm on
+    /// this exact shape counts one decline and one rollback, not two, because
+    /// the fused `Emph`+`Strong` run declines once as the single unit
+    /// described above, not as two separate declines. Under every *shipped*
+    /// ledger (`LICENSED` and `CONSERVATIVE` both license no run-seam cell)
+    /// `run_end` fuses any touching `Emph`/`Strong` pair unconditionally, so
+    /// two containers can never surface as separate checkpoints for a
+    /// same-shape sequence to cascade through in the first place.
+    /// `a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale`
+    /// (below) is the shape that genuinely pops the checkpoint stack twice --
+    /// measured the same way -- and where an out-of-tree single-slot variant
+    /// demonstrably corrupts the text; reaching it needs a ledger that
+    /// licenses a run-seam cell to keep two emphasis runs from fusing, which
+    /// no shipped ledger does (design spec §3.2).
+    #[test]
+    fn a_rollback_cascades_through_a_predecessor_that_then_declines() {
+        let seq = vec![
+            Inline::Code("x".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Strong(vec![Inline::Code("y".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The recovered text is the invariant; the spelling is how this writer
+        // reaches it. Assert the invariant first -- if the spelling below ever
+        // needs updating, this line is what says whether the update is
+        // legitimate.
+        assert_eq!(recovered(seq.clone()), "xxya");
+        assert_eq!(para(seq), "`xxy`a");
+    }
+
+    /// This shape does *not* restore `Pos`, on measurement, despite its
+    /// name and its original doc comment both once claiming it did -- review
+    /// round 2 on this task found that false. `Text(":")` here is the
+    /// declining `Emph`'s predecessor, and `Text`'s `run_end` never moves
+    /// (`escape::delim` gives it no delimiter to fuse with anything, so
+    /// `run_end` always returns `pi + 1`, splice or no splice): the decline
+    /// arm's guard sees `run_end(&items, pi, ledger) == i` and
+    /// `predecessor_is_emphasis == false`, and takes the **skip** path --
+    /// instrumented on this exact shape: `declines=1, rollbacks=0, skips=1`.
+    /// `Text(":")` was correctly escaped once, during its own single pass at
+    /// `Pos::AfterFootnoteRef`, and is never re-rendered at all, so there is
+    /// nothing here for `pos = ppos` to restore.
+    ///
+    /// This still pins something real: that a decline whose predecessor is a
+    /// plain, already-correctly-escaped `Text` leaves that `Text`'s output
+    /// alone rather than needlessly rolling back into it. It does *not* pin
+    /// §10 risk 1 --
+    /// `a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render`
+    /// (below) is the shape that does, on the `predecessor_is_emphasis`
+    /// branch this task's guard added, which is the only place a `Pos`-aware
+    /// predecessor is genuinely re-rendered.
+    #[test]
+    fn a_rollback_restores_the_escaping_position_it_rewound_past() {
+        let seq = vec![
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Text(":".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The recovered text is the invariant; the spelling is how this
+        // writer reaches it. Assert the invariant first, consistent with the
+        // rest of this rollback test group.
+        assert_eq!(recovered(seq.clone()), "[^1]:xa");
+        // `Text(":")` is escaped once, correctly, at `Pos::AfterFootnoteRef`
+        // -- and, per this comment's own claim above, is never re-rendered.
+        assert_eq!(para(seq), "[^1]\\:`x`a");
+    }
+
+    /// §10 risk 1, actually pinned: the predecessor a rollback *genuinely
+    /// re-renders* must escape exactly as it did the first time, at the
+    /// `Pos` it opened with, not at whatever `Pos` happens to be current when
+    /// the rollback fires.
+    ///
+    /// `Text(":")` alone (as in the test above) never re-renders -- its
+    /// `run_end` never moves, so the decline arm's guard always skips it.
+    /// The only branch that genuinely re-renders a predecessor is
+    /// `predecessor_is_emphasis`, so the predecessor here has to *be* an
+    /// `Emph`/`Strong` run wrapping the escapable `Text(":")`, under a ledger
+    /// that keeps it a separate run from the `Strong` beside it
+    /// (`EMPH_BESIDE_STRONG_RUN_SEAM`, unreachable under any shipped
+    /// ledger -- the same precondition
+    /// `a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale`
+    /// needs, and for the same reason).
+    ///
+    /// The `Strong` declines (its content ends on `` ` `` -- punct -- right
+    /// before the trailing `Text("a")`), rolling back into the `Emph`. The
+    /// `Emph` is re-scanned at `pos = ppos` -- `Pos::AfterFootnoteRef`,
+    /// restored to what it was when the `Emph` first opened, not
+    /// `Pos::Mid` (what `pos` holds at the moment the rollback fires, after
+    /// the `Strong`'s own processing) -- so `escape::text` escapes the `:`
+    /// exactly as it did the first time.
+    ///
+    /// Measured, not inferred: instrumenting the decline arm on this exact
+    /// shape counts `declines=2, rollbacks=1, skips=1`, so the
+    /// `predecessor_is_emphasis` branch genuinely fires here. With
+    /// `pos = ppos` replaced by `let _ = ppos` and nothing else changed, this
+    /// prints `` [^1]:b`y`a `` instead of `` [^1]\:b`y`a `` -- the unescaped
+    /// `[^1]:` at line start makes a footnote-enabled parser read the whole
+    /// paragraph as a footnote *definition* rather than a reference, which
+    /// the assertions below confirm directly (`FootnoteReference`/
+    /// `FootnoteDefinition` event counts), not just by string comparison.
+    #[test]
+    fn a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render() {
+        let seq = vec![
+            Inline::FootnoteRef(NoteId(1)),
+            Inline::Emph(vec![Inline::Text(":".into())]),
+            Inline::Strong(vec![Inline::Text("b".into()), Inline::Code("y".into())]),
+            Inline::Text("a".into()),
+        ];
+        assert_eq!(kasane_gfm::rendered_text(&seq), "[^1]:bya");
+        let ledger = Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM);
+        // A matching `Block::Footnote` definition has to be present or no
+        // footnote reference parses at all -- without one, `[^1]` decomposes
+        // into bare text and this test would measure the fixture rather than
+        // the escape (see `a_footnote_reference_at_column_zero_does_not_open_a_definition`
+        // above, which the assertions below mirror).
+        let blocks = vec![
+            Block::Para(seq),
+            Block::Footnote {
+                id: NoteId(1),
+                blocks: vec![Block::Para(vec![Inline::Text("the definition".into())])],
+            },
+        ];
+        let md = blocks_to_markdown_with_ledger(&blocks, &AssetBag::default(), ledger);
+        assert!(md.contains("[^1]\\:b`y`a"), "got:\n{md}");
+
+        use pulldown_cmark::{Event, Options, Parser, Tag};
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_FOOTNOTES);
+        let (mut refs, mut defs, mut text) = (0, 0, String::new());
+        for ev in Parser::new_ext(&md, opts) {
+            match ev {
+                Event::FootnoteReference(_) => refs += 1,
+                Event::Start(Tag::FootnoteDefinition(_)) => defs += 1,
+                Event::Text(t) | Event::Code(t) => text.push_str(&t),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            refs, 1,
+            "the escaped reference must survive as a reference:\n{md}"
+        );
+        assert_eq!(
+            defs, 1,
+            "only the real Block::Footnote may be a definition:\n{md}"
+        );
+        assert!(
+            text.contains("bya"),
+            "the paragraph text must survive intact:\n{md}"
+        );
+    }
+
     /// `probe_edges` must reach the same emit/decline decision the real
     /// splice+rescan would at every depth, not just the outermost one --
     /// review round 2 on this branch found a case where it did not: a nested
@@ -2996,6 +3281,85 @@ mod tests {
         let ledger = Ledger::from_bits(cell::STRONG_OVER_EMPH_TAIL_EDGE);
         let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
         assert_eq!(md.trim_end(), "za *`x`b*z");
+    }
+
+    /// A rollback's predecessor can itself be an emphasis run, and the
+    /// rollback into it can cascade a second level further -- both only
+    /// under a ledger that licenses a run-seam cell, never under a shipped
+    /// one.
+    ///
+    /// `run_end` fuses two touching `Emph`/`Strong` elements into one run
+    /// under every shipped ledger (`LICENSED` and `CONSERVATIVE` both hold no
+    /// run-seam cell), so a declining run's immediate predecessor is never
+    /// itself emphasis-class there -- it would already have been folded into
+    /// the same run. `EMPH_BESIDE_STRONG_RUN_SEAM` breaks that: it keeps the
+    /// `Emph` here a separate run from the `Strong` beside it, so both halves
+    /// of the rollback machinery this task adds are reachable in one shape:
+    ///
+    /// The `Strong` declines first (its content ends on `` ` `` -- punct --
+    /// right before the trailing `Text("a")`), rolling back into the `Emph`.
+    /// Re-scanned, the `Emph`'s own after-context is no longer "some other
+    /// container" (always `Flank::Punct` to `next_class`) but the spliced-in
+    /// `Text("b")` itself -- `Flank::Other` -- so the `Emph` now correctly
+    /// declines too, cascading a second rollback into the leading `Code`,
+    /// which fuses with the `Emph`'s own spliced `Code("x")` into one span.
+    ///
+    /// Both properties were measured, not inferred, on this exact shape:
+    /// instrumenting the decline arm counts 2 declines and 2 rollbacks, and
+    /// an out-of-tree single-slot variant (a `prev: Option<_>` updated only
+    /// on emit, in place of `marks: Vec<_>`) corrupts it to
+    /// `` `x``x`b`y`a `` -- a real single-backtick/double-backtick collision
+    /// a parser reads as one code span over `` x``x `` (`Code("x``x")`,
+    /// recovering `x``xbya` instead of `xxbya`) -- because the slot holds
+    /// only the `Emph` checkpoint by the time the `Emph`'s own decline needs
+    /// the `Code` checkpoint underneath it, which single assignment already
+    /// discarded. This is the shape `a_rollback_cascades_through_a_predecessor_that_then_declines`
+    /// was meant to be and, under `Ledger::LICENSED`, cannot be: `run_end`'s
+    /// unconditional fusion under that ledger means an `Emph` immediately
+    /// followed by a `Strong` is always one run, so that test's `Emph` and
+    /// `Strong` never separate into two checkpoints and it pops the stack
+    /// only once (declines=1, rollbacks=1, measured the same way).
+    ///
+    /// Also pins the guard beside `run_end(&items, pi, ledger) != i` in the
+    /// decline arm: without checking whether the predecessor is itself
+    /// emphasis-class, the `Emph`'s stale first-pass decision (before
+    /// `Strong` declined) stands, and the run_end-only check does not catch
+    /// it -- `run_end` from the `Emph`'s own start is 1-wide either way,
+    /// since neither the `Strong` container nor the `Text` that replaces it
+    /// is star-class. Confirmed by mutation: removing
+    /// `predecessor_is_emphasis ||` from that condition makes this test
+    /// print stray literal `*` characters instead of declining (a real
+    /// parser reads them as literal text, not emphasis markup: `recovered`
+    /// comes back `"x*x*bya"`, not `"xxbya"`).
+    #[test]
+    fn a_run_seam_licensed_predecessor_cascades_and_is_not_rendered_stale() {
+        let seq = vec![
+            Inline::Code("x".into()),
+            Inline::Emph(vec![Inline::Code("x".into())]),
+            Inline::Strong(vec![Inline::Text("b".into()), Inline::Code("y".into())]),
+            Inline::Text("a".into()),
+        ];
+        // The invariant, independent of ledger: what a real parser recovers
+        // from the IR itself. `recovered` (defined below) is not it here --
+        // it renders through the crate's public `blocks_to_markdown`, which
+        // is hardwired to `Ledger::LICENSED`, and this test is specifically
+        // about a shape only a *different* ledger can reach.
+        assert_eq!(kasane_gfm::rendered_text(&seq), "xxbya");
+        let ledger = Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM);
+        let md = blocks_to_markdown_with_ledger(&[Block::Para(seq)], &AssetBag::default(), ledger);
+        assert_eq!(md.trim_end(), "`xx`b`y`a");
+        // And the printed line must itself round-trip back to the same text
+        // through a real parser -- the whole point of this test.
+        use pulldown_cmark::{Event, Options, Parser};
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_MATH);
+        let mut out = String::new();
+        for ev in Parser::new_ext(&md, opts) {
+            if let Event::Text(t) | Event::Code(t) = ev {
+                out.push_str(&t);
+            }
+        }
+        assert_eq!(out, "xxbya");
     }
 
     /// A container of the run's own class sitting *between* other content is
