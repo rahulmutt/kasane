@@ -270,7 +270,7 @@ fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut view = Vec::new();
     flatten_into(inls, depth, &mut view);
-    inlines_to_md_flat(&view, ctx, pos, ledger)
+    inlines_to_md_flat(view, ctx, pos, ledger)
 }
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
@@ -296,22 +296,47 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// fused emphasis run's members' children are siblings too. Scanning IR
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
-fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
-    // Owned, because a declined run rewrites it: the run's slot is replaced by
-    // the children it would have wrapped, and the loop re-scans them in place.
-    let mut items: Vec<Flat<'a>> = items.to_vec();
+fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+    // The view is split at the cursor rather than held as one vector with an
+    // index, and `pending` is held *reversed*, because a declined run rewrites
+    // the view at the cursor and the obvious spelling of that rewrite is
+    // quadratic in paragraph breadth. `items.splice(i..end, children)` over a
+    // one-slot container with two or more children grows the vector and
+    // memmoves the whole untouched tail; with `k` such declines in one
+    // paragraph that is O(k*n). Measured in release on
+    // `[Code("x"), Emph([Code("x"), Code("y")]), Text("a")]` repeated `n`
+    // times: 27ms / 102ms / 419ms / 1.66s at n = 8k/16k/32k/64k -- 4x per
+    // doubling -- against 5.2ms / 10.3ms for the pre-decline renderer's exact
+    // 2x. Unlike this branch's other two blowups it is bounded by nothing:
+    // `MAX_INLINE_DEPTH` caps nesting, not how many inlines an adapter puts in
+    // one `Block::Para`, and this writer sits behind the EPUB/PDF/DjVu/MOBI
+    // untrusted-input boundary. Splicing at the *end* of `pending` instead
+    // touches only the run's own slot and its children, so the cost is
+    // O(children) and the tail never moves. See
+    // `inline_breadth.rs::a_paragraph_of_declining_multi_child_containers_scales_with_its_breadth`.
+    //
+    // `scanned` is the consumed prefix in forward order, so `scanned.len()` is
+    // the cursor's own logical index and the checkpoints below stay plain
+    // indices into the same logical view they always were. It is a prefix, not
+    // history that could be dropped: a rollback re-scans from an earlier
+    // checkpoint, so every consumed item stays reachable.
+    let mut scanned: Vec<Flat<'a>> = Vec::with_capacity(items.len());
+    let mut pending: Vec<Flat<'a>> = items;
+    pending.reverse();
+    // One run's members in forward order, reused across iterations so the
+    // per-run copy out of the reversed `pending` allocates once for the call.
+    let mut members: Vec<Flat<'a>> = Vec::new();
     let mut s = String::new();
     let mut pos = pos;
-    let mut i = 0;
     // One checkpoint per iteration: where the run started, how long the buffer
     // was before it, and the escaping position it opened at. A decline pops
     // its own and its predecessor's, so the exposed edge is re-scanned beside
     // the run that already printed next to it. An emitted run's own mark is
     // never popped, so this grows by one 24-byte triple per surviving run for
-    // the life of the call -- intentional, not a leak. `items.len()` itself
+    // the life of the call -- intentional, not a leak. The view's own length
     // is not the bound: a decline splices a container's children over its
-    // one slot, so `Emph([a, b, c])` turns one item into three and
-    // `items.len()` can grow. The bound is the *total node count* in the
+    // one slot, so `Emph([a, b, c])` turns one item into three and the view
+    // can grow. The bound is the *total node count* in the
     // original tree instead -- a splice only ever redistributes nodes this
     // function has already visited once (an `Emph`/`Strong` wrapper is
     // consumed, its children take its place), it never invents new ones, so
@@ -322,13 +347,18 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
     // re-rendered predecessor may itself decline, and the stack pops into
     // *its* predecessor (design spec §3.2).
     let mut marks: Vec<(usize, usize, Pos)> = Vec::new();
-    while i < items.len() {
-        let (inline, depth) = items[i];
+    while let Some(&(inline, depth)) = pending.last() {
         let before = pos;
         let len_before = s.len();
-        marks.push((i, len_before, before));
-        let end = run_end(&items, i, ledger);
-        let members = &items[i..end];
+        marks.push((scanned.len(), len_before, before));
+        // The run's *length* rather than its end index: the cursor is
+        // `scanned.len()`, and `pending` runs backwards from it, so a count is
+        // the coordinate both sides of the split can use.
+        let run = run_len(pending.iter().rev().copied(), ledger);
+        let tail = pending.len() - run;
+        members.clear();
+        members.extend(pending[tail..].iter().rev().copied());
+        let members = &members[..];
         // The run's class comes from its first *printing* member, not its
         // first member outright: a vacuous leading `Emph` prints no
         // delimiter, so it must not dictate `*` over `**` for a `Strong`
@@ -346,7 +376,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
             }
             Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
-                let after_class = next_class(&items[end..]);
+                let after_class = next_class_of(pending[..tail].iter().rev().copied());
                 let markup = if d == escape::Delim::Emph { "*" } else { "**" };
                 match emphasis_run(
                     members,
@@ -360,12 +390,18 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                 ) {
                     RunOut::Emitted(t) => s.push_str(&t),
                     RunOut::Declined(children) => {
-                        items.splice(i..end, children);
+                        // The splice, at the cursor end of `pending`: drop the
+                        // run's own slots and push its children back on in
+                        // reverse, so the next iteration re-scans them in the
+                        // run's place. O(run + children); the tail below
+                        // `tail` is never touched.
+                        pending.truncate(tail);
+                        pending.extend(children.into_iter().rev());
                         marks.pop();
                         // No predecessor means the run opened the view: there
                         // is nothing behind it to fuse with, so leave the
-                        // buffer alone and re-scan from `i`. The splice above
-                        // is what makes progress in that case.
+                        // buffer alone and re-scan from the cursor. The splice
+                        // above is what makes progress in that case.
                         //
                         // A predecessor is only worth rolling back into if
                         // the splice could actually change its own render.
@@ -429,14 +465,25 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                         // before this check (review round 1 on this task).
                         if let Some(&(pi, plen, ppos)) = marks.last() {
                             let predecessor_is_emphasis = matches!(
-                                escape::delim(items[pi].0),
+                                escape::delim(scanned[pi].0),
                                 Some(escape::Delim::Emph | escape::Delim::Strong)
                             );
-                            if predecessor_is_emphasis || run_end(&items, pi, ledger) != i {
+                            // The predecessor's run has to be re-measured from
+                            // `pi`, which sits behind the cursor, so rewind it
+                            // across the split first and measure from there.
+                            // Rewinding is O(the predecessor run's own length)
+                            // and is undone below on the skip path, so the
+                            // check costs the same either way.
+                            let pred = scanned.len() - pi;
+                            rewind(&mut scanned, &mut pending, pred);
+                            if predecessor_is_emphasis
+                                || run_len(pending.iter().rev().copied(), ledger) != pred
+                            {
                                 marks.pop();
                                 s.truncate(plen);
                                 pos = ppos;
-                                i = pi;
+                            } else {
+                                advance(&mut scanned, &mut pending, pred);
                             }
                         }
                         continue;
@@ -503,9 +550,27 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
                 Pos::Mid
             };
         }
-        i = end;
+        advance(&mut scanned, &mut pending, run);
     }
     s
+}
+
+/// Move `n` items across the cursor of [`inlines_to_md_flat`]'s split view,
+/// from the unscanned side to the scanned one.
+///
+/// `pending` is stored reversed, so its last `n` entries are the next `n`
+/// logical items in reverse; reversing them again is what puts them into
+/// `scanned` in forward order.
+fn advance<'a>(scanned: &mut Vec<Flat<'a>>, pending: &mut Vec<Flat<'a>>, n: usize) {
+    let k = pending.len() - n;
+    scanned.extend(pending.drain(k..).rev());
+}
+
+/// The exact inverse of [`advance`]: move the last `n` scanned items back to
+/// the unscanned side, which is what a rollback into a predecessor run does.
+fn rewind<'a>(scanned: &mut Vec<Flat<'a>>, pending: &mut Vec<Flat<'a>>, n: usize) {
+    let k = scanned.len() - n;
+    pending.extend(scanned.drain(k..).rev());
 }
 
 /// Whether this inline prints nothing at all.
@@ -710,8 +775,24 @@ fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site, ledger: Ledg
 /// re-derivation — see design spec §4.2 for why the left-to-right walk makes
 /// that tracking well-defined rather than circular.
 fn run_end(items: &[Flat<'_>], start: usize, ledger: Ledger) -> usize {
-    let Some(d) = escape::delim(items[start].0) else {
-        return start + 1;
+    start + run_len(items[start..].iter().copied(), ledger)
+}
+
+/// [`run_end`] over an iterator rather than a slice and a start index, so that
+/// [`inlines_to_md_flat`]'s split view — whose unscanned half is stored
+/// reversed — can ask the same question of the same code instead of keeping a
+/// second copy of this walk in step by hand.
+///
+/// Returns the run's *length* in items, counting the vacuous members it steps
+/// over. Zero for an exhausted iterator, which [`run_end`]'s own callers never
+/// produce.
+fn run_len<'a>(items: impl IntoIterator<Item = Flat<'a>>, ledger: Ledger) -> usize {
+    let mut it = items.into_iter();
+    let Some((first, first_depth)) = it.next() else {
+        return 0;
+    };
+    let Some(d) = escape::delim(first) else {
+        return 1;
     };
     let ch = d.ch();
     // The run's class, decided by its first *printing* member — `None` while
@@ -721,10 +802,9 @@ fn run_end(items: &[Flat<'_>], start: usize, ledger: Ledger) -> usize {
     // is considered (design spec §4.2's ordering note). While it is `None` the
     // seam is not consulted, which is correct — a run of purely vacuous
     // members prints nothing, so there is no abutment to license.
-    let mut class_so_far = (!renders_empty(items[start].0, items[start].1)).then_some(d);
-    let mut k = start + 1;
-    while k < items.len() {
-        let (el, depth) = items[k];
+    let mut class_so_far = (!renders_empty(first, first_depth)).then_some(d);
+    let mut k = 1;
+    for (el, depth) in it {
         if renders_empty(el, depth) {
             k += 1;
             continue;
@@ -962,7 +1042,14 @@ fn class_of(c: char) -> Flank {
 /// punctuation and so is anything it escapes. An exhausted view is the end of
 /// the line, which CommonMark counts as whitespace.
 fn next_class(rest: &[Flat<'_>]) -> Flank {
-    for &(i, d) in rest {
+    next_class_of(rest.iter().copied())
+}
+
+/// [`next_class`] over an iterator, for the same reason [`run_len`] exists:
+/// [`inlines_to_md_flat`] holds the unscanned half of its view reversed and has
+/// to ask this question of the same code, not of a second copy of it.
+fn next_class_of<'a>(rest: impl IntoIterator<Item = Flat<'a>>) -> Flank {
+    for (i, d) in rest {
         if renders_empty(i, d) {
             continue;
         }
@@ -1383,7 +1470,7 @@ fn emphasis_run<'a>(
     // "prints, but only whitespace" leave neither field set), so matching
     // both at once is exhaustive, not just convenient.
     let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
-        return RunOut::Emitted(inlines_to_md_flat(&children, ctx, pos, ledger));
+        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger));
     };
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
@@ -1418,7 +1505,7 @@ fn emphasis_run<'a>(
         // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
         // context-threading fix in this same round did not remove it for
         // free, and restructuring further was out of scope for the round.
-        let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
+        let inner = inlines_to_md_flat(children, ctx, pos, ledger);
         RunOut::Emitted(emphasize(&inner, markup))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
