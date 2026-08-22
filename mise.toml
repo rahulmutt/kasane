@@ -132,12 +132,19 @@ for f in "$text" "$queue" "$perm"; do
 done
 
 # The union is the assertion that actually forbids a regression: a shape may
-# move between the queue and the permanent file, but no shape may become
-# corrupt that was not. Checking the two files separately would let a
-# regression hide as a reclassification.
+# move between any two of the three files, but no shape may become corrupt
+# that was not. Checking the files separately would let a regression hide as a
+# reclassification.
+#
+# The text file is IN the union, and that is load-bearing rather than tidy.
+# `classify_with` returns `Clean` when the text is corrupt, so a text-corrupt
+# shape is structurally *unclassified* -- it is in the worst state this census
+# records and, without this line, in none of the sets that gate. Fixing its
+# text would then read as a fresh corruption. Design spec
+# 2026-08-21-declined-run-rescan-design.md §5.1.
 tq="$(basename "$queue")"; tp="$(basename "$perm")"; tt="$(basename "$text")"
 for side in base head; do
-  LC_ALL=C sort -u "$tmp/$side.$tq" "$tmp/$side.$tp" > "$tmp/$side.union"
+  LC_ALL=C sort -u "$tmp/$side.$tq" "$tmp/$side.$tp" "$tmp/$side.$tt" > "$tmp/$side.union"
 done
 
 fail=0
@@ -177,7 +184,31 @@ check() { # label base-set head-set gate skip-marker
   fi
 }
 check text  "$tmp/base.$tt"    "$tmp/head.$tt"    gate   "$tmp/skip.$tt"
-check queue "$tmp/base.$tq"    "$tmp/head.$tq"    gate   "$tmp/skip.$tq"
+# The queue may grow only by shapes that left the text file in the same commit.
+# Text-corrupt -> structure-corrupt is a promotion: text is the invariant and
+# the span boundary is not, so a shape that stops losing text and starts losing
+# only structure has got better. Every other queue growth still fails.
+#
+# This keeps the one case on record where the queue gate alone spoke (abutment
+# ledger spec §2b.4): there the text file was unchanged, so `text_removed` is
+# empty, every addition is unjustified, and it still fails. Both directions are
+# pinned by crates/kasane-writer/tests/ratchet_gate_cases.sh.
+#
+# Like the union above, this does not consult skip.$tq/skip.$tt: if either
+# file were ever newly introduced (absent at base), its whole content would
+# read as added and this would fail loudly rather than skip. Unreached today
+# -- both files predate this branch's base.
+comm -23 "$tmp/base.$tt" "$tmp/head.$tt" > "$tmp/text_removed"
+comm -13 "$tmp/base.$tq" "$tmp/head.$tq" > "$tmp/queue_added"
+comm -23 "$tmp/queue_added" "$tmp/text_removed" > "$tmp/queue_unjustified"
+check queue "$tmp/base.$tq" "$tmp/head.$tq" report "$tmp/skip.$tq"
+if [ -s "$tmp/queue_unjustified" ]; then
+  fail=1
+  printf '%-8s %8s %8s %+8d   %s\\n' "queue+" "" "" \\
+    "$(wc -l < "$tmp/queue_unjustified" | tr -d ' ')" \\
+    "FAIL -- queue growth with no matching text removal"
+  sed -n '1,10p' "$tmp/queue_unjustified" | sed 's/^/           /'
+fi
 check perm  "$tmp/base.$tp"    "$tmp/head.$tp"    report ""
 check union "$tmp/base.union"  "$tmp/head.union"  gate   ""
 
