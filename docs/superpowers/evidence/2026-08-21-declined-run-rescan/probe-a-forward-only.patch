@@ -1,0 +1,195 @@
+diff --git a/crates/kasane-writer/src/markdown.rs b/crates/kasane-writer/src/markdown.rs
+index 14f59d3..4d34487 100644
+--- a/crates/kasane-writer/src/markdown.rs
++++ b/crates/kasane-writer/src/markdown.rs
+@@ -297,6 +297,8 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
+ /// siblings alone left the defect open one level down, at every container seam
+ /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
+ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
++    // PROBE: owned working view so a declined run's children can re-enter it.
++    let mut items: Vec<Flat<'a>> = items.to_vec();
+     let mut s = String::new();
+     let mut pos = pos;
+     let mut i = 0;
+@@ -304,7 +306,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
+         let (inline, depth) = items[i];
+         let before = pos;
+         let len_before = s.len();
+-        let end = run_end(items, i, ledger);
++        let end = run_end(&items, i, ledger);
+         let members = &items[i..end];
+         // The run's class comes from its first *printing* member, not its
+         // first member outright: a vacuous leading `Emph` prints no
+@@ -325,7 +327,7 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
+                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
+                 let after_class = next_class(&items[end..]);
+                 let markup = if d == escape::Delim::Emph { "*" } else { "**" };
+-                s.push_str(&emphasis_run(
++                match emphasis_run(
+                     members,
+                     d,
+                     ctx,
+@@ -334,7 +336,16 @@ fn inlines_to_md_flat<'a>(items: &[Flat<'a>], ctx: Ctx, pos: Pos, ledger: Ledger
+                     before_class,
+                     after_class,
+                     ledger,
+-                ))
++                ) {
++                    RunOut::Emitted(t) => s.push_str(&t),
++                    // PROBE: the run printed no delimiter, so its children are
++                    // plain neighbours in the printed line. Put them back in
++                    // the view where the run stood and rescan from `i`.
++                    RunOut::Declined(children) => {
++                        items.splice(i..end, children);
++                        continue;
++                    }
++                }
+             }
+             // `delim` said this inline prints no delimiter that can collide,
+             // so the run is this inline alone and it renders as it always has.
+@@ -895,6 +906,13 @@ fn can_close(before: Flank, after: Flank) -> bool {
+ // one call site with no natural sub-grouping; a struct would just relocate the
+ // noise.
+ #[allow(clippy::too_many_arguments)]
++/// PROBE: what one emphasis run contributed -- either printed text, or the
++/// children it declined to wrap, handed back for re-entry into the outer view.
++enum RunOut<'a> {
++    Emitted(String),
++    Declined(Vec<Flat<'a>>),
++}
++
+ fn emphasis_run<'a>(
+     members: &[Flat<'a>],
+     want: escape::Delim,
+@@ -904,7 +922,7 @@ fn emphasis_run<'a>(
+     before: Flank,
+     after: Flank,
+     ledger: Ledger,
+-) -> String {
++) -> RunOut<'a> {
+     let children = splice_children(run_children(members), want, ledger);
+     let inner = inlines_to_md_flat(&children, ctx, pos, ledger);
+     let core = inner.trim();
+@@ -912,7 +930,7 @@ fn emphasis_run<'a>(
+     // `emphasize` says so itself -- and has no first or last character to
+     // classify, so the flanking question does not arise.
+     if core.is_empty() {
+-        return inner;
++        return RunOut::Emitted(inner);
+     }
+     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
+     // the delimiter it appends, so when that whitespace exists it -- not
+@@ -934,7 +952,7 @@ fn emphasis_run<'a>(
+     let opens = can_open(open_before, class_of(core.chars().next().unwrap()));
+     let closes = can_close(class_of(core.chars().next_back().unwrap()), close_after);
+     if opens && closes {
+-        emphasize(&inner, markup)
++        RunOut::Emitted(emphasize(&inner, markup))
+     } else {
+         // The delimiter would not flank where it lands, so a parser would read
+         // it as a literal asterisk in the middle of the prose. The text is the
+@@ -961,7 +979,7 @@ fn emphasis_run<'a>(
+         // 32-shape family the census allowlist still names (design spec §8's
+         // residual-risk bullets); a future shape corrupt only through this
+         // seam would not be caught by anything here.
+-        inner
++        RunOut::Declined(children)
+     }
+ }
+ 
+diff --git a/crates/kasane-writer/tests/census-known-corrupt.txt b/crates/kasane-writer/tests/census-known-corrupt.txt
+index dd84725..739a118 100644
+--- a/crates/kasane-writer/tests/census-known-corrupt.txt
++++ b/crates/kasane-writer/tests/census-known-corrupt.txt
+@@ -14,19 +14,3 @@
+ [Math("a$b"), Emph([Code("x")]), Text("b")]
+ [Math("a$b"), Strong([Code("x")]), Text("a")]
+ [Math("a$b"), Strong([Code("x")]), Text("b")]
+-[Text("a"), Emph([Code("x")]), Code("x")]
+-[Text("a"), Emph([Code("x")]), Code("y")]
+-[Text("a"), Emph([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+-[Text("a"), Emph([Code("x")]), Math("a$b")]
+-[Text("a"), Strong([Code("x")]), Code("x")]
+-[Text("a"), Strong([Code("x")]), Code("y")]
+-[Text("a"), Strong([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+-[Text("a"), Strong([Code("x")]), Math("a$b")]
+-[Text("b"), Emph([Code("x")]), Code("x")]
+-[Text("b"), Emph([Code("x")]), Code("y")]
+-[Text("b"), Emph([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+-[Text("b"), Emph([Code("x")]), Math("a$b")]
+-[Text("b"), Strong([Code("x")]), Code("x")]
+-[Text("b"), Strong([Code("x")]), Code("y")]
+-[Text("b"), Strong([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+-[Text("b"), Strong([Code("x")]), Math("a$b")]
+diff --git a/crates/kasane-writer/tests/census-known-structure-corrupt.txt b/crates/kasane-writer/tests/census-known-structure-corrupt.txt
+index aed309d..676cfdb 100644
+--- a/crates/kasane-writer/tests/census-known-structure-corrupt.txt
++++ b/crates/kasane-writer/tests/census-known-structure-corrupt.txt
+@@ -1530,12 +1530,16 @@
+ [Text("*"), Text("b"), Emph([Code("x")])]
+ [Text("*"), Text("b"), Emph([Strong([Text("a")])])]
+ [Text("*"), Text("b"), Strong([Code("x")])]
++[Text("a"), Emph([Code("x")]), Code("x")]
++[Text("a"), Emph([Code("x")]), Code("y")]
+ [Text("a"), Emph([Code("x")]), Emph([Code("x")])]
+ [Text("a"), Emph([Code("x")]), Emph([Emph([Text("a")])])]
+ [Text("a"), Emph([Code("x")]), Emph([Strong([Text("a")])])]
+ [Text("a"), Emph([Code("x")]), Emph([Text("a")])]
+ [Text("a"), Emph([Code("x")]), FootnoteRef(NoteId(1))]
++[Text("a"), Emph([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+ [Text("a"), Emph([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [] }]
++[Text("a"), Emph([Code("x")]), Math("a$b")]
+ [Text("a"), Emph([Code("x")]), Math("m")]
+ [Text("a"), Emph([Code("x")]), Strong([Code("x")])]
+ [Text("a"), Emph([Code("x")]), Strong([Emph([Text("a")])])]
+@@ -1579,12 +1583,16 @@
+ [Text("a"), Link { target: Internal(BlockId(0)), inlines: [] }, Emph([Code("x")])]
+ [Text("a"), Link { target: Internal(BlockId(0)), inlines: [] }, Emph([Strong([Text("a")])])]
+ [Text("a"), Link { target: Internal(BlockId(0)), inlines: [] }, Strong([Code("x")])]
++[Text("a"), Strong([Code("x")]), Code("x")]
++[Text("a"), Strong([Code("x")]), Code("y")]
+ [Text("a"), Strong([Code("x")]), Emph([Code("x")])]
+ [Text("a"), Strong([Code("x")]), Emph([Emph([Text("a")])])]
+ [Text("a"), Strong([Code("x")]), Emph([Strong([Text("a")])])]
+ [Text("a"), Strong([Code("x")]), Emph([Text("a")])]
+ [Text("a"), Strong([Code("x")]), FootnoteRef(NoteId(1))]
++[Text("a"), Strong([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+ [Text("a"), Strong([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [] }]
++[Text("a"), Strong([Code("x")]), Math("a$b")]
+ [Text("a"), Strong([Code("x")]), Math("m")]
+ [Text("a"), Strong([Code("x")]), Strong([Code("x")])]
+ [Text("a"), Strong([Code("x")]), Strong([Emph([Text("a")])])]
+@@ -1613,12 +1621,16 @@
+ [Text("a"), Text("b"), Emph([Code("x")])]
+ [Text("a"), Text("b"), Emph([Strong([Text("a")])])]
+ [Text("a"), Text("b"), Strong([Code("x")])]
++[Text("b"), Emph([Code("x")]), Code("x")]
++[Text("b"), Emph([Code("x")]), Code("y")]
+ [Text("b"), Emph([Code("x")]), Emph([Code("x")])]
+ [Text("b"), Emph([Code("x")]), Emph([Emph([Text("a")])])]
+ [Text("b"), Emph([Code("x")]), Emph([Strong([Text("a")])])]
+ [Text("b"), Emph([Code("x")]), Emph([Text("a")])]
+ [Text("b"), Emph([Code("x")]), FootnoteRef(NoteId(1))]
++[Text("b"), Emph([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+ [Text("b"), Emph([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [] }]
++[Text("b"), Emph([Code("x")]), Math("a$b")]
+ [Text("b"), Emph([Code("x")]), Math("m")]
+ [Text("b"), Emph([Code("x")]), Strong([Code("x")])]
+ [Text("b"), Emph([Code("x")]), Strong([Emph([Text("a")])])]
+@@ -1662,12 +1674,16 @@
+ [Text("b"), Link { target: Internal(BlockId(0)), inlines: [] }, Emph([Code("x")])]
+ [Text("b"), Link { target: Internal(BlockId(0)), inlines: [] }, Emph([Strong([Text("a")])])]
+ [Text("b"), Link { target: Internal(BlockId(0)), inlines: [] }, Strong([Code("x")])]
++[Text("b"), Strong([Code("x")]), Code("x")]
++[Text("b"), Strong([Code("x")]), Code("y")]
+ [Text("b"), Strong([Code("x")]), Emph([Code("x")])]
+ [Text("b"), Strong([Code("x")]), Emph([Emph([Text("a")])])]
+ [Text("b"), Strong([Code("x")]), Emph([Strong([Text("a")])])]
+ [Text("b"), Strong([Code("x")]), Emph([Text("a")])]
+ [Text("b"), Strong([Code("x")]), FootnoteRef(NoteId(1))]
++[Text("b"), Strong([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [Code("x")] }]
+ [Text("b"), Strong([Code("x")]), Link { target: Internal(BlockId(0)), inlines: [] }]
++[Text("b"), Strong([Code("x")]), Math("a$b")]
+ [Text("b"), Strong([Code("x")]), Math("m")]
+ [Text("b"), Strong([Code("x")]), Strong([Code("x")])]
+ [Text("b"), Strong([Code("x")]), Strong([Emph([Text("a")])])]
