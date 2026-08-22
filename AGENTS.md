@@ -220,11 +220,16 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   out, and the ledger reads no text. That split is load-bearing rather than
   tidy, and the disproof below records two distinct failures across it, with
   distinct causes: a licensed abutment can re-flank the run around it and send
-  `emphasis_run` down its decline branch, printing children bare (the 37
-  permanent-to-queue moves, and the tail cells' 800 code-span text losses); or
-  it can leave a three-character delimiter run whose pairing depends on what
-  follows it, which is not a flanking question at all (the head cells' 2,528
-  asterisk mis-pairings). CommonMark
+  `emphasis_run` down its decline branch -- which at the time printed children
+  bare, costing the 37 permanent-to-queue moves and the tail cells' 800
+  code-span text losses; a declined run's children now return to the
+  flattened view instead, and `inlines_to_md_flat` re-scans that seam in both
+  directions -- forward by splicing over the run's slot, backward by rolling
+  the output buffer back one run, since forward alone closed only half of it
+  (`2026-08-21-declined-run-rescan-design.md` §2.3) -- or it can leave a
+  three-character delimiter run whose pairing depends on what follows it,
+  which is not a flanking question at all (the head cells' 2,528 asterisk
+  mis-pairings). CommonMark
   can express some of what these rules give up -- `[Emph(a), Strong(b)]` is
   expressible as two spans (`*a***b**` recovers `ab`) and a same-`Delim`
   container can nest safely when its own delimiters are one-sided-flanking (`*a
@@ -332,7 +337,10 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   silently or rot into stale excuses. Regenerate it with
   `KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census` and read
   the diff — that diff is the exact evidence a reviewer wants, of what a
-  change fixed or broke.
+  change fixed or broke. It is **empty** as of 2026-08-21 — the rescan closed
+  the last family — and the ratchet still stands: a newly corrupt shape fails
+  the build until someone blesses it in, which is now a strictly visible act
+  against an empty file.
 - The census has two tiers, and four files. The text tier above compares what
   a parser recovers against `kasane_gfm::rendered_text`. The **structural**
   tier compares, for each character, the stack of emphasis containers enclosing
@@ -373,8 +381,18 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `main` and fails if the text or structure queue, or their union with the
   permanent file, gained any shape. The union is what makes reclassification
   safe to allow: a shape may move between the two files, but none may become
-  corrupt that was not. It runs in CI *after* `mise run test`, because it takes
-  the files' accuracy on trust and only the test establishes that.
+  corrupt that was not. The union spans all three shape files including the
+  text queue, and the queue gate admits a growth only where the same shapes
+  left the text queue in the same commit. Both follow from the tiers being
+  ordered: `classify_with` returns `Clean` when the text is corrupt, so a
+  text-corrupt shape is structurally *unclassified* — the worst state this
+  census records — and a union without it would read a text fix as a fresh
+  corruption (`2026-08-21-declined-run-rescan-design.md` §5). Add
+  `crates/kasane-writer/tests/census_len4.rs` to the tiers named above: the
+  text tier at length 4, asserting zero, with no allowlist because the
+  answer is zero. `mise run census-ratchet` runs in CI *after* `mise run
+  test`, because it takes the files' accuracy on trust and only the test
+  establishes that.
   `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
   a tier measures with the census's own instrument rather than a copy that
   drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers

@@ -541,6 +541,18 @@ inserted task, see the result note above:
   declined run's own exposed edge. The risk today is that the list is read as
   an acceptance rather than a queue, which is why §5.1 makes a stale entry
   fail the build.
+
+  > **Closed, 2026-08-21, and this bullet's prediction was measured wrong.**
+  > The re-scan as described above — children re-entering the outer view
+  > before run detection — closes **16** of the 32, not the whole set. The
+  > survivors are the head half, `[backtick-bearing, Emph|Strong([Code]),
+  > Text]`, because `inlines_to_md_flat` walks forward and the element
+  > before a declined run is already a substring of the output buffer, so
+  > restarting the scan can reach what follows and never what precedes.
+  > Adding a one-run buffer rollback closes all 32 and takes text corruption
+  > to zero at every length through 6 over the census alphabet. See
+  > `2026-08-21-declined-run-rescan-design.md` §2.3 for the per-length table
+  > and §3.2 for the mechanism. `census-known-corrupt.txt` is now empty.
 - **The structural loss in §1.** `<em>a</em><strong>b</strong>` becomes one
   `<em>`. Deliberate, pinned by a unit test, and reversible only by approach A.
 - **The structural loss the same-`Delim` splice pays unconditionally.**

@@ -376,6 +376,22 @@ Risks, in the order they deserve worry:
    shape as a bare paragraph — so the `LineStart` and `AfterFootnoteRef` states
    are barely exercised by 47M shapes. Mitigation: §8's targeted test. This is
    the risk most likely to turn a text fix into a different text bug.
+
+   > **Qualified, 2026-08-21.** §8's targeted test
+   > (`a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render`)
+   > pins the restore only under a non-shipped ledger
+   > (`Ledger::from_bits(cell::EMPH_BESIDE_STRONG_RUN_SEAM)`), not under
+   > either shipped one. Under any shipped ledger, `pos = ppos` appears
+   > unobservable: `run_end` fuses any touching `Emph`/`Strong` pair under
+   > `LICENSED` and `CONSERVATIVE` alike, so the rollback's
+   > `predecessor_is_emphasis` disjunct — the only branch that genuinely
+   > re-renders a `Pos`-aware predecessor — is unreachable there, and on the
+   > other disjunct the re-rendered predecessor can only be a backtick or a
+   > degrading-math run, whose escaping (`escape::code_span`/`math_span`)
+   > takes no `Pos` argument at all and so cannot consume it. The mitigation
+   > is real, and the test is the only place this repo has ever measured the
+   > restore firing — but it measures a cell this writer does not ship, so
+   > this risk's own scope is narrower than its mitigation implied.
 2. **"Zero" is scoped to a 19-element alphabet**, not to all IR. §2.2's rows
    are exhaustive over that alphabet and say nothing about text outside it. The
    property tier remains the only guard there. This scope statement is load-

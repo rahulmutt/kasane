@@ -1102,20 +1102,31 @@ impl Edge {
 /// its own `running_before`/`after_ctx` (computed below) as *its* outer
 /// context, so the threading propagates correctly at every depth.
 ///
-/// The fallback to `outer_before`/`outer_after` fires exactly when *nothing
-/// local is available to answer at all* -- `!acc.prints` on the opening
-/// side (an empty accumulated buffer has no last character), or an
-/// exhausted `children[end..]` on the closing side -- never merely because
-/// the local answer happens to be `Flank::Space`. A buffer that has printed
-/// something which itself ends in whitespace is a *local* answer, not a
-/// boundary case: `Flank::Space` on its own account, regardless of what the
-/// caller's neighbour is (review round 3 fixed a regression that conflated
-/// the two on the opening side; see `running_before` below). With that
-/// distinction kept, an interior run's local neighbours never depend on
-/// anything outside `children`, and only a run genuinely at `children`'s own
-/// head or tail -- with nothing local at all on that side -- consults the
-/// caller's context. That is what makes the function exact for the reason
-/// its name claims: every run's own flanking decision matches what the real
+/// The fallback to `outer_before`/`outer_after` fires on a precise
+/// structural predicate, not on "nothing local can answer": `!acc.prints` on
+/// the opening side (an empty accumulated buffer has no last character), and
+/// `end == children.len()` on the closing side -- this run sits at
+/// `children`'s own tail, nothing left in this slice to consult at all --
+/// never merely because the local answer happens to be `Flank::Space`. A
+/// buffer that has printed something which itself ends in whitespace is a
+/// *local* answer, not a boundary case: `Flank::Space` on its own account,
+/// regardless of what the caller's neighbour is (review round 3 fixed a
+/// regression that conflated the two on the opening side; see
+/// `running_before` below).
+///
+/// The closing-side predicate is narrower than "nothing local can answer"
+/// reads, and that gap is real: a `children[end..]` that is non-empty but
+/// renders entirely nothing -- every member `renders_empty` -- has nothing
+/// local to answer either, but `end != children.len()` sends it down the
+/// `next_class` path (below) instead of this fallback, and `next_class`
+/// defaults to `Flank::Space` on an exhausted scan where a real
+/// splice+rescan would keep looking past `children` and reach `outer_after`.
+/// Measured unobservable rather than argued away: review round 3's
+/// re-review rebuilt its own differential harness rather than trust the fix
+/// round's figure, and found 0 divergence from the real renderer across
+/// 5.73M renders over 128 ledgers, arguing the gap through rather than only
+/// sampling past it. With that qualification, the function is exact for the
+/// reason its name claims: every run's own flanking decision matches what the real
 /// splice+rescan would reach, at any nesting depth and under any `Ledger`.
 fn probe_edges(
     children: &[Flat<'_>],
@@ -1179,14 +1190,19 @@ fn probe_edges(
                         .expect("an Edge that does not trail whitespace always has a last_class")
                 };
                 // `after_ctx` has no equivalent three-way split: `next_class`
-                // does its own exact classification of whatever comes next
-                // (including answering `Flank::Space` itself when the next
-                // printing content genuinely is whitespace-classed), so
+                // does its own classification of whatever comes next, so
                 // there is no separate "local but not yet consulted" state
                 // to conflate with "nothing local" the way an *already
                 // printed* buffer's trailing whitespace is. `outer_after`
-                // only ever substitutes for a `next_class(&[])` on a
-                // genuinely empty local remainder.
+                // only substitutes when `end == children.len()` -- this run
+                // is at `children`'s own tail. `next_class` answers
+                // `Flank::Space` for two cases it does not itself
+                // distinguish: the next printing content genuinely is
+                // whitespace-classed, or `children[end..]` is non-empty but
+                // renders nothing at all, in which case a real splice+rescan
+                // would look past `children` and reach `outer_after` instead
+                // -- see `probe_edges`'s own doc for why that gap does not
+                // reach output.
                 let after_ctx = if end < children.len() {
                     next_class(&children[end..])
                 } else {
@@ -1407,18 +1423,23 @@ fn emphasis_run<'a>(
     } else {
         // The delimiter would not flank where it lands, so a parser would read
         // it as a literal asterisk in the middle of the prose. The text is the
-        // invariant and the span is not: hand the children back rather than
-        // rendering them (design spec §2.3).
+        // invariant and the span is not: hand the children back to the outer
+        // view rather than printing them (design spec §2.3).
         //
-        // `inlines_to_md_flat` splices these children over the run's slot and
-        // re-scans, so the run's own edge content meets whatever sits beside it
-        // in the outer view -- via `run_end` -- instead of colliding with it
-        // pre-rendered in the buffer. That closes the tail half of the
-        // 32-shape backtick family described on `RunOut` above. The head half
-        // survives this task: a forward-only rescan cannot reach a seam that
-        // was already fused *before* this run's own content joined it, which
-        // needs a buffer rollback, not just a re-scan (design spec §2.3;
-        // Task 2).
+        // Handing them back rather than rendering them is what closed the
+        // 32-shape backtick family. A declined run prints no delimiter, so its
+        // children are plain neighbours in the printed line, and rendering them
+        // into the buffer asserted otherwise: for
+        // `[Code("x"), Emph([Code("x")]), Text("a")]` the buffer held
+        // `` `x``x`a ``, in which a parser reads one code span over both
+        // backtick pairs and recovers `x``xa` where the IR said `xxa`.
+        //
+        // `inlines_to_md_flat` re-scans the seam in both directions -- forward
+        // by splicing over the run's slot, backward by rolling the buffer back
+        // one run -- because a forward-only rescan closes only the half whose
+        // collision is with what follows (design spec §2.3, measured at 16 of
+        // 32). `census_len4.rs` is the guard: zero text loss over the census
+        // alphabet at length 4, where the census's own tiers stop at 3.
         RunOut::Declined(children)
     }
 }
@@ -3004,7 +3025,9 @@ mod tests {
     /// groups them, and the line is `` a`xx` ``.
     ///
     /// This is the tail half of the 32-shape family (design spec §2.3). The head
-    /// half needs Task 2's rollback and is pinned there.
+    /// half needs a buffer rollback rather than a forward rescan, and is pinned
+    /// by `a_declined_run_rolls_the_buffer_back_so_the_preceding_span_can_fuse`
+    /// below.
     #[test]
     fn a_declined_runs_children_rejoin_the_view_and_fuse_forward() {
         let seq = vec![
@@ -3094,10 +3117,14 @@ mod tests {
     /// `Pos::AfterFootnoteRef`, and is never re-rendered at all, so there is
     /// nothing here for `pos = ppos` to restore.
     ///
-    /// This still pins something real: that a decline whose predecessor is a
-    /// plain, already-correctly-escaped `Text` leaves that `Text`'s output
-    /// alone rather than needlessly rolling back into it. It does *not* pin
-    /// §10 risk 1 --
+    /// This still pins something real: the output bytes on a shape whose
+    /// decline takes the skip path -- a plain, already-correctly-escaped
+    /// `Text` predecessor. It does *not* pin that skipping here is
+    /// necessary rather than merely harmless: the guard's own justification
+    /// is that the skip and rollback paths are byte-identical on this shape,
+    /// so removing the guard and rolling back unconditionally still passes
+    /// this test (and all 172 lib tests) and this test would not catch that
+    /// removal. It does *not* pin §10 risk 1 --
     /// `a_rollback_restores_the_escaping_position_on_a_genuine_predecessor_re_render`
     /// (below) is the shape that does, on the `predecessor_is_emphasis`
     /// branch this task's guard added, which is the only place a `Pos`-aware
@@ -3119,10 +3146,17 @@ mod tests {
         assert_eq!(para(seq), "[^1]\\:`x`a");
     }
 
-    /// §10 risk 1, actually pinned: the predecessor a rollback *genuinely
-    /// re-renders* must escape exactly as it did the first time, at the
-    /// `Pos` it opened with, not at whatever `Pos` happens to be current when
-    /// the rollback fires.
+    /// §10 risk 1, actually pinned -- but only under the non-shipped ledger
+    /// this test needs: the predecessor a rollback *genuinely re-renders*
+    /// must escape exactly as it did the first time, at the `Pos` it opened
+    /// with, not at whatever `Pos` happens to be current when the rollback
+    /// fires. Under any shipped ledger `pos = ppos` appears unobservable --
+    /// `predecessor_is_emphasis` (the only branch this restore matters on)
+    /// is unreachable there, since `run_end` fuses any touching
+    /// `Emph`/`Strong` pair before a decline ever sees them apart, and the
+    /// other disjunct's re-rendered predecessor can only be a backtick or
+    /// degrading-math run, whose escaping takes no `Pos` at all (design
+    /// spec §10 risk 1's status note).
     ///
     /// `Text(":")` alone (as in the test above) never re-renders -- its
     /// `run_end` never moves, so the decline arm's guard always skips it.
@@ -3261,7 +3295,8 @@ mod tests {
     /// not resurrect this defect silently.
     ///
     /// Pinned against the pre-`probe_edges` renderer's own output (both
-    /// `2e49c28` and the round-2 fix at `e3397af` agree on it):
+    /// `2e49c28` and the round-1 docs commit at `e3397af` agree on it --
+    /// the round-2 fix, `a3fb65a`, is the commit that disagrees):
     /// `"za *`x`b*z"` keeps the inner `Emph` (the buffer's own trailing space
     /// makes it flank correctly against the real local neighbour); the
     /// regression this test guards against instead consulted `outer_before`
