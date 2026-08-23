@@ -1,8 +1,9 @@
-//! The text tier at length 4, asserting zero.
+//! Both census tiers at length 4.
 //!
 //! The length 1-3 census (`census.rs`) carries three allowlist files because
-//! its answer is not zero. This one carries none, and cannot rot into stale
-//! excuses, because it has no file to rot into.
+//! its answer is not zero. This file's text tier carries none, and cannot rot
+//! into stale excuses, because it has no file to rot into. Its structural
+//! tier carries three of its own -- see below.
 //!
 //! **Why length 4 specifically.** `2026-08-18-abutment-ledger-design.md` §2b.5
 //! is that branch's most transferable finding: its structural counter read 0 in
@@ -74,6 +75,33 @@ fn for_each_length_four_shape(mut f: impl FnMut(&[Inline])) {
             idx[k] = 0;
         }
     }
+}
+
+/// The corpus size the odometer must visit.
+///
+/// `AGENTS.md`, the design spec (§2, §8) and `for_each_length_four_shape`'s
+/// own doc all claim `19^4 = 130,321`. Nothing asserted that number before
+/// this test existed: the two classifying tests below only notice a
+/// truncated enumeration when the dropped shape happens to be `Corrupt` or
+/// `Inexpressible` -- both sets would come out identical either way, and only
+/// the total shape count ever moved, if the dropped shapes were `Clean`. The
+/// very first shape the odometer visits is `Clean`, so a truncation that
+/// drops a prefix or a suffix of `Clean` shapes is exactly the failure mode
+/// those tests cannot see. This is a separate, minimal test rather than an
+/// assertion folded into one of them, so a truncation reports under its own
+/// name instead of surfacing as a confusing mismatch inside a classification
+/// test.
+#[test]
+fn the_length_four_odometer_visits_every_shape() {
+    let mut n = 0usize;
+    for_each_length_four_shape(|_| n += 1);
+    assert_eq!(
+        n, 130_321,
+        "for_each_length_four_shape visited {n} shapes, not 19^4 = 130,321. \
+         That would silently pass the two classifying tests below if the \
+         dropped shapes were all `Clean` -- which the first shape visited is \
+         -- so this is the only gate on the corpus size itself."
+    );
 }
 
 /// Every sequence of length 4 over the census alphabet round-trips its text.
@@ -256,6 +284,23 @@ fn inline_structure_survives_rendering_for_every_shape_of_length_four() {
     );
 }
 
+/// Formats a count the way the census headers do: thousands separated by
+/// commas (`7585` -> `"7,585"`). Used to search [`LEN4_INEXPRESSIBLE_HEADER`]
+/// for the constants below, so the header's prose and this file's constants
+/// stay tied together instead of only mirroring each other by coincidence.
+fn with_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let len = digits.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The one claim in [`LEN4_INEXPRESSIBLE_HEADER`] that nothing else gates.
 ///
 /// `permanence_ceiling` gates the 10,153 total. The sentence splitting it into
@@ -276,10 +321,30 @@ fn inline_structure_survives_rendering_for_every_shape_of_length_four() {
 /// than stale prose: every entry must satisfy at least one condition, because
 /// `classify_with` files a shape here only if it does. It cannot fail while the
 /// relation and the file agree, which is exactly why it is worth asserting.
+///
+/// The three string predicates below (`same_class`, `strong_over_emph`, and
+/// the `Emph([Strong(` count) are a *proxy* for `classify_with`'s own
+/// sole-child predicates, `nests_same_class_directly` and
+/// `nests_strong_over_emph_directly` (`census_support/mod.rs`). The proxy is
+/// exact only while every container in the census alphabet is single-child
+/// and neither `Link` variant wraps emphasis -- true today, verified; widen
+/// the alphabet and these string checks stop meaning what they say.
+///
+/// This test also ties [`LEN4_INEXPRESSIBLE_HEADER`]'s prose to the
+/// `SAME_CLASS`/`STRONG_OVER_EMPH_ONLY` constants and to a third figure the
+/// header states but nothing else gates: "375 entries here nest a `Strong`
+/// directly inside an `Emph`" (an entry containing only `Emph([Strong(`
+/// satisfies neither permanence condition, so it is counted inside whichever
+/// of `n_same`/`n_soe_only` it also happens to land in and could migrate
+/// between them while both totals hold steady). Without the containment
+/// checks, editing the header's prose alone -- leaving the constants and the
+/// file untouched -- leaves every assertion here green and ships a lying
+/// file.
 #[test]
 fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
     const SAME_CLASS: usize = 7_585;
     const STRONG_OVER_EMPH_ONLY: usize = 2_568;
+    const NESTED_STRONG_IN_EMPH: usize = 375;
 
     let body = std::fs::read_to_string(LEN4_INEXPRESSIBLE)
         .unwrap_or_else(|e| panic!("{LEN4_INEXPRESSIBLE} must exist and be readable: {e}"));
@@ -290,6 +355,7 @@ fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
 
     let same_class = |l: &&str| l.contains("Emph([Emph(") || l.contains("Strong([Strong(");
     let strong_over_emph = |l: &&str| l.contains("Strong([Emph(");
+    let nested_strong_in_emph = |l: &&str| l.contains("Emph([Strong(");
 
     let n_same = entries.iter().filter(|l| same_class(l)).count();
     let n_soe_only = entries
@@ -300,6 +366,7 @@ fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
         .iter()
         .filter(|l| !same_class(l) && !strong_over_emph(l))
         .count();
+    let n_nested_strong_in_emph = entries.iter().filter(|l| nested_strong_in_emph(l)).count();
 
     assert_eq!(
         n_neither, 0,
@@ -326,5 +393,56 @@ fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
          strong-over-emph condition alone, but `LEN4_INEXPRESSIBLE_HEADER` says \
          {STRONG_OVER_EMPH_ONLY}. Update the constant's text, re-bless, and \
          update this test in the same commit."
+    );
+    assert_eq!(
+        n_nested_strong_in_emph, NESTED_STRONG_IN_EMPH,
+        "{LEN4_INEXPRESSIBLE} holds {n_nested_strong_in_emph} entries that nest \
+         a `Strong` directly inside an `Emph` (`Emph([Strong(`), but \
+         `LEN4_INEXPRESSIBLE_HEADER` says {NESTED_STRONG_IN_EMPH}. Unlike \
+         `n_same`/`n_soe_only`, nothing else in this test gates that figure --\
+         these entries satisfy neither permanence condition on their own, so \
+         they can migrate between the same-class and strong-over-emph-only \
+         counts while both totals hold steady and this one silently goes \
+         stale. Update the header's prose, re-bless, and update this test in \
+         the same commit."
+    );
+
+    // Ties the header's own prose to the constants above, in both directions:
+    // editing the header's numbers without updating the constants fails here
+    // even though nothing above reads the header string itself, and editing a
+    // constant without re-blessing the file still fails the count assertions
+    // above.
+    let same_class_claim = format!(
+        "{}  nest a same-class container directly",
+        with_thousands(SAME_CLASS)
+    );
+    assert!(
+        LEN4_INEXPRESSIBLE_HEADER.contains(&same_class_claim),
+        "LEN4_INEXPRESSIBLE_HEADER does not contain {same_class_claim:?}. Its \
+         prose and the SAME_CLASS constant have drifted apart -- update the \
+         constant's text to match what the file now holds, re-bless, and \
+         update this test in the same commit."
+    );
+    let soe_only_claim = format!(
+        "{}  do not, and are here on the other condition alone",
+        with_thousands(STRONG_OVER_EMPH_ONLY)
+    );
+    assert!(
+        LEN4_INEXPRESSIBLE_HEADER.contains(&soe_only_claim),
+        "LEN4_INEXPRESSIBLE_HEADER does not contain {soe_only_claim:?}. Its \
+         prose and the STRONG_OVER_EMPH_ONLY constant have drifted apart -- \
+         update the constant's text, re-bless, and update this test in the \
+         same commit."
+    );
+    // The header wraps this sentence after `` `Strong` `` (the continuation
+    // "directly inside an `Emph`" lands on the next line behind its own `#`),
+    // so only the first clause is a contiguous substring of the constant.
+    let nested_claim = format!("{NESTED_STRONG_IN_EMPH} entries here nest a `Strong`");
+    assert!(
+        LEN4_INEXPRESSIBLE_HEADER.contains(&nested_claim),
+        "LEN4_INEXPRESSIBLE_HEADER does not contain {nested_claim:?}. Its \
+         prose and the NESTED_STRONG_IN_EMPH constant have drifted apart -- \
+         update the header's prose, re-bless, and update this test in the \
+         same commit."
     );
 }
