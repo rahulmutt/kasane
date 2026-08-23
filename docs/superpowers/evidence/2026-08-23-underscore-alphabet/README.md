@@ -115,3 +115,89 @@ delimiter is letter-flanked, the rest letter-flanked on the opener.
 
 `p2-residual-permanent.txt` is that set. It is archived because counting it
 would not have caught the error; dumping it did.
+
+## Post-implementation verification
+
+### Length-5 text tier, re-run in debug against the shipped writer
+
+The length-5 text tier was re-run **in debug** against the shipped
+implementation (`crates/kasane-writer/tests/zz_len5_debug.rs`, deleted after
+use, never committed — see the harness convention above), where
+`debug_assert_eq!(edge, Edge::of(&inner))` is live:
+
+```
+$ cargo test -p kasane-writer --test zz_len5_debug -- --nocapture
+test no_shape_of_length_five_loses_text_or_desynchronises_the_probe ... ok
+test result: ok. 1 passed; 0 failed; ...; finished in 87.91s
+```
+
+**0 of 2,476,099 shapes lose text, and the probe/render invariant holds.**
+That closes the gap this directory records above — both design-phase probes
+carried `parent_ch` in a global, so `probe_edges` never saw it and the
+length-5 figure was `--release` only. Re-run twice against the shipped
+writer (once against the pre-condition-4 commit `05bb516`, once against
+`0909b3a`); both are 0 of 2,476,099.
+
+### A regression the text tier could not see, and the structural gap that let it through
+
+The census ratchet (`mise run census-ratchet`) caught a real structural
+regression in commit `05bb516` that this directory's text-only sweeps above
+never could: 5 length-3 shapes moved from `Inexpressible` (a clean, already-
+accounted-for loss of one nesting level) to `Corrupt` (an unrelated `Strong`
+losing its own delimiters, with its text migrating across a structural
+boundary). Byte-identical *text* either way, which is exactly why every text
+sweep — including the 2.48M-shape length-5 sweep above — stayed at zero.
+Commit `0909b3a` ("only take `_` where declining the splice saves the child")
+fixed it: a fourth condition on `choose_mark` declines `_` where the run it
+would save fuses two different delimiter classes together, since that fuse
+substitutes one class for another where the plain splice would only have
+erased a level.
+
+The census's own structural tier (`census.rs`) stops at length 3, and
+`census_len4.rs` is text-only — **no shipped gate prices structure above
+length 3.** The defect was caught only because the affected family happens
+to have a length-3 member; the same family is much larger at length 4 and 5.
+That was measured directly, with a reconstructed structural probe over the
+full 19-element census alphabet at lengths 4 and 5, on three revisions —
+`main` (`d4fc510`), the branch before the fix (`05bb516`), and the branch
+with the fix (`0909b3a`) — comparing each shape's `classify_with` result
+line-for-line against `main`:
+
+```
+$ docs/superpowers/evidence/2026-08-23-underscore-alphabet/harnesses/structural-len4-5-sweep.sh
+-- length-4 --
+  base->nofix   INEXPR->CORRUPT regressions: 135     ->CLEAN improvements: 31376
+  base->fix     INEXPR->CORRUPT regressions: 0        ->CLEAN improvements: 31376
+  nofix->fix    shapes that move (any direction): 135
+-- length-5 --
+  base->nofix   INEXPR->CORRUPT regressions: 3134     ->CLEAN improvements: 588423
+  base->fix     INEXPR->CORRUPT regressions: 0         ->CLEAN improvements: 588423
+  nofix->fix    shapes that move (any direction): 3134
+```
+
+**135 shapes at length 4 and 3,134 at length 5 regressed from `Inexpressible`
+to `Corrupt` before the fix, and the fix closes every one of them — zero
+regressions against `main` at either length, every recovery intact.** These
+figures reproduce exactly the numbers measured (and archived only in a task
+report, not committed) by the fix's own author; this harness makes them
+reproducible on demand rather than asserted.
+
+A **structural** length-4 tier is the smallest shipped guard that would have
+spoken here; it is a follow-up, not part of this branch.
+
+### Harness
+
+| file | what it is |
+|---|---|
+| `harnesses/zz_structural_len4_5.rs` | classifies every length-4 and length-5 census shape with `classify_with`, one revision at a time |
+| `harnesses/structural-len4-5-sweep.sh` | runs the probe above against `main`, `05bb516`, and `0909b3a` via `git worktree`, and prints the transition table |
+
+Reproduce with:
+
+```
+docs/superpowers/evidence/2026-08-23-underscore-alphabet/harnesses/structural-len4-5-sweep.sh
+```
+
+It builds and runs three separate worktrees (~20s each in release once cargo's
+registry cache is warm) and cleans them up on exit; it is evidence, not a
+test — never compiled under `crates/`, never run in CI.
