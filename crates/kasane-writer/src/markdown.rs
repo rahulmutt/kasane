@@ -762,7 +762,7 @@ fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site, ledger: Ledg
 /// did not intend, so two adjacent emphasis runs of different classes are one
 /// run (design spec §2.1, seam two). Grouping only needs the character, and
 /// `items[start]`'s is always the right one to seed with even when
-/// `items[start]` is itself vacuous: `Delim::ch()` maps both `Emph` and
+/// `items[start]` is itself vacuous: `Delim::child_ch()` maps both `Emph` and
 /// `Strong` to `*` regardless of a container's contents, so no vacuous
 /// element can seed the wrong character. The run's *class* — which of
 /// `Emph`/`Strong` actually gets spelled — is a different question, and the
@@ -794,7 +794,7 @@ fn run_len<'a>(items: impl IntoIterator<Item = Flat<'a>>, ledger: Ledger) -> usi
     let Some(d) = escape::delim(first) else {
         return 1;
     };
-    let ch = d.ch();
+    let ch = d.child_ch();
     // The run's class, decided by its first *printing* member — `None` while
     // every member so far is vacuous. This is what makes a class-keyed seam
     // answerable from inside `run_end` without circularity: the walk is left
@@ -810,7 +810,7 @@ fn run_len<'a>(items: impl IntoIterator<Item = Flat<'a>>, ledger: Ledger) -> usi
             continue;
         }
         let Some(next) = escape::delim(el) else { break };
-        if next.ch() != ch {
+        if next.child_ch() != ch {
             break;
         }
         if class_so_far.is_some_and(|cls| may_abut(cls, next, Site::RunSeam, ledger)) {
@@ -866,8 +866,8 @@ fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
 /// One of two sources [`splice_children`] draws splice candidates from — see
 /// its doc for why this one tests the character and stops at the edges, while
 /// [`same_delim_to_splice`] is keyed on the `Delim` and looks everywhere.
-fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) -> Option<usize> {
-    let ch = want.ch();
+fn edge_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger) -> Option<usize> {
+    let ch = run.ch;
     let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
     let first = children.iter().position(printing);
     let last = children.iter().rposition(printing);
@@ -875,7 +875,7 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
         let Some(inner) = escape::delim(children[idx].0) else {
             return false;
         };
-        if inner.ch() != ch {
+        if inner.child_ch() != ch {
             return false;
         }
         let site = if first == last {
@@ -885,7 +885,7 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
         } else {
             Site::TailEdge
         };
-        !may_abut(want, inner, site, ledger)
+        !may_abut(run.class, inner, site, ledger)
     })
 }
 
@@ -909,13 +909,14 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
 /// loop iteration of `splice_children`. A future cell here has to widen
 /// *this* site, or teach this function the candidate's edge position too, not
 /// just add an arm to `bit_for`.
-fn same_delim_to_splice(
-    children: &[Flat<'_>],
-    want: escape::Delim,
-    ledger: Ledger,
-) -> Option<usize> {
+fn same_delim_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger) -> Option<usize> {
     children.iter().position(|&(i, _)| {
-        escape::delim(i) == Some(want) && !may_abut(want, want, Site::Interior, ledger)
+        let Some(inner) = escape::delim(i) else {
+            return false;
+        };
+        inner == run.class
+            && inner.child_ch() == run.ch
+            && !may_abut(run.class, run.class, Site::Interior, ledger)
     })
 }
 
@@ -984,11 +985,11 @@ fn same_delim_to_splice(
 /// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
 fn splice_children<'a>(
     mut children: Vec<Flat<'a>>,
-    want: escape::Delim,
+    run: escape::Mark,
     ledger: Ledger,
 ) -> Vec<Flat<'a>> {
-    while let Some(idx) = edge_to_splice(&children, want, ledger)
-        .or_else(|| same_delim_to_splice(&children, want, ledger))
+    while let Some(idx) = edge_to_splice(&children, run, ledger)
+        .or_else(|| same_delim_to_splice(&children, run, ledger))
     {
         let (inline, depth) = children[idx];
         let (Inline::Emph(x) | Inline::Strong(x)) = inline else {
@@ -1282,7 +1283,8 @@ fn probe_edges(
         let contribution = match escape::delim(repr) {
             Some(escape::Delim::Backtick) => Edge::FIXED_PUNCT,
             Some(want @ (escape::Delim::Emph | escape::Delim::Strong)) => {
-                let inner_children = splice_children(run_children(members), want, ledger);
+                let inner_mark = escape::Mark::new(want, '*');
+                let inner_children = splice_children(run_children(members), inner_mark, ledger);
                 // Computed *before* the recursive call, not just before the
                 // flanking check below: they are this run's own outer
                 // context, and if this run itself declines, its children
@@ -1475,7 +1477,8 @@ fn emphasis_run<'a>(
     after: Flank,
     ledger: Ledger,
 ) -> RunOut<'a> {
-    let children = splice_children(run_children(members), want, ledger);
+    let run_mark = escape::Mark::new(want, '*');
+    let children = splice_children(run_children(members), run_mark, ledger);
     // `probe_edges` reaches the same open/close decision `inner.trim()`'s own
     // first and last characters used to, without rendering `inner` to get
     // there -- see its doc, and `Edge`'s, for why the old order (render,
@@ -1629,6 +1632,26 @@ fn indent_continuation(body: &str, indent: &str) -> String {
 mod tests {
     use super::*;
     use kasane_ir::*;
+
+    #[test]
+    fn a_mark_spells_its_class_with_its_chosen_character() {
+        use escape::{Delim, Mark};
+        assert_eq!(Mark::new(Delim::Emph, '*').markup(), "*");
+        assert_eq!(Mark::new(Delim::Strong, '*').markup(), "**");
+        assert_eq!(Mark::new(Delim::Emph, '_').markup(), "_");
+        assert_eq!(Mark::new(Delim::Strong, '_').markup(), "__");
+        assert_eq!(Mark::new(Delim::Backtick, '`').markup(), "`");
+    }
+
+    /// `Edge` classifies characters, and both emphasis characters classify the
+    /// same. This is why `probe_edges` and the render can disagree about the
+    /// *decision* but never about the classes, and why widening the alphabet does
+    /// not widen `Edge`'s surface (design spec 2026-08-23 §4.4).
+    #[test]
+    fn both_emphasis_characters_are_punctuation_to_the_flanking_rules() {
+        assert_eq!(class_of('*'), Flank::Punct);
+        assert_eq!(class_of('_'), Flank::Punct);
+    }
 
     #[test]
     fn renders_headings_emphasis_and_links() {
@@ -2816,7 +2839,7 @@ mod tests {
     /// Both members' children sit at the run's own two edges (the run has
     /// exactly two members, so each one's child is both a first and a last),
     /// and both children's delimiter shares the `*` character with the run's
-    /// own (`Delim::ch`, not `Delim` equality — a `Strong` and an `Emph`
+    /// own (`Delim::child_ch`, not `Delim` equality — a `Strong` and an `Emph`
     /// collide on the character even though they are different `Delim`s), so
     /// `splice_children`'s edge rule splices both away. The run then prints
     /// with only its own delimiter: one pair, not the nested two the base
@@ -3602,7 +3625,7 @@ mod tests {
     /// The defect this task closes. `Emph` wrapping nothing but a `Strong`
     /// prints `***a***`, and a parser splitting that run resolves it
     /// em-outermost — exactly what the IR meant. The old edge rule spliced the
-    /// `Strong` away because `Delim::ch()` maps both classes to `*`, and the
+    /// `Strong` away because `Delim::child_ch()` maps both classes to `*`, and the
     /// `<strong>` vanished from a document converter's output
     /// (`2026-08-16-cross-class-edge-splice-design.md` §1).
     #[test]

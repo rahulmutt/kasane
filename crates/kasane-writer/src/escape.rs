@@ -525,19 +525,68 @@ pub(crate) enum Delim {
 }
 
 impl Delim {
-    /// The character this delimiter is spelled with.
+    /// The character a **child** of a run is predicted to print.
     ///
-    /// Two delimiter runs collide when they share a character, not when they
-    /// are the same `Delim`: `*` and `**` are different classes that abut into
-    /// one `***` run a parser splits somewhere the writer did not intend, while
-    /// a backtick beside a `*` is simply two characters. Keying the rule on the
-    /// character is what states it as written rather than leaving it true by
-    /// the coincidence that this writer never spells emphasis with `_`
-    /// (design spec `2026-08-15-emphasis-seam-design.md` §2.1).
-    pub(crate) fn ch(self) -> char {
+    /// Conservative by design (design spec `2026-08-23-delimiter-choice-ordering-design.md`
+    /// §4.2). A run chooses its own character before its children render, so a
+    /// child's character is not yet decided when the splice rules need it.
+    /// Rather than recurse, they assume `*`: exact when the run chose `_`,
+    /// because a child may not take its parent's character; conservative when
+    /// the run chose `*`, where a child that could safely have taken `_` is
+    /// spliced first instead. The cost is a missed recovery, never a
+    /// corruption.
+    ///
+    /// This is *not* the character a run prints — that is [`Mark::ch`], which
+    /// is chosen per run. The two were one method until 2026-08-23 and had to
+    /// be separated when the choice became real.
+    pub(crate) fn child_ch(self) -> char {
         match self {
             Delim::Backtick => '`',
             Delim::Emph | Delim::Strong => '*',
+        }
+    }
+}
+
+/// A delimiter class together with the character a run has **chosen** to spell
+/// it with.
+///
+/// Two runs collide when they share a character, not when they share a class:
+/// `*` and `**` abut into one `***` run a parser splits somewhere the writer
+/// did not intend, while a backtick beside a `*` is simply two characters.
+/// Keying the splice rules on this value rather than on [`Delim`] is what
+/// states that rule as written, instead of leaving it true by the coincidence
+/// that this writer once never spelled emphasis with `_`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Mark {
+    pub(crate) class: Delim,
+    pub(crate) ch: char,
+}
+
+impl Mark {
+    pub(crate) fn new(class: Delim, ch: char) -> Mark {
+        debug_assert!(
+            match class {
+                Delim::Backtick => ch == '`',
+                Delim::Emph | Delim::Strong => ch == '*' || ch == '_',
+            },
+            "a {class:?} cannot be spelled with {ch:?}"
+        );
+        Mark { class, ch }
+    }
+
+    /// The literal this mark opens and closes with.
+    // Only the tests call this today; the render still spells its markup
+    // from the literal `markup: &str` parameter threaded through
+    // `emphasis_run`. A later task in this feature switches that call site
+    // to a chosen `Mark` and starts consuming this.
+    #[allow(dead_code)]
+    pub(crate) fn markup(self) -> &'static str {
+        match (self.class, self.ch) {
+            (Delim::Backtick, _) => "`",
+            (Delim::Emph, '_') => "_",
+            (Delim::Strong, '_') => "__",
+            (Delim::Strong, _) => "**",
+            (Delim::Emph, _) => "*",
         }
     }
 }
