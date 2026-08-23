@@ -32,3 +32,13 @@ hand on 2026-08-23. `ratchet_gate_cases.sh` is deliberately not extended
 (design §6.1), so in CI the length-4 union gate only ever runs in its passing
 direction — the silent-gate failure mode this repo has recorded twice. Closing
 it is a one-case extension of that script and remains available.
+
+## Wall clock
+
+Spec §4.2 and §10 both claim the implementation verifies the wall-clock cost
+of both tiers together. Measured on this machine on 2026-08-23 by running
+`cargo test -p kasane-writer --test census_len4` after the final-review fix
+wave: `finished in 6.48s` (a second run measured `6.32s`). This is a
+measurement on this machine on this date, not a universal claim — the design's
+own prediction (§4.2) is ≈5.7s on parallel threads, with a machine that has no
+second free core landing nearer 9.3s.

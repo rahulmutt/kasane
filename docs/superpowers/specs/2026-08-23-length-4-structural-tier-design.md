@@ -266,10 +266,14 @@ one-case extension of an existing script and remains available as a follow-up.
 Each of these is false the moment the tier lands, and each is corrected in the
 same commit as the code:
 
-- **`census_len4.rs`'s module doc**, final paragraph: "And this tier is
-  text-only, which is its own gap… A structural length-4 tier is the named
-  follow-up". The paragraph is rewritten to describe the tier that now sits
-  beside it, keeping the recorded history of *why* the gap existed.
+- **`census_len4.rs`'s module doc**, opening and final paragraph. The opening
+  ("The text tier at length 4, asserting zero... This one carries none, and
+  cannot rot into stale excuses, because it has no file to rot into") is the
+  first thing a reader meets, and it is false the moment the structural tier's
+  three files exist. The final paragraph: "And this tier is text-only, which
+  is its own gap… A structural length-4 tier is the named follow-up". Both are
+  rewritten to describe the tier that now sits beside it, keeping the recorded
+  history of *why* the gap existed.
 - **`census.rs`'s module doc**: "There are two tiers, and three files."
 - **`AGENTS.md`**'s census entry: "The census has two tiers, and four files";
   the description of `census_len4.rs` as "the text tier at length 4"; the

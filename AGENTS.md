@@ -427,7 +427,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   file's flanking-wall-vs-refusal split, which is a distinction by cause that no
   grep over ten thousand entries can make. Lengths 5 and 6 stay unpriced for
   structure as well as text: minutes, not seconds.
-  (`2026-08-23-length-4-structural-tier-design.md`.)
+  (`2026-08-23-length-4-structural-tier-design.md`).
   Length 4 gets a **second union**, its queue plus its permanent file, gated the
   same way. Two files rather than three, because there is no length-4 text file
   — which is also why the promotion rule has no length-4 form: that rule exists
