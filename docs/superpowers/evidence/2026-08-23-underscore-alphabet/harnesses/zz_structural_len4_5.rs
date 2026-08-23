@@ -14,8 +14,12 @@
 //! across all three revisions this item compares; only `choose_mark`'s body
 //! in `crates/kasane-writer/src/markdown.rs` differs between them.
 //!
-//! Not a test: never run in CI, never compiled as part of `crates/`. Kept
-//! only as evidence under `docs/superpowers/evidence/`.
+//! Not a test: never run in CI, never *committed* under `crates/`. Kept only
+//! as evidence under `docs/superpowers/evidence/`. The sibling sweep script
+//! does copy this file into `crates/kasane-writer/tests/` and compile it there
+//! -- inside a disposable `git worktree` it removes afterwards -- which is the
+//! only way it ever builds. This line said "never compiled as part of
+//! `crates/`" until the whole-branch review on 2026-08-23, which was false.
 mod census_support;
 use census_support::{alphabet, classify_with, Structure};
 use kasane_ir::Inline;

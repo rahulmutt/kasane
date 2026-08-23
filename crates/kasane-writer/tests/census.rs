@@ -166,8 +166,17 @@ fn the_structural_relation_ignores_intentional_run_fusion() {
 /// what keeps this vector genuinely `Inexpressible` rather than merely
 /// queued. Pinning it here keeps the third state honest if the bless path
 /// ever breaks.
+///
+/// The name says `when_letter_flanked` because the vector says `x`/`y`: the
+/// bare `[Emph([Emph([Text("a")])])]` this test held until 2026-08-23 is
+/// `Clean` now, and the letters were added to keep an `Inexpressible` pin
+/// alive rather than to keep the old name true. The bare shape's own recovery
+/// is pinned by `the_structural_relation_keeps_bare_same_class_nesting_clean`.
+///
+/// Renamed 2026-08-23 from
+/// `the_structural_relation_marks_direct_same_class_nesting_inexpressible`.
 #[test]
-fn the_structural_relation_marks_direct_same_class_nesting_inexpressible() {
+fn the_structural_relation_marks_direct_same_class_nesting_inexpressible_when_letter_flanked() {
     let seq = vec![
         Inline::Text("x".into()),
         Inline::Emph(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
@@ -189,8 +198,17 @@ fn the_structural_relation_marks_direct_same_class_nesting_inexpressible() {
 /// `Clean` at the top of a paragraph now. Letter text on both sides blocks
 /// condition 2 and forces `*` throughout, same as its sibling above, which is
 /// what keeps this vector genuinely `Inexpressible`.
+///
+/// Same as its sibling above, the name carries `when_letter_flanked` because
+/// the vector does: the bare `[Strong([Emph([Text("a")])])]` this test held
+/// until 2026-08-23 is `Clean` now, and `x`/`y` were added to keep an
+/// `Inexpressible` pin alive. The bare shape is pinned by
+/// `the_structural_relation_keeps_bare_strong_over_emph_clean`.
+///
+/// Renamed 2026-08-23 from
+/// `the_structural_relation_marks_strong_over_emph_inexpressible`.
 #[test]
-fn the_structural_relation_marks_strong_over_emph_inexpressible() {
+fn the_structural_relation_marks_strong_over_emph_inexpressible_when_letter_flanked() {
     let seq = vec![
         Inline::Text("x".into()),
         Inline::Strong(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
@@ -200,6 +218,39 @@ fn the_structural_relation_marks_strong_over_emph_inexpressible() {
         classify_with(&seq, Ledger::LICENSED),
         Structure::Inexpressible
     );
+}
+
+/// This branch's first headline recovery, asserted in the direction that says
+/// it works.
+///
+/// `<em><em>a</em></em>` had no `*`-only spelling; `_*a*_` spells it exactly,
+/// and `choose_mark` reaches that spelling for a bare `Emph[Emph[…]]` at the
+/// top of a paragraph. Until 2026-08-23 the only `census.rs` assertion about
+/// this shape was its *negative* one — the letter-flanked sibling above, which
+/// pins that the relation still says `Inexpressible` where the flanks block
+/// `_`. Nothing here said the bare shape succeeds, which is the claim the
+/// branch is actually making.
+#[test]
+fn the_structural_relation_keeps_bare_same_class_nesting_clean() {
+    let seq = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
+        "a".into(),
+    )])])];
+    assert_eq!(classify_with(&seq, Ledger::LICENSED), Structure::Clean);
+}
+
+/// The second headline recovery, in the same direction.
+///
+/// `<strong><em>a</em></strong>` had no `*`-only spelling — `***a***` always
+/// resolves em-outermost — but `__*a*__` carries both levels, and the outer
+/// `Strong` run reaches `__` for a bare `Strong[Emph[…]]`. As above, the only
+/// assertion about this shape until 2026-08-23 was the negative one on its
+/// letter-flanked variant.
+#[test]
+fn the_structural_relation_keeps_bare_strong_over_emph_clean() {
+    let seq = vec![Inline::Strong(vec![Inline::Emph(vec![Inline::Text(
+        "a".into(),
+    )])])];
+    assert_eq!(classify_with(&seq, Ledger::LICENSED), Structure::Clean);
 }
 
 /// The guard that matters most.
@@ -419,6 +470,71 @@ const INEXPRESSIBLE_HEADER: &str = "\
 #
 # Regenerate: KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census
 ";
+
+/// The one claim in [`INEXPRESSIBLE_HEADER`] that nothing else gates.
+///
+/// `permanence_ceiling` gates the 433 total. The sentence that splits it into
+/// "428, the flanking wall" and "5, a deliberate refusal" is hand-maintained
+/// prose, and it lives inside a *generated* file: `ratchet` filters `#` lines,
+/// so a hand-edit there passes the checker and is silently reverted by the
+/// next bless. Nothing compared either number against the entries until this
+/// test.
+///
+/// The five condition-4 refusals are exactly the entries that nest a `Strong`
+/// directly inside an `Emph` — three sibling `Emph`s, one of them wrapping a
+/// `Strong`, which is the shape `choose_mark`'s fourth condition declines `_`
+/// for. One grep gives the count:
+///
+/// ```text
+/// grep -c 'Emph(\[Strong' crates/kasane-writer/tests/census-inexpressible.txt
+/// ```
+#[test]
+fn the_permanent_file_holds_exactly_the_five_condition_four_refusals() {
+    const CONDITION_FOUR: [&str; 5] = [
+        r#"[Emph([Code("x")]), Emph([Strong([Text("a")])]), Emph([Emph([Text("a")])])]"#,
+        r#"[Emph([Emph([Text("a")])]), Emph([Strong([Text("a")])]), Emph([Code("x")])]"#,
+        r#"[Emph([Emph([Text("a")])]), Emph([Strong([Text("a")])]), Emph([Emph([Text("a")])])]"#,
+        r#"[Emph([Emph([Text("a")])]), Emph([Strong([Text("a")])]), Emph([Text("a")])]"#,
+        r#"[Emph([Text("a")]), Emph([Strong([Text("a")])]), Emph([Emph([Text("a")])])]"#,
+    ];
+    const FLANKING_WALL: usize = 428;
+
+    let body = std::fs::read_to_string(INEXPRESSIBLE)
+        .unwrap_or_else(|e| panic!("{INEXPRESSIBLE} must exist and be readable: {e}"));
+    let entries: Vec<&str> = body
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let found: BTreeSet<&str> = entries
+        .iter()
+        .copied()
+        .filter(|l| l.contains("Emph([Strong("))
+        .collect();
+    let want: BTreeSet<&str> = CONDITION_FOUR.into_iter().collect();
+
+    assert_eq!(
+        found, want,
+        "the condition-4 refusals in {INEXPRESSIBLE} are not the five \
+         `INEXPRESSIBLE_HEADER` describes.\n\
+         \n\
+         That header is GENERATED from the `INEXPRESSIBLE_HEADER` constant in \
+         this file, and its \"428 + 5\" split is hand-written prose no bless \
+         recomputes. Update the constant's text to match what the file now \
+         holds, re-bless, and update this test -- in the same commit, so the \
+         claim and the entries move together."
+    );
+    assert_eq!(
+        entries.len() - found.len(),
+        FLANKING_WALL,
+        "{INEXPRESSIBLE} holds {} entries, of which {} are condition-4 \
+         refusals, leaving {} in the flanking-wall class -- but \
+         `INEXPRESSIBLE_HEADER` still says {FLANKING_WALL}. Update the header \
+         constant's text and re-bless in this same commit.",
+        entries.len(),
+        found.len(),
+        entries.len() - found.len(),
+    );
+}
 
 /// The structural tier: does the emphasis structure a parser recovers match the
 /// structure the IR held?

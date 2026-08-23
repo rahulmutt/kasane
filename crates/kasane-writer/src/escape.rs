@@ -512,15 +512,29 @@ pub(crate) fn math_degrades(s: &str) -> bool {
     s.contains('$') || s.contains('\n') || s.contains('\r')
 }
 
-/// The delimiter an inline prints with, where two neighbours printing the same
-/// one would collide.
+/// The delimiter *class* an inline prints with, where two neighbours printing
+/// the same character would collide.
+///
+/// A class, not a spelling: [`Mark`] pairs one of these with the character a
+/// run has chosen for it. Every variant below describes what the class means,
+/// and none of them names a character as the only one it can print.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Delim {
     /// A code span: `` `…` ``, at whatever fence length its content forces.
     Backtick,
-    /// `*…*`.
+    /// One emphasis level, however it ends up spelled.
+    ///
+    /// This is the *class*, not the characters: a run of this class prints
+    /// either `*…*` or `_…_`, and which one is decided per run by
+    /// `markdown::choose_mark` and carried in the [`Mark`] it returns. This
+    /// variant said `*…*` outright until 2026-08-23, which was true only
+    /// while the writer had no other choice to make.
     Emph,
-    /// `**…**`.
+    /// Two emphasis levels in one delimiter, however it ends up spelled.
+    ///
+    /// The same class/character split as [`Delim::Emph`]: a run of this class
+    /// prints either `**…**` or `__…__`, chosen per run by
+    /// `markdown::choose_mark` and carried in the [`Mark`] it returns.
     Strong,
 }
 

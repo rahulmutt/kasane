@@ -270,7 +270,7 @@ fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut view = Vec::new();
     flatten_into(inls, depth, &mut view);
-    inlines_to_md_flat(view, ctx, pos, ledger, '\0')
+    inlines_to_md_flat(view, ctx, pos, ledger, None)
 }
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
@@ -296,12 +296,21 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// fused emphasis run's members' children are siblings too. Scanning IR
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
+///
+/// `parent_ch` is the delimiter character of the run this view is the *inside*
+/// of, and `None` for a view no emphasis run encloses — a paragraph, a heading,
+/// a table cell. It carries [`choose_mark`]'s third condition and is read
+/// nowhere else: a child that took its parent's character would rebuild one
+/// level down the very collision the parent chose that character to avoid
+/// (`___a___` is `<em><strong>a</strong></em>`, not two nested `<em>`s). Every
+/// run in this view is offered the same value, and a run that emits hands its
+/// *own* chosen character down to its children rather than passing this one on.
 fn inlines_to_md_flat<'a>(
     items: Vec<Flat<'a>>,
     ctx: Ctx,
     pos: Pos,
     ledger: Ledger,
-    parent_ch: char,
+    parent_ch: Option<char>,
 ) -> String {
     // The view is split at the cursor rather than held as one vector with an
     // index, and `pending` is held *reversed*, because a declined run rewrites
@@ -935,7 +944,10 @@ fn same_delim_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger
 /// where a splice only ever erases a level.
 ///
 /// Only [`choose_mark`] asks this, and only about the *unspliced* children: it
-/// is the cost of declining to splice, weighed against the cost of splicing.
+/// is one side of the trade, not a comparison of the two sides. A `true` here
+/// says a cross-class fuse exists among these children — not that declining the
+/// splice is what causes it, and not that splicing would remove the members
+/// that fuse. See [`choose_mark`]'s doc for what that costs.
 /// A run of members that all share one class is not a fusion this cares about —
 /// every character keeps its class, which is what makes adjacent-run fusion
 /// deliberate rather than a defect.
@@ -968,33 +980,107 @@ fn fuses_across_classes(children: &[Flat<'_>], ledger: Ledger) -> bool {
 /// Which character this run spells its delimiter with.
 ///
 /// The single decision point. [`emphasis_run`] and [`probe_edges`] both call
-/// it, because they must reach the same answer or
-/// `debug_assert_eq!(edge, Edge::of(&inner))` is comparing two different runs.
-/// Neither may re-derive this locally.
+/// it and neither may re-derive it locally: the probe stands in for the
+/// render, so a second copy of this rule would be a second answer that nothing
+/// compares. (They call it with the *same* rule but not always with the same
+/// context, and so do not always reach the same answer — see "The
+/// probe/render invariant" below, which is where that is made safe.)
 ///
 /// Chooses `_` where a collision would otherwise cost a container, the flanks
-/// permit it, the parent did not already take it, and keeping the children
-/// unspliced does not itself cost a class (design spec
+/// permit it, the parent did not already take it, and the children it would
+/// keep contain no cross-class fuse (design spec
 /// `2026-08-23-delimiter-choice-ordering-design.md` §3, plus the fourth
 /// condition the census ratchet forced on 2026-08-23). Otherwise `*`.
 ///
 /// The fourth condition is the one that is not about spelling. The other three
-/// ask whether `_` is *legal* and *useful*; this one asks whether declining to
-/// splice actually saves anything. A `_` run keeps its children, and kept
-/// children are neighbours in one printed line that [`run_len`] fuses by
-/// character rather than by class — so a saved `Emph` next to a `Strong` is
-/// absorbed into it and its text comes back wearing the wrong class. A splice
-/// erases an emphasis level; that fuse substitutes one, and the structural
-/// census counts a substitution as corruption and an erasure as merely
-/// inexpressible. Where the choice is between them, `*` is the lesser loss.
-/// See [`fuses_across_classes`], and
+/// ask whether `_` is *legal* and *useful*; this one weighs what keeping the
+/// children costs. A `_` run keeps its children, and kept children are
+/// neighbours in one printed line that [`run_len`] fuses by character rather
+/// than by class — so a saved `Emph` next to a `Strong` is absorbed into it and
+/// its text comes back wearing the wrong class. A splice erases an emphasis
+/// level; that fuse substitutes one, and the structural census counts a
+/// substitution as corruption and an erasure as merely inexpressible. Where
+/// the choice is between them, `*` is the lesser loss. See
+/// [`fuses_across_classes`], and
 /// `a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class`.
+///
+/// Condition 4 is **conservative**, in the same direction and for the same
+/// kind of reason `escape::Delim::child_ch` is. It does not compare the `_`
+/// world against the `*` world: [`fuses_across_classes`] asks only whether a
+/// cross-class fuse exists among the children *at all*, never whether it
+/// exists in the world where the splice is declined and not in the world where
+/// it fires. Where the fusing members are not the ones the splice would have
+/// removed, both worlds fuse identically, the `_` would have cost nothing, and
+/// it is declined anyway.
+/// `Emph([Emph([Emph a]), Text x, Emph b, Strong c])` is such a shape: the
+/// fusing pair is `[Emph b, Strong c]` at the tail, while [`edge_to_splice`]
+/// removes the head `Emph`. It prints `*axbc*`; the same shape with an `Emph c`
+/// in place of the `Strong c` prints `_*a*x*bc*_` and keeps a level. The cost
+/// is a missed recovery, never a corruption — an over-eager condition 4 only
+/// ever falls back to the splice, which is the erasure side of the very trade
+/// the condition exists to make.
+///
+/// # The probe/render invariant
+///
+/// [`emphasis_run`] renders; [`probe_edges`] is the cheap flanking probe that
+/// stands in for it; `debug_assert_eq!(edge, Edge::of(&inner))` holds the two
+/// together and compiles out of release. The probe does not always see the
+/// context the render will: for the first run in a view it falls back to
+/// `outer_before` where the render's own buffer is empty and answers
+/// [`Flank::Space`], and for the tail run it uses `outer_after` likewise (see
+/// [`probe_edges`]'s doc for why those are the right answers to *its*
+/// question). Since 2026-08-23 this function is a **second consumer** of that
+/// approximated context, and the two consumers do not read it the same way:
+/// [`can_open`]/[`can_close`] see it through `open_before`/`close_after`,
+/// which mask it to [`Flank::Space`] whenever the sub-view's own edge is
+/// whitespace, while condition 2 reads it raw.
+///
+/// So probe and render can pick *different characters for the same run*, and
+/// do. `[Text("x"), Emph([Strong([Emph([Text(" a")])])])]` renders
+/// `x *__*a*__*`: the enclosing probe evaluates that `Strong` run against
+/// [`Flank::Other`] (the `x`) and picks `**`, the render evaluates it against
+/// [`Flank::Space`] (its own empty buffer) and picks `__`, and both emit. The
+/// disagreement reaches the emit path; it is not structurally excluded from it.
+///
+/// Two things make it harmless, and both are properties of the *alphabet*
+/// rather than of either function:
+///
+/// 1. [`Edge`] records a character only through [`class_of`], and
+///    `class_of('*') == class_of('_') == Flank::Punct`. An emitting run
+///    contributes `first_class`/`last_class` of `Punct` whichever character it
+///    chose, so a character disagreement alone cannot move any field
+///    `debug_assert_eq!` compares. Pinned by
+///    `both_emphasis_characters_are_punctuation_to_the_flanking_rules`.
+/// 2. The character is not only a spelling: [`splice_children`] is keyed on
+///    it, so the `**` world splices a child the `__` world keeps and the two
+///    walk *different child views*. [`Edge`] cannot see that either, because an
+///    emitting run overwrites `first_class`/`last_class` with `Punct` and
+///    inherits only `leading_ws`/`trailing_ws`/`trailing_newline` from its
+///    sub-view — and splicing a container away removes only its delimiters,
+///    which are punctuation and never whitespace, [`emphasize`] having already
+///    hoisted a child's edge whitespace outside them. Nothing pins this half.
+///
+/// **The contract.** A third delimiter character, or a condition 2 replaced by
+/// CommonMark's exact `_` rule (which reads the flanks more finely than
+/// `!= Flank::Other`), touches neither [`probe_edges`] nor [`emphasis_run`] and
+/// breaks this coupling from here. Before either:
+///
+/// - every character this function can return must be `Flank::Punct` to
+///   [`class_of`], or point 1 fails and the probe's [`Edge`] starts recording
+///   which of the two worlds it came from;
+/// - a wider or finer rule makes probe and render disagree about the character
+///   *more often*. That is not itself a bug — only the render's choice is
+///   printed — but every such disagreement decides the enclosing run's
+///   emit/decline against a subtree that is not the one about to be printed,
+///   and point 2 is the whole of what keeps that from mattering. Point 2 is
+///   argued, not measured: widen the alphabet and it needs a differential
+///   harness, not a re-read.
 fn choose_mark(
     want: escape::Delim,
     raw_children: &[Flat<'_>],
     before: Flank,
     after: Flank,
-    parent_ch: char,
+    parent_ch: Option<char>,
     ledger: Ledger,
 ) -> escape::Mark {
     let star = escape::Mark::new(want, '*');
@@ -1009,13 +1095,20 @@ fn choose_mark(
     let flanks_permit = before != Flank::Other && after != Flank::Other;
     // Condition 3: a child taking its parent's character rebuilds the
     // collision one level down. `___a___` is `<em><strong>a</strong></em>`.
-    let parent_took_it = parent_ch == '_';
-    // Condition 4: only where declining to splice actually saves the container.
-    // The children a `_` keeps are then neighbours in one printed line, and
+    // `None` is "no enclosing emphasis run", which no character equals.
+    let parent_took_it = parent_ch == Some('_');
+    // Condition 4: refuse `_` where the children it would keep contain a
+    // cross-class fuse. Kept children are neighbours in one printed line, and
     // `run_len` fuses neighbours by character rather than by class -- so a saved
     // `Emph` beside a `Strong` is absorbed into it and comes back wearing the
     // wrong class. A splice erases a level; this substitutes one, which is
     // strictly worse, so the trade is refused.
+    //
+    // This tests the unspliced children for such a fuse *at all*; it does not
+    // ask whether the splice would have removed the member that fuses. Where
+    // the splice would not have, both worlds fuse alike and a free `_` is
+    // refused -- a missed recovery, never a corruption. The function doc traces
+    // one such shape.
     let fusion_would_cost_a_class = fuses_across_classes(raw_children, ledger);
     if collides && flanks_permit && !parent_took_it && !fusion_would_cost_a_class {
         escape::Mark::new(want, '_')
@@ -1372,6 +1465,13 @@ impl Edge {
 /// sampling past it. With that qualification, the function is exact for the
 /// reason its name claims: every run's own flanking decision matches what the real
 /// splice+rescan would reach, at any nesting depth and under any `Ledger`.
+///
+/// `parent_ch` is threaded for one reason and read in one place: it is
+/// [`choose_mark`]'s third condition, and the probe must offer it exactly what
+/// [`inlines_to_md_flat`] would offer at the same point or the two reach
+/// different rules rather than merely different answers. `None` means no
+/// enclosing emphasis run; see [`inlines_to_md_flat`] for what the condition is
+/// for.
 fn probe_edges(
     children: &[Flat<'_>],
     ctx: Ctx,
@@ -1379,7 +1479,7 @@ fn probe_edges(
     ledger: Ledger,
     outer_before: Flank,
     outer_after: Flank,
-    parent_ch: char,
+    parent_ch: Option<char>,
 ) -> Edge {
     let mut acc = Edge::NONE;
     let mut pos = pos;
@@ -1469,7 +1569,7 @@ fn probe_edges(
                     ledger,
                     running_before,
                     after_ctx,
-                    inner_mark.ch,
+                    Some(inner_mark.ch),
                 );
                 // Mirrors `emphasis_run`'s own `core.is_empty()` early return:
                 // an all-whitespace or empty sub-view gets no delimiters
@@ -1551,7 +1651,7 @@ fn probe_edges(
                     );
                     let mut view = Vec::new();
                     flatten_into(inlines, depth + 1, &mut view);
-                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after, '\0')
+                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after, None)
                 }
             },
         };
@@ -1596,6 +1696,12 @@ enum RunOut<'a> {
 /// There is no per-member `pos` bookkeeping: the scan below owns the four `Pos`
 /// rules and applies them once per run member exactly as the outer loop does
 /// for any other neighbour.
+///
+/// `parent_ch` is the delimiter character of the run enclosing this one, and
+/// `None` where nothing encloses it. It is handed straight to [`choose_mark`]
+/// as its third condition and is read nowhere else here; what this run passes
+/// *down* is `run_mark.ch`, its own choice, never this. See
+/// [`inlines_to_md_flat`] for why a child may not take its parent's character.
 // Eight plain params, each threaded straight through from `inlines_to_md_flat`'s
 // one call site with no natural sub-grouping; a struct would just relocate the
 // noise.
@@ -1608,7 +1714,7 @@ fn emphasis_run<'a>(
     before: Flank,
     after: Flank,
     ledger: Ledger,
-    parent_ch: char,
+    parent_ch: Option<char>,
 ) -> RunOut<'a> {
     let raw = run_children(members);
     let run_mark = choose_mark(want, &raw, before, after, parent_ch, ledger);
@@ -1619,7 +1725,15 @@ fn emphasis_run<'a>(
     // read four characters off the result, then on a decline throw the
     // whole rendered string away and have the caller re-render the same
     // subtree) cost `2^depth` for a chain of `depth` nested declines.
-    let edge = probe_edges(&children, ctx, pos, ledger, before, after, run_mark.ch);
+    let edge = probe_edges(
+        &children,
+        ctx,
+        pos,
+        ledger,
+        before,
+        after,
+        Some(run_mark.ch),
+    );
     // An all-whitespace or empty view gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
     // classify, so the flanking question does not arise. This is the one
@@ -1631,7 +1745,13 @@ fn emphasis_run<'a>(
     // "prints, but only whitespace" leave neither field set), so matching
     // both at once is exhaustive, not just convenient.
     let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
-        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger, run_mark.ch));
+        return RunOut::Emitted(inlines_to_md_flat(
+            children,
+            ctx,
+            pos,
+            ledger,
+            Some(run_mark.ch),
+        ));
     };
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
@@ -1666,7 +1786,7 @@ fn emphasis_run<'a>(
         // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
         // context-threading fix in this same round did not remove it for
         // free, and restructuring further was out of scope for the round.
-        let inner = inlines_to_md_flat(children, ctx, pos, ledger, run_mark.ch);
+        let inner = inlines_to_md_flat(children, ctx, pos, ledger, Some(run_mark.ch));
         // The one maintainability cost of computing the flanking edges without
         // rendering is that two functions now have to agree about them, and an
         // edit to either could desynchronise them in silence. This path
@@ -1867,21 +1987,21 @@ mod tests {
                 Delim::Emph,
                 Flank::Space,
                 Flank::Space,
-                '\0',
+                None,
                 Mark::new(Delim::Emph, '_'),
             ),
             (
                 Delim::Strong,
                 Flank::Punct,
                 Flank::Punct,
-                '\0',
+                None,
                 Mark::new(Delim::Strong, '_'),
             ),
             (
                 Delim::Emph,
                 Flank::Other,
                 Flank::Other,
-                '*',
+                Some('*'),
                 Mark::new(Delim::Emph, '*'),
             ),
         ] {
@@ -1893,9 +2013,17 @@ mod tests {
     }
 
     /// `Edge` classifies characters, and both emphasis characters classify the
-    /// same. This is why `probe_edges` and the render can disagree about the
-    /// *decision* but never about the classes, and why widening the alphabet does
-    /// not widen `Edge`'s surface (design spec 2026-08-23 §4.4).
+    /// same.
+    ///
+    /// This is point 1 of the probe/render contract written on `choose_mark`.
+    /// `probe_edges` and the render are handed different context in two
+    /// documented places, so they can choose different characters for the same
+    /// run — `[Text("x"), Emph([Strong([Emph([Text(" a")])])])]` is a shape
+    /// where they do — and this equality is the whole of why that cannot move
+    /// any field `debug_assert_eq!(edge, Edge::of(&inner))` compares. It is
+    /// also why widening the alphabet does not widen `Edge`'s surface (design
+    /// spec 2026-08-23 §4.4), *provided* the character added is punctuation to
+    /// `class_of` too — which is the assertion this test would have to grow.
     #[test]
     fn both_emphasis_characters_are_punctuation_to_the_flanking_rules() {
         assert_eq!(class_of('*'), Flank::Punct);
@@ -4086,20 +4214,26 @@ mod tests {
         assert_eq!(recovered(inls), "a");
     }
 
-    /// The control for `bit_for`'s absence of an `(Emph, Emph, WholeRun)` arm.
-    /// A same-class sole child is *not* licensed to abut, so before
-    /// 2026-08-23 it had to keep splicing; `same_delim_to_splice` would catch
-    /// it anyway (its own `Site::Interior` query, unconditionally true
-    /// today), which is precisely why `edge_to_splice` tests the site itself
-    /// rather than relying on the other rule's ordering (design spec §3.2).
+    /// Until 2026-08-23 this was the control for `bit_for`'s absence of an
+    /// `(Emph, Emph, WholeRun)` arm: a same-class sole child is *not* licensed
+    /// to abut, so `edge_to_splice` had to keep splicing it, which is why that
+    /// rule tests the site itself rather than relying on the other rule's
+    /// ordering (design spec §3.2).
     ///
-    /// Since 2026-08-23 that same collision is condition 1 of `choose_mark`'s
-    /// rule, so the outer run now spells itself `_` instead of splicing, and
-    /// the inner `Emph` survives as its own `*a*`
-    /// (`a_nested_container_survives_by_spelling_the_outer_run_with_an_underscore`
-    /// pins this shape directly; this test's own value is the control on the
-    /// ledger mechanism that lets the collision fire at all, not a second
-    /// pin of the outcome).
+    /// It is not that control any more, and this doc claimed it still was
+    /// until the whole-branch review. The shape cannot distinguish that cell:
+    /// `choose_mark`'s condition 1 is already satisfied by
+    /// `same_delim_to_splice`'s own `Site::Interior` query, which no ledger
+    /// licenses, so the outer run spells itself `_` and prints `_*a*_`
+    /// whichever way `(Emph, Emph, WholeRun)` reads — and once `_` is chosen
+    /// neither splice rule reaches `may_abut` at all, both bailing on
+    /// `inner.child_ch() != run.ch` first. The guarantee that an unlisted
+    /// triple stays refused is held by `an_unlisted_triple_is_refused`, which
+    /// asserts `!may_abut(Emph, Emph, Site::WholeRun, Ledger::LICENSED)`
+    /// directly and cannot be satisfied by a writer that stopped asking.
+    ///
+    /// What this test is now is a second pin of the recovery itself, beside
+    /// `a_nested_container_survives_by_spelling_the_outer_run_with_an_underscore`.
     ///
     /// Renamed 2026-08-23 from `an_emph_run_wrapping_only_an_emph_is_still_spliced`.
     #[test]

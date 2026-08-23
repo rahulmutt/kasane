@@ -222,4 +222,8 @@ docs/superpowers/evidence/2026-08-23-underscore-alphabet/harnesses/structural-le
 
 It builds and runs three separate worktrees (~20s each in release once cargo's
 registry cache is warm) and cleans them up on exit; it is evidence, not a
-test — never compiled under `crates/`, never run in CI.
+test — never *committed* under `crates/`, never run in CI. (The sweep does
+`cp` the harness into `$wt/crates/kasane-writer/tests/` and compile it there,
+inside a disposable worktree it then removes; this line said "never compiled
+under `crates/`", which was false, until the whole-branch review on
+2026-08-23.)
