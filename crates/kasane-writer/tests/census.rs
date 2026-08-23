@@ -21,7 +21,10 @@
 //! census`, and read the diff: it is the exact list of shapes your change
 //! fixed or broke, which is the evidence a reviewer wants.
 //!
-//! There are two tiers, and three files. The text tier above compares what a
+//! There are two tiers here, and three files — and since 2026-08-23 both tiers
+//! run again at length 4 in `census_len4.rs`, where the text tier carries no
+//! file because its answer is zero and the structural tier carries three of its
+//! own. The text tier above compares what a
 //! parser recovers against `kasane_gfm::rendered_text`. The **structural**
 //! tier compares, for each character, the stack of emphasis containers
 //! enclosing it on both sides, and runs only where the text tier already

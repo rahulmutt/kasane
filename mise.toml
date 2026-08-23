@@ -69,6 +69,22 @@ run = ["cargo fmt --all -- --check",
 [tasks.convert]
 run = "cargo run -p kasane-cli --"
 
+# One command for both tiers. Blessing was a single `cargo test --test census`
+# until the length-4 structural tier arrived; with two binaries to bless, a
+# human who remembers only one leaves the other's files stale. That failure is
+# loud -- CI fails on the un-blessed tier -- but this removes the trap rather
+# than relying on the alarm, and gives AGENTS.md one command to name.
+#
+# It does NOT raise either permanence ceiling: a bless writes the shape files
+# and stops, so a growing permanent file still leaves the test failing until a
+# human raises the number in the same commit.
+[tasks.census-bless]
+description = "Regenerate every census ratchet file, both tiers"
+run = [
+  "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census",
+  "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census_len4",
+]
+
 # The other half of the census ratchet. `cargo test` proves the allowlist files
 # match reality (census.rs's `ratchet` fails in both directions); this proves
 # they only ever got better. It compares committed file to committed file across
