@@ -45,36 +45,25 @@ use kasane_ir::Inline;
 use kasane_writer::Ledger;
 use std::collections::BTreeSet;
 
-/// Every sequence of length 4 over the census alphabet round-trips its text.
+/// Every sequence of length 4 over the census alphabet, handed to `f` one at a
+/// time.
 ///
-/// Shapes are built by odometer rather than by `shapes()`, which is fixed at
-/// lengths 1-3. The corrupt list is capped when reported so a regression prints
-/// a readable failure instead of 130k lines.
-#[test]
-fn no_shape_of_length_four_loses_text() {
+/// Both tiers in this file walk the same 19^4 = 130,321 shapes, by odometer
+/// rather than by `shapes()`, which is fixed at lengths 1-3 — and streamed
+/// rather than materialized, since a `Vec` of 130,321 shapes held at once is a
+/// cost the odometer does not pay. One carry loop, called twice: two copies in
+/// one file is the drift `census_support` exists to prevent, one file closer
+/// in.
+fn for_each_length_four_shape(mut f: impl FnMut(&[Inline])) {
     let a = alphabet();
     let n = a.len();
-    let mut corrupt: Vec<String> = Vec::new();
     let mut idx = [0usize; 4];
     loop {
         let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
-        if !text_is_clean(&seq, Ledger::LICENSED) {
-            corrupt.push(format!("{seq:?}"));
-        }
+        f(&seq);
         let mut k = 4;
         loop {
             if k == 0 {
-                assert!(
-                    corrupt.is_empty(),
-                    "{} shape(s) of length 4 lose text; first 20:\n  {}",
-                    corrupt.len(),
-                    corrupt
-                        .iter()
-                        .take(20)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n  ")
-                );
                 return;
             }
             k -= 1;
@@ -85,6 +74,31 @@ fn no_shape_of_length_four_loses_text() {
             idx[k] = 0;
         }
     }
+}
+
+/// Every sequence of length 4 over the census alphabet round-trips its text.
+///
+/// The corrupt list is capped when reported so a regression prints a readable
+/// failure instead of 130k lines.
+#[test]
+fn no_shape_of_length_four_loses_text() {
+    let mut corrupt: Vec<String> = Vec::new();
+    for_each_length_four_shape(|seq| {
+        if !text_is_clean(seq, Ledger::LICENSED) {
+            corrupt.push(format!("{seq:?}"));
+        }
+    });
+    assert!(
+        corrupt.is_empty(),
+        "{} shape(s) of length 4 lose text; first 20:\n  {}",
+        corrupt.len(),
+        corrupt
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
 }
 
 const LEN4_STRUCTURE_ALLOWLIST: &str = concat!(
@@ -133,40 +147,22 @@ const LEN4_INEXPRESSIBLE_HEADER: &str = "\
 
 /// Every sequence of length 4 over the census alphabet, classified.
 ///
-/// Built by odometer rather than by `shapes()`, which is fixed at lengths 1-3,
-/// and streamed rather than materialized: a `Vec` of 130,321 shapes held at
-/// once is a cost the odometer does not pay. Returns only the two non-`Clean`
-/// sets, because those are the two the ratchet gates.
+/// Walks the same shapes as `no_shape_of_length_four_loses_text`, via
+/// `for_each_length_four_shape`. Returns only the two non-`Clean` sets,
+/// because those are the two the ratchet gates.
 fn classify_every_length_four_shape() -> (BTreeSet<String>, BTreeSet<String>) {
-    let a = alphabet();
-    let n = a.len();
     let mut corrupt = BTreeSet::new();
     let mut inexpressible = BTreeSet::new();
-    let mut idx = [0usize; 4];
-    loop {
-        let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
-        match classify_with(&seq, Ledger::LICENSED) {
-            Structure::Clean => {}
-            Structure::Corrupt => {
-                corrupt.insert(format!("{seq:?}"));
-            }
-            Structure::Inexpressible => {
-                inexpressible.insert(format!("{seq:?}"));
-            }
+    for_each_length_four_shape(|seq| match classify_with(seq, Ledger::LICENSED) {
+        Structure::Clean => {}
+        Structure::Corrupt => {
+            corrupt.insert(format!("{seq:?}"));
         }
-        let mut k = 4;
-        loop {
-            if k == 0 {
-                return (corrupt, inexpressible);
-            }
-            k -= 1;
-            idx[k] += 1;
-            if idx[k] < n {
-                break;
-            }
-            idx[k] = 0;
+        Structure::Inexpressible => {
+            inexpressible.insert(format!("{seq:?}"));
         }
-    }
+    });
+    (corrupt, inexpressible)
 }
 
 /// The structural tier at length 4 — the gate that was missing.

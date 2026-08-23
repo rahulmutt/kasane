@@ -312,36 +312,34 @@ const LEN4_INEXPRESSIBLE_HEADER: &str = "\
 ";
 ```
 
-Add the enumeration helper and the test:
+Add the enumeration helper and the test. The enumeration is shared with the
+pre-existing text tier in this file (`no_shape_of_length_four_loses_text`),
+which also walks all 130,321 length-4 shapes by the same odometer: that
+function is rewritten in this step to call the shared helper instead of
+carrying its own copy of the carry loop, so the two tiers in this file share
+one implementation rather than drifting as two:
 
 ```rust
-/// Every sequence of length 4 over the census alphabet, classified.
+/// Every sequence of length 4 over the census alphabet, handed to `f` one at a
+/// time.
 ///
-/// Built by odometer rather than by `shapes()`, which is fixed at lengths 1-3,
-/// and streamed rather than materialized: a `Vec` of 130,321 shapes held at
-/// once is a cost the odometer does not pay. Returns only the two non-`Clean`
-/// sets, because those are the two the ratchet gates.
-fn classify_every_length_four_shape() -> (BTreeSet<String>, BTreeSet<String>) {
+/// Both tiers in this file walk the same 19^4 = 130,321 shapes, by odometer
+/// rather than by `shapes()`, which is fixed at lengths 1-3 — and streamed
+/// rather than materialized, since a `Vec` of 130,321 shapes held at once is a
+/// cost the odometer does not pay. One carry loop, called twice: two copies in
+/// one file is the drift `census_support` exists to prevent, one file closer
+/// in.
+fn for_each_length_four_shape(mut f: impl FnMut(&[Inline])) {
     let a = alphabet();
     let n = a.len();
-    let mut corrupt = BTreeSet::new();
-    let mut inexpressible = BTreeSet::new();
     let mut idx = [0usize; 4];
     loop {
         let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
-        match classify_with(&seq, Ledger::LICENSED) {
-            Structure::Clean => {}
-            Structure::Corrupt => {
-                corrupt.insert(format!("{seq:?}"));
-            }
-            Structure::Inexpressible => {
-                inexpressible.insert(format!("{seq:?}"));
-            }
-        }
+        f(&seq);
         let mut k = 4;
         loop {
             if k == 0 {
-                return (corrupt, inexpressible);
+                return;
             }
             k -= 1;
             idx[k] += 1;
@@ -351,6 +349,26 @@ fn classify_every_length_four_shape() -> (BTreeSet<String>, BTreeSet<String>) {
             idx[k] = 0;
         }
     }
+}
+
+/// Every sequence of length 4 over the census alphabet, classified.
+///
+/// Walks the same shapes as `no_shape_of_length_four_loses_text`, via
+/// `for_each_length_four_shape`. Returns only the two non-`Clean` sets,
+/// because those are the two the ratchet gates.
+fn classify_every_length_four_shape() -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut corrupt = BTreeSet::new();
+    let mut inexpressible = BTreeSet::new();
+    for_each_length_four_shape(|seq| match classify_with(seq, Ledger::LICENSED) {
+        Structure::Clean => {}
+        Structure::Corrupt => {
+            corrupt.insert(format!("{seq:?}"));
+        }
+        Structure::Inexpressible => {
+            inexpressible.insert(format!("{seq:?}"));
+        }
+    });
+    (corrupt, inexpressible)
 }
 
 /// The structural tier at length 4 — the gate that was missing.
