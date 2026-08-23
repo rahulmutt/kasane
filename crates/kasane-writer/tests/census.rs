@@ -21,7 +21,10 @@
 //! census`, and read the diff: it is the exact list of shapes your change
 //! fixed or broke, which is the evidence a reviewer wants.
 //!
-//! There are two tiers, and three files. The text tier above compares what a
+//! There are two tiers here, and three files — and since 2026-08-23 both tiers
+//! run again at length 4 in `census_len4.rs`, where the text tier carries no
+//! file because its answer is zero and the structural tier carries three of its
+//! own. The text tier above compares what a
 //! parser recovers against `kasane_gfm::rendered_text`. The **structural**
 //! tier compares, for each character, the stack of emphasis containers
 //! enclosing it on both sides, and runs only where the text tier already
@@ -52,8 +55,8 @@
 mod census_support;
 
 use census_support::{
-    classify_with, context_text, context_walks_with, ir_context, parsed_text, render, shapes,
-    Structure,
+    blessing, classify_with, context_text, context_walks_with, ir_context, parsed_text,
+    permanence_ceiling, ratchet, render, shapes, Structure,
 };
 use kasane_ir::Inline;
 use kasane_writer::Ledger;
@@ -278,36 +281,17 @@ const INEXPRESSIBLE: &str = concat!(
     "/tests/census-inexpressible.txt"
 );
 
-const PERMANENT_CEILING: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/census-permanent-count.txt"
-);
-
-/// Whether this run is regenerating the ratchet files rather than checking
-/// them.
-///
-/// Spelled once and shared, because [`ratchet`] and [`permanence_ceiling`]
-/// disagreeing about what a bless is would let one of them write while the
-/// other asserts against the file it just changed.
-fn blessing() -> bool {
-    std::env::var_os("KASANE_CENSUS_BLESS").is_some()
-}
-
-/// The most entries `census-inexpressible.txt` may hold.
-///
-/// A **ceiling**, not a count: the permanent file shrinking is always an
-/// improvement, so this is only ever compared as an upper bound and a shrink
-/// needs no edit. A bless *lowers* it to match — safe, since lowering only
-/// tightens the gate — and never raises it.
+/// The ceiling on `census-inexpressible.txt`, read by
+/// `census_support::permanence_ceiling`.
 ///
 /// Raising it is a hand edit, and that asymmetry is the entire point. Moving a
 /// shape into the permanent file asserts that *no writer change can ever fix
 /// it*, which is the one claim in this census that nothing downstream
 /// re-examines: the queue is worked down item by item, but permanence is read
 /// as settled. `KASANE_CENSUS_BLESS=1` must therefore not be able to make that
-/// claim on its own — it writes the three shape files and stops here, so a
-/// growing permanent file leaves this test failing until a human raises the
-/// number in the same commit. That is a deliberately visible one-line diff.
+/// claim on its own — it writes the three shape files and stops, so a growing
+/// permanent file leaves the test failing until a human raises the number in
+/// the same commit. That is a deliberately visible one-line diff.
 ///
 /// The gate exists because the claim went wrong at scale once already. A probe
 /// on 2026-08-17 searched every `*`/`_` spelling of each shape in this file and
@@ -322,65 +306,15 @@ fn blessing() -> bool {
 /// from 1,984 to 433 on 2026-08-23. The permanence claim was ~78% wrong, for a
 /// cause nobody had named.
 ///
-/// And once, on this branch, the gate spoke in the other direction. The feature
+/// And once, on that branch, the gate spoke in the other direction. The feature
 /// commit's bless lowered the ceiling to 428 while five shapes were sitting in
 /// the queue that belonged here; fixing that had to *raise* it back to 433 by
 /// hand, in the commit that needed it. Lowering is the cheap direction and it
 /// is also the direction that can quietly spend headroom a later fix needs.
-fn permanence_ceiling() -> usize {
-    let raw = std::fs::read_to_string(PERMANENT_CEILING)
-        .unwrap_or_else(|e| panic!("{PERMANENT_CEILING} must exist and be readable: {e}"));
-    raw.trim()
-        .parse()
-        .unwrap_or_else(|e| panic!("{PERMANENT_CEILING} must hold a single integer: {e}"))
-}
-
-/// Bless or check one ratchet file, two-directionally: a shape that is in
-/// `found` but not the file fails, and a shape in the file but not `found`
-/// fails too, so the file can neither grow silently nor rot into stale
-/// excuses.
-///
-/// `#`-prefixed lines are comments, which is how the permanent file carries its
-/// header.
-fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str>) {
-    if blessing() {
-        let mut body = header.unwrap_or("").to_string();
-        body.extend(found.iter().map(|l| format!("{l}\n")));
-        std::fs::write(path, body).expect("writing the allowlist");
-        return;
-    }
-
-    let known: BTreeSet<String> = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("{path} must exist -- bless it with KASANE_CENSUS_BLESS=1"))
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
-        .collect();
-
-    let new: Vec<&String> = found.difference(&known).collect();
-    let gone: Vec<&String> = known.difference(found).collect();
-
-    assert!(
-        new.is_empty(),
-        "{} shape(s) newly {noun} -- bless them into {path} \
-         (KASANE_CENSUS_BLESS=1 does it for you):\n{}",
-        new.len(),
-        new.iter()
-            .take(10)
-            .map(|s| format!("  {s}\n"))
-            .collect::<String>()
-    );
-    assert!(
-        gone.is_empty(),
-        "{} listed shape(s) are no longer {noun} -- delete them from {path} \
-         (KASANE_CENSUS_BLESS=1 does it for you):\n{}",
-        gone.len(),
-        gone.iter()
-            .take(10)
-            .map(|s| format!("  {s}\n"))
-            .collect::<String>()
-    );
-}
+const PERMANENT_CEILING: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/census-permanent-count.txt"
+);
 
 const INEXPRESSIBLE_HEADER: &str = "\
 # Shapes whose structure THIS WRITER DOES NOT EXPRESS.
@@ -572,7 +506,7 @@ fn inline_structure_survives_rendering_for_every_short_sequence() {
     // ratchets so a shape that is merely unlisted is reported by the specific
     // error rather than by this one, and so `inexpressible.len()` is the size
     // the file actually has once a passing run is done with it.
-    let ceiling = permanence_ceiling();
+    let ceiling = permanence_ceiling(PERMANENT_CEILING);
     let ceiling = if blessing() && inexpressible.len() < ceiling {
         std::fs::write(PERMANENT_CEILING, format!("{}\n", inexpressible.len()))
             .expect("lowering the permanence ceiling");

@@ -26,6 +26,7 @@
 use kasane_ir::{AssetBag, Block, BlockId, Inline, NoteId, RefTarget};
 use kasane_writer::Ledger;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use std::collections::BTreeSet;
 
 pub fn alphabet() -> Vec<Inline> {
     let t = |s: &str| Inline::Text(s.to_string());
@@ -416,4 +417,89 @@ pub fn classify_with(seq: &[Inline], ledger: Ledger) -> Structure {
         return Structure::Inexpressible;
     }
     Structure::Corrupt
+}
+
+/// Whether this run is regenerating the ratchet files rather than checking
+/// them.
+///
+/// Spelled once and shared by every tier, because two readers disagreeing
+/// about what a bless is would let one of them write while the other asserts
+/// against the file it just changed. It lived in `census.rs` until the
+/// length-4 structural tier needed it too; a second copy there would have been
+/// that same hazard, one file further away.
+pub fn blessing() -> bool {
+    std::env::var_os("KASANE_CENSUS_BLESS").is_some()
+}
+
+/// The most entries a permanent file may hold.
+///
+/// A **ceiling**, not a count: a permanent file shrinking is always an
+/// improvement, so this is only ever compared as an upper bound and a shrink
+/// needs no edit. A bless *lowers* it to match — safe, since lowering only
+/// tightens the gate — and never raises it. Raising it is a hand edit, and
+/// that asymmetry is the entire point; see `PERMANENT_CEILING`'s doc in
+/// `census.rs` for what went wrong when the claim was made at scale without
+/// one.
+///
+/// Takes its path rather than closing over one, because there is a permanent
+/// file per length and a helper that could only read the length-3 one would be
+/// copied rather than reused.
+pub fn permanence_ceiling(path: &str) -> usize {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{path} must exist and be readable: {e}"));
+    raw.trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("{path} must hold a single integer: {e}"))
+}
+
+/// Bless or check one ratchet file, two-directionally: a shape that is in
+/// `found` but not the file fails, and a shape in the file but not `found`
+/// fails too, so the file can neither grow silently nor rot into stale
+/// excuses.
+///
+/// `#`-prefixed lines are comments, which is how a permanent file carries its
+/// generated header.
+///
+/// Note that the first assertion **short-circuits the second**: a run that
+/// finds newly-corrupt shapes panics before it can report shapes that are no
+/// longer corrupt. A caller that needs both directions of one file in one
+/// look must bless and diff, not read a single failure.
+pub fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str>) {
+    if blessing() {
+        let mut body = header.unwrap_or("").to_string();
+        body.extend(found.iter().map(|l| format!("{l}\n")));
+        std::fs::write(path, body).expect("writing the allowlist");
+        return;
+    }
+
+    let known: BTreeSet<String> = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("{path} must exist -- bless it with KASANE_CENSUS_BLESS=1"))
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+
+    let new: Vec<&String> = found.difference(&known).collect();
+    let gone: Vec<&String> = known.difference(found).collect();
+
+    assert!(
+        new.is_empty(),
+        "{} shape(s) newly {noun} -- bless them into {path} \
+         (KASANE_CENSUS_BLESS=1 does it for you):\n{}",
+        new.len(),
+        new.iter()
+            .take(10)
+            .map(|s| format!("  {s}\n"))
+            .collect::<String>()
+    );
+    assert!(
+        gone.is_empty(),
+        "{} listed shape(s) are no longer {noun} -- delete them from {path} \
+         (KASANE_CENSUS_BLESS=1 does it for you):\n{}",
+        gone.len(),
+        gone.iter()
+            .take(10)
+            .map(|s| format!("  {s}\n"))
+            .collect::<String>()
+    );
 }

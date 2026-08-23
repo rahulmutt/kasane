@@ -69,6 +69,31 @@ run = ["cargo fmt --all -- --check",
 [tasks.convert]
 run = "cargo run -p kasane-cli --"
 
+# One command for both tiers. Blessing was a single `cargo test --test census`
+# until the length-4 structural tier arrived; with two binaries to bless, a
+# human who remembers only one leaves the other's files stale. That failure is
+# loud -- CI fails on the un-blessed tier -- but this removes the trap rather
+# than relying on the alarm, and gives AGENTS.md one command to name.
+#
+# It does NOT raise either permanence ceiling: a bless writes the shape files
+# and stops, so a growing permanent file still leaves the test failing until a
+# human raises the number in the same commit.
+#
+# `run` is fail-fast: mise stops at the first non-zero exit. Under
+# KASANE_CENSUS_BLESS=1 the `census` binary still runs its own split test
+# (`the_permanent_file_holds_exactly_the_five_condition_four_refusals`), which
+# fails whenever the length-3 split moved -- exactly the moment you are
+# blessing. That aborts here having rewritten the length-3 files and not the
+# length-4 ones: a real but recoverable rough edge, loud (CI fails on the
+# un-blessed tier) with an easy fix -- correct the split constant census.rs
+# expects and re-run this task.
+[tasks.census-bless]
+description = "Regenerate every census ratchet file, both tiers"
+run = [
+  "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census",
+  "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census_len4",
+]
+
 # The other half of the census ratchet. `cargo test` proves the allowlist files
 # match reality (census.rs's `ratchet` fails in both directions); this proves
 # they only ever got better. It compares committed file to committed file across
@@ -94,6 +119,9 @@ text="$dir/census-known-corrupt.txt"
 queue="$dir/census-known-structure-corrupt.txt"
 perm="$dir/census-inexpressible.txt"
 ceil="$dir/census-permanent-count.txt"
+q4="$dir/census-len4-known-structure-corrupt.txt"
+p4="$dir/census-len4-inexpressible.txt"
+ceil4="$dir/census-len4-permanent-count.txt"
 
 # The revision to measure against. On a PR this is the merge base with main; on
 # a push to main it resolves to HEAD itself, so every set compares equal and the
@@ -121,7 +149,7 @@ at_base() {
 }
 at_head() { awk '!/^#/ && NF' "$1" | LC_ALL=C sort -u; }
 
-for f in "$text" "$queue" "$perm"; do
+for f in "$text" "$queue" "$perm" "$q4" "$p4"; do
   n="$(basename "$f")"
   if at_base "$f" > "$tmp/base.$n" 2>/dev/null; then :; else
     echo "SKIP $n -- absent at the base, so there is no baseline to ratchet against" >&2
@@ -147,6 +175,16 @@ for side in base head; do
   LC_ALL=C sort -u "$tmp/$side.$tq" "$tmp/$side.$tp" "$tmp/$side.$tt" > "$tmp/$side.union"
 done
 
+# The length-4 union. Two files, not three: there is no length-4 text file,
+# because that tier asserts zero and carries no allowlist by design. So the
+# promotion rule below -- structure queue may grow only where the text queue
+# shrank -- has no length-4 form either. It exists to PERMIT a growth the union
+# would otherwise forbid, and at length 4 there is no such growth to permit.
+tq4="$(basename "$q4")"; tp4="$(basename "$p4")"
+for side in base head; do
+  LC_ALL=C sort -u "$tmp/$side.$tq4" "$tmp/$side.$tp4" > "$tmp/$side.union4"
+done
+
 fail=0
 printf '%-8s %8s %8s %8s   %s\\n' set base head delta verdict
 # `gate` says whether an addition to this set is a failure. The permanent file
@@ -157,13 +195,15 @@ printf '%-8s %8s %8s %8s   %s\\n' set base head delta verdict
 # is what makes the move safe to allow -- it forbids a shape becoming corrupt
 # that was not, so a growing permanent file can only be drawing from the queue.
 check() { # label base-set head-set gate skip-marker
-  local b h added n_b n_h verdict
+  local b h added n_b n_h verdict skipped
   b="$2"; h="$3"
   n_b="$(wc -l < "$b" | tr -d ' ')"; n_h="$(wc -l < "$h" | tr -d ' ')"
   added="$(comm -13 "$b" "$h")"
   verdict="ok"
+  skipped=0
   if [ -n "${5:-}" ] && [ -f "$5" ]; then
     verdict="skipped (no baseline)"
+    skipped=1
   elif [ -n "$added" ]; then
     local n_added
     n_added="$(printf '%s\\n' "$added" | wc -l | tr -d ' ')"
@@ -175,7 +215,12 @@ check() { # label base-set head-set gate skip-marker
     fi
   fi
   printf '%-8s %8s %8s %+8d   %s\\n' "$1" "$n_b" "$n_h" "$((n_h - n_b))" "$verdict"
-  if [ "$4" = gate ] && [ -n "$added" ]; then
+  # `skipped` guards this dump too: a skipped baseline reads its whole file as
+  # "added" (there is nothing yet to diff against), and without this check
+  # that printed ten sample shapes under a row that already says "skipped (no
+  # baseline)" with no verdict explaining them -- easy to misread as a failure
+  # on exactly the CI run that introduces the file.
+  if [ "$4" = gate ] && [ "$skipped" -eq 0 ] && [ -n "$added" ]; then
     # `sed -n 1,10p`, not `head -10`: head closes the pipe after ten lines,
     # which SIGPIPEs the writer, and under `set -e -o pipefail` that aborted
     # this script before it could finish the table or print its summary. sed
@@ -218,28 +263,45 @@ fi
 check perm  "$tmp/base.$tp"    "$tmp/head.$tp"    report ""
 check union "$tmp/base.union"  "$tmp/head.union"  gate   ""
 
-# The permanent file's own gate is the ceiling asserted by census.rs. Here we
-# only forbid raising it gratuitously: a raise is how a human states "these
-# shapes can never be fixed", so it must come with shapes that actually moved
-# in. Without this, the number could drift upward and pre-authorise a later
-# bless -- which is precisely the reviewable moment the ceiling exists to
-# create.
-if git cat-file -e "$base:$ceil" 2>/dev/null; then
-  cb="$(git show "$base:$ceil" | tr -d '[:space:]')"
-  ch="$(tr -d '[:space:]' < "$ceil")"
-  grew="$(comm -13 "$tmp/base.$tp" "$tmp/head.$tp" | wc -l | tr -d ' ')"
-  echo
+# The length-4 union skips while either of its files is absent at the base.
+# Unlike the length-3 files, these were introduced by the branch that added the
+# length-4 structural tier -- so on that branch, and on any branch whose merge
+# base predates it, the whole file reads as added and an ungated skip-less check
+# would fail on its own introduction. The marker disappears on the first merge
+# base that has both files, after which this gates like any other.
+if [ -f "$tmp/skip.$tq4" ] || [ -f "$tmp/skip.$tp4" ]; then
+  touch "$tmp/skip.union4"
+fi
+check queue4 "$tmp/base.$tq4"   "$tmp/head.$tq4"   report "$tmp/skip.$tq4"
+check perm4  "$tmp/base.$tp4"   "$tmp/head.$tp4"   report "$tmp/skip.$tp4"
+check union4 "$tmp/base.union4" "$tmp/head.union4" gate   "$tmp/skip.union4"
+
+# A raise is how a human states "these shapes can never be fixed", so it must
+# come with shapes that actually moved in. Without this, the number could drift
+# upward and pre-authorise a later bless -- precisely the reviewable moment the
+# ceiling exists to create. Written once and called per length, because two
+# copies would drift the way the census's own helpers were about to.
+ceiling_check() { # label ceiling-path base-perm head-perm
+  local label="$1" cpath="$2" bperm="$3" hperm="$4" cb ch grew
+  if ! git cat-file -e "$base:$cpath" 2>/dev/null; then
+    echo "ceiling($label): absent at the base -- introduced by this change, nothing to compare"
+    return 0
+  fi
+  cb="$(git show "$base:$cpath" | tr -d '[:space:]')"
+  ch="$(tr -d '[:space:]' < "$cpath")"
+  grew="$(comm -13 "$bperm" "$hperm" | wc -l | tr -d ' ')"
   if [ "$ch" -gt "$cb" ] && [ "$grew" -eq 0 ]; then
-    echo "FAIL ceiling raised $cb -> $ch with no shape newly claimed inexpressible." >&2
+    echo "FAIL ceiling($label) raised $cb -> $ch with no shape newly claimed inexpressible." >&2
     echo "     A raise is a permanence claim; make it in the commit that needs it." >&2
     fail=1
-  else
-    echo "ceiling: $cb -> $ch ($grew shape(s) newly permanent)"
+    return 0
   fi
-else
-  echo
-  echo "ceiling: absent at the base -- introduced by this change, nothing to compare"
-fi
+  echo "ceiling($label): $cb -> $ch ($grew shape(s) newly permanent)"
+}
+
+echo
+ceiling_check len3 "$ceil"  "$tmp/base.$tp"  "$tmp/head.$tp"
+ceiling_check len4 "$ceil4" "$tmp/base.$tp4" "$tmp/head.$tp4"
 
 echo
 if [ "$fail" -ne 0 ]; then
