@@ -153,32 +153,45 @@ fn the_structural_relation_ignores_intentional_run_fusion() {
 
 /// The relation names the third state, not only the other two.
 ///
-/// `<em><em>x</em></em>` has no CommonMark spelling — `**x**` is strong, not
-/// nested emphasis — so this verdict is permanent rather than a queued
-/// defect. Pinning it here keeps the third state honest if the bless path
+/// `<em><em>x</em></em>` had no `*`-only spelling before 2026-08-23 — `**x**`
+/// is strong, not nested emphasis — but `_*x*_` spells it exactly (design
+/// spec `2026-08-23-delimiter-choice-ordering-design.md` §2.3), and
+/// `choose_mark`'s rule reaches it whenever a bare `Emph[Emph[…]]`'s flanks
+/// permit `_`, so this shape is `Clean` at the top of a paragraph now. Letter
+/// text on both sides blocks condition 2 and forces `*` throughout, which is
+/// what keeps this vector genuinely `Inexpressible` rather than merely
+/// queued. Pinning it here keeps the third state honest if the bless path
 /// ever breaks.
 #[test]
 fn the_structural_relation_marks_direct_same_class_nesting_inexpressible() {
-    let seq = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
-        "a".into(),
-    )])])];
+    let seq = vec![
+        Inline::Text("x".into()),
+        Inline::Emph(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
+        Inline::Text("y".into()),
+    ];
     assert_eq!(
         classify_with(&seq, Ledger::LICENSED),
         Structure::Inexpressible
     );
 }
 
-/// The second permanent mechanism, and the one this item adds.
+/// The second mechanism, added by the abutment-ledger item.
 ///
-/// `<strong><em>a</em></strong>` has no `*`-only spelling: `***a***` is the
-/// only run that could carry both levels, and CommonMark's tie-break always
-/// resolves it em-outermost. Spelling it needs `**_a_**`, and alternating `*`
-/// with `_` is rejected by three specs. Permanent, not queued.
+/// `<strong><em>a</em></strong>` had no `*`-only spelling before 2026-08-23:
+/// `***a***` is the only run that could carry both levels, and CommonMark's
+/// tie-break always resolves it em-outermost. Since 2026-08-23 the outer
+/// `Strong` run can spell itself `__` instead, which shares no character with
+/// the inner `Emph`'s `*`, so `__*a*__` carries both levels and this shape is
+/// `Clean` at the top of a paragraph now. Letter text on both sides blocks
+/// condition 2 and forces `*` throughout, same as its sibling above, which is
+/// what keeps this vector genuinely `Inexpressible`.
 #[test]
 fn the_structural_relation_marks_strong_over_emph_inexpressible() {
-    let seq = vec![Inline::Strong(vec![Inline::Emph(vec![Inline::Text(
-        "a".into(),
-    )])])];
+    let seq = vec![
+        Inline::Text("x".into()),
+        Inline::Strong(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
+        Inline::Text("y".into()),
+    ];
     assert_eq!(
         classify_with(&seq, Ledger::LICENSED),
         Structure::Inexpressible
