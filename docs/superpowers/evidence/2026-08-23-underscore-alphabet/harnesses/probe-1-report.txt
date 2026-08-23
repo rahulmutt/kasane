@@ -1,0 +1,20 @@
+
+context alone        baseline: 5742 clean / 6977 wrong
+  M1 ceiling  : 0 of 6977 wrong shapes have a working assignment
+  M3 rule     : fixes 0 | BREAKS 0 shapes that are clean today
+
+context letter       baseline: 3881 clean / 8838 wrong
+  M1 ceiling  : 0 of 8838 wrong shapes have a working assignment
+  M3 rule     : fixes 0 | BREAKS 0 shapes that are clean today
+
+context punct        baseline: 5742 clean / 6977 wrong
+  M1 ceiling  : 0 of 6977 wrong shapes have a working assignment
+  M3 rule     : fixes 0 | BREAKS 0 shapes that are clean today
+
+context space        baseline: 5742 clean / 6977 wrong
+  M1 ceiling  : 0 of 6977 wrong shapes have a working assignment
+  M3 rule     : fixes 0 | BREAKS 0 shapes that are clean today
+
+context letter/space baseline: 4704 clean / 8015 wrong
+  M1 ceiling  : 0 of 8015 wrong shapes have a working assignment
+  M3 rule     : fixes 0 | BREAKS 0 shapes that are clean today
