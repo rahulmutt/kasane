@@ -416,6 +416,13 @@ instead —
 reproducible on demand via the sweep script beside it — rather than assuming it
 away.
 
+**Landed 2026-08-23.** The structural length-4 tier this section names shipped
+as `census_len4.rs`'s second tier —
+`2026-08-23-length-4-structural-tier-design.md`. The sentence above stays as
+written: it was true of *this* branch, which measured the gap with an archived
+probe rather than assuming it away, and rewriting it to pretend the tier was in
+scope here would falsify the record it exists to keep.
+
 ## 7. Tests
 
 Beyond the re-bless, each of §3's four conditions is pinned separately, since

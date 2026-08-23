@@ -307,6 +307,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
 - `mise run census-ratchet` — the census allowlists may only shrink against `main`
 - `mise run census-ratchet-cases` — both directions of the queue gate, including the negative one
+- `mise run census-bless` — regenerate every census ratchet file, both tiers
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
 - In this sandbox, `mise run fuzz <target>` false-positives as a crash for
   every target, not just `slug`: LeakSanitizer's atexit leak scan needs
@@ -343,7 +344,8 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   the last family — and the ratchet still stands: a newly corrupt shape fails
   the build until someone blesses it in, which is now a strictly visible act
   against an empty file.
-- The census has two tiers, and four files. The text tier above compares what
+- The census has two tiers and runs them at two lengths, over seven files. The
+  text tier above compares what
   a parser recovers against `kasane_gfm::rendered_text`. The **structural**
   tier compares, for each character, the stack of emphasis containers enclosing
   it on both sides — a loss that leaves the text byte-identical (a `<strong>`
@@ -384,11 +386,13 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   deliberate: `<em><strong>x</strong></em>` IS spellable, and keeping it out
   of the permanent file is what stops a regression laundering itself as a
   representational limit.
-  One bless command rewrites all three shape files — but **not** the fourth,
-  `census-permanent-count.txt`, a one-integer ceiling on how many entries
-  `census-inexpressible.txt` may hold. A bless lowers it to match a shrink and
-  never raises it, so growing the permanent file leaves the test failing until a
-  human raises the number in the same commit. That asymmetry is the point:
+  `mise run census-bless` rewrites all five shape files across both tiers — but
+  **neither** ceiling —
+  `census-permanent-count.txt` and `census-len4-permanent-count.txt`, one-integer
+  ceilings on how many entries each permanent file may hold. A bless lowers
+  each to match a shrink and never raises it, so growing either permanent file
+  leaves the test failing until a human raises the number in the same commit.
+  That asymmetry is the point:
   moving a shape into the permanent file asserts no writer change can ever fix
   it, which is the one claim here nothing downstream re-examines, and it is the
   claim that went wrong for 748 shapes at once. `mise run census-ratchet` is
@@ -405,16 +409,47 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   `Clean` when the text is corrupt, so a text-corrupt shape is structurally
   *unclassified*, the worst state this census records, and a union without it
   would read a text fix as a fresh corruption
-  (`2026-08-21-declined-run-rescan-design.md` §5). A third tier joins the two
-  above: `crates/kasane-writer/tests/census_len4.rs`, the text tier at length
-  4, asserting zero, with no allowlist because the answer is zero. `mise run
-  census-ratchet` runs in CI *after* `mise run test`, because it takes the
+  (`2026-08-21-declined-run-rescan-design.md` §5).
+  `crates/kasane-writer/tests/census_len4.rs` runs **both** tiers again at
+  length 4, over all 130,321 shapes. Its text tier asserts zero and carries no
+  allowlist, because the answer is zero and a file it does not have cannot rot
+  into stale excuses. Its **structural** tier is the one that was missing until
+  2026-08-23: `census.rs` stops at length 3, so nothing priced structure above
+  it, and 135 length-4 and 3,134 length-5 regressions shipped through every gate
+  on the delimiter-choice branch — invisible because the text was byte-identical
+  — caught only because that family happened to have a length-3 member. It
+  carries three files of its own on the same contract as length 3:
+  `census-len4-known-structure-corrupt.txt` (**41,443**, the queue),
+  `census-len4-inexpressible.txt` (**10,153**, permanent), and
+  `census-len4-permanent-count.txt` (its ceiling). The permanent file's header
+  splits by `classify_with`'s two conditions — 7,585 same-class nestings, 2,568
+  strong-over-emph-only, none satisfying neither — and **not** by the length-3
+  file's flanking-wall-vs-refusal split, which is a distinction by cause that no
+  grep over ten thousand entries can make. Lengths 5 and 6 stay unpriced for
+  structure as well as text: minutes, not seconds.
+  (`2026-08-23-length-4-structural-tier-design.md`.)
+  Length 4 gets a **second union**, its queue plus its permanent file, gated the
+  same way. Two files rather than three, because there is no length-4 text file
+  — which is also why the promotion rule has no length-4 form: that rule exists
+  to *permit* a growth the union would otherwise forbid, and at length 4 there
+  is none to permit. The union skips while either file is absent at the merge
+  base, so the branch that introduced them did not fail on its own introduction.
+  `Inexpressible → Corrupt` is not caught by any union — the shape was already
+  in it — but by the tiers' own per-shape ratchets, which is the mechanism that
+  spoke at length 3.
+  `mise run census-ratchet` runs in CI *after* `mise run test`, because it takes the
   files' accuracy on trust and only the test establishes that; `mise run
   census-ratchet-cases` runs after both and is the queue gate's *negative*
   direction, injecting an unjustified growth and failing if the gate accepts
   it (`crates/kasane-writer/tests/ratchet_gate_cases.sh`). The ratchet task on
   its own only ever exercises the gate where it passes, which is
   indistinguishable from a gate that always passes.
+  That is still true of the **length-4** union: `ratchet_gate_cases.sh` covers
+  the length-3 queue gate only, and extending it was deliberately left out of
+  scope (`2026-08-23-length-4-structural-tier-design.md` §6.1). The length-4
+  union was exercised against an injected growth once, by hand, and the output
+  is in `docs/superpowers/evidence/2026-08-23-len4-structural-tier/`. Nothing
+  re-proves it.
   `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
   a tier measures with the census's own instrument rather than a copy that
   drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers
