@@ -270,7 +270,7 @@ fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut view = Vec::new();
     flatten_into(inls, depth, &mut view);
-    inlines_to_md_flat(view, ctx, pos, ledger)
+    inlines_to_md_flat(view, ctx, pos, ledger, '\0')
 }
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
@@ -296,7 +296,13 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// fused emphasis run's members' children are siblings too. Scanning IR
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
-fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+fn inlines_to_md_flat<'a>(
+    items: Vec<Flat<'a>>,
+    ctx: Ctx,
+    pos: Pos,
+    ledger: Ledger,
+    parent_ch: char,
+) -> String {
     // The view is split at the cursor rather than held as one vector with an
     // index, and `pending` is held *reversed*, because a declined run rewrites
     // the view at the cursor and the obvious spelling of that rewrite is
@@ -377,16 +383,15 @@ fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledg
             Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
                 let after_class = next_class_of(pending[..tail].iter().rev().copied());
-                let markup = if d == escape::Delim::Emph { "*" } else { "**" };
                 match emphasis_run(
                     members,
                     d,
                     ctx,
                     pos,
-                    markup,
                     before_class,
                     after_class,
                     ledger,
+                    parent_ch,
                 ) {
                     RunOut::Emitted(t) => s.push_str(&t),
                     RunOut::Declined(children) => {
@@ -920,6 +925,27 @@ fn same_delim_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger
     })
 }
 
+/// Which character this run spells its delimiter with.
+///
+/// The single decision point. [`emphasis_run`] and [`probe_edges`] both call
+/// it, because they must reach the same answer or
+/// `debug_assert_eq!(edge, Edge::of(&inner))` is comparing two different runs.
+/// Neither may re-derive this locally.
+///
+/// Returns `*` unconditionally until the rule lands (design spec
+/// `2026-08-23-delimiter-choice-ordering-design.md` §3).
+fn choose_mark(
+    want: escape::Delim,
+    raw_children: &[Flat<'_>],
+    before: Flank,
+    after: Flank,
+    parent_ch: char,
+    ledger: Ledger,
+) -> escape::Mark {
+    let _ = (raw_children, before, after, parent_ch, ledger);
+    escape::Mark::new(want, '*')
+}
+
 /// Splice a run's children wherever a container collides with the run's own
 /// delimiter, by two rules keyed on two different things, because they close
 /// two different collisions:
@@ -1263,6 +1289,7 @@ fn probe_edges(
     ledger: Ledger,
     outer_before: Flank,
     outer_after: Flank,
+    parent_ch: char,
 ) -> Edge {
     let mut acc = Edge::NONE;
     let mut pos = pos;
@@ -1283,8 +1310,6 @@ fn probe_edges(
         let contribution = match escape::delim(repr) {
             Some(escape::Delim::Backtick) => Edge::FIXED_PUNCT,
             Some(want @ (escape::Delim::Emph | escape::Delim::Strong)) => {
-                let inner_mark = escape::Mark::new(want, '*');
-                let inner_children = splice_children(run_children(members), inner_mark, ledger);
                 // Computed *before* the recursive call, not just before the
                 // flanking check below: they are this run's own outer
                 // context, and if this run itself declines, its children
@@ -1337,7 +1362,25 @@ fn probe_edges(
                 } else {
                     outer_after
                 };
-                let sub = probe_edges(&inner_children, ctx, pos, ledger, running_before, after_ctx);
+                let raw_inner = run_children(members);
+                let inner_mark = choose_mark(
+                    want,
+                    &raw_inner,
+                    running_before,
+                    after_ctx,
+                    parent_ch,
+                    ledger,
+                );
+                let inner_children = splice_children(raw_inner, inner_mark, ledger);
+                let sub = probe_edges(
+                    &inner_children,
+                    ctx,
+                    pos,
+                    ledger,
+                    running_before,
+                    after_ctx,
+                    inner_mark.ch,
+                );
                 // Mirrors `emphasis_run`'s own `core.is_empty()` early return:
                 // an all-whitespace or empty sub-view gets no delimiters
                 // either way, so it never reaches the flanking question and
@@ -1418,7 +1461,7 @@ fn probe_edges(
                     );
                     let mut view = Vec::new();
                     flatten_into(inlines, depth + 1, &mut view);
-                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after)
+                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after, '\0')
                 }
             },
         };
@@ -1472,20 +1515,21 @@ fn emphasis_run<'a>(
     want: escape::Delim,
     ctx: Ctx,
     pos: Pos,
-    markup: &str,
     before: Flank,
     after: Flank,
     ledger: Ledger,
+    parent_ch: char,
 ) -> RunOut<'a> {
-    let run_mark = escape::Mark::new(want, '*');
-    let children = splice_children(run_children(members), run_mark, ledger);
+    let raw = run_children(members);
+    let run_mark = choose_mark(want, &raw, before, after, parent_ch, ledger);
+    let children = splice_children(raw, run_mark, ledger);
     // `probe_edges` reaches the same open/close decision `inner.trim()`'s own
     // first and last characters used to, without rendering `inner` to get
     // there -- see its doc, and `Edge`'s, for why the old order (render,
     // read four characters off the result, then on a decline throw the
     // whole rendered string away and have the caller re-render the same
     // subtree) cost `2^depth` for a chain of `depth` nested declines.
-    let edge = probe_edges(&children, ctx, pos, ledger, before, after);
+    let edge = probe_edges(&children, ctx, pos, ledger, before, after, run_mark.ch);
     // An all-whitespace or empty view gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
     // classify, so the flanking question does not arise. This is the one
@@ -1497,7 +1541,7 @@ fn emphasis_run<'a>(
     // "prints, but only whitespace" leave neither field set), so matching
     // both at once is exhaustive, not just convenient.
     let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
-        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger));
+        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger, run_mark.ch));
     };
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
@@ -1532,7 +1576,7 @@ fn emphasis_run<'a>(
         // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
         // context-threading fix in this same round did not remove it for
         // free, and restructuring further was out of scope for the round.
-        let inner = inlines_to_md_flat(children, ctx, pos, ledger);
+        let inner = inlines_to_md_flat(children, ctx, pos, ledger, run_mark.ch);
         // The one maintainability cost of computing the flanking edges without
         // rendering is that two functions now have to agree about them, and an
         // edit to either could desynchronise them in silence. This path
@@ -1557,7 +1601,7 @@ fn emphasis_run<'a>(
              read off inlines_to_md_flat's own output. These two must agree, or a run's \
              emit/decline choice depends on which one was asked"
         );
-        RunOut::Emitted(emphasize(&inner, markup))
+        RunOut::Emitted(emphasize(&inner, run_mark.markup()))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
         // it as a literal asterisk in the middle of the prose. The text is the
@@ -1641,6 +1685,25 @@ mod tests {
         assert_eq!(Mark::new(Delim::Emph, '_').markup(), "_");
         assert_eq!(Mark::new(Delim::Strong, '_').markup(), "__");
         assert_eq!(Mark::new(Delim::Backtick, '`').markup(), "`");
+    }
+
+    /// Task 2 pins the seam, not the rule: `choose_mark` is the only place a
+    /// character is decided, and until Task 3 it decides `*` every time.
+    #[test]
+    fn choose_mark_is_the_single_decision_point_and_still_says_star() {
+        use escape::{Delim, Mark};
+        let a = Inline::Emph(vec![Inline::Text("a".into())]);
+        let kids: Vec<Flat<'_>> = vec![(&a, 1)];
+        for (class, before, after, parent) in [
+            (Delim::Emph, Flank::Space, Flank::Space, '\0'),
+            (Delim::Strong, Flank::Punct, Flank::Punct, '\0'),
+            (Delim::Emph, Flank::Other, Flank::Other, '*'),
+        ] {
+            assert_eq!(
+                choose_mark(class, &kids, before, after, parent, Ledger::LICENSED),
+                Mark::new(class, '*'),
+            );
+        }
     }
 
     /// `Edge` classifies characters, and both emphasis characters classify the

@@ -575,11 +575,6 @@ impl Mark {
     }
 
     /// The literal this mark opens and closes with.
-    // Only the tests call this today; the render still spells its markup
-    // from the literal `markup: &str` parameter threaded through
-    // `emphasis_run`. A later task in this feature switches that call site
-    // to a chosen `Mark` and starts consuming this.
-    #[allow(dead_code)]
     pub(crate) fn markup(self) -> &'static str {
         match (self.class, self.ch) {
             (Delim::Backtick, _) => "`",
