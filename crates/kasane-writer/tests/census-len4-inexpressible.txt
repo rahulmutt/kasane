@@ -7,6 +7,27 @@
 # relation at length 4, computed by the same `classify_with`, and nothing about
 # it is a separate claim.
 #
+# 10,153 entries, split by the two conditions `classify_with` files them under:
+#
+#   7,585  nest a same-class container directly -- `<em><em>x</em></em>` or
+#          `<strong><strong>x</strong></strong>`, which collapse onto one
+#          container wherever run and child must share a delimiter character.
+#   2,568  do not, and are here on the other condition alone: a `<strong>`
+#          whose sole child is an `<em>`, where `***x***` is the only
+#          single-character run that could carry both levels and CommonMark's
+#          tie-break always resolves it em-outermost.
+#
+# Every entry satisfies at least one and none satisfies neither. That is not a
+# coincidence to be maintained but a property of `classify_with`, and
+# `the_length_four_permanent_file_splits_by_its_two_permanence_conditions`
+# asserts all three numbers.
+#
+# This is NOT the length-3 file's split. That one separates 428 flanking-wall
+# entries from 5 deliberate condition-4 refusals -- a distinction by CAUSE that
+# no grep over ten thousand entries can make. 375 entries here nest a `Strong`
+# directly inside an `Emph`; how many of those are refusals rather than wall is
+# UNMEASURED, and neither this header nor its test claims a number for it.
+#
 # COMPUTED, never hand-edited. A shape lands here only if it BOTH nests,
 # directly, a same-class container or a `<strong>` whose sole child is an
 # `<em>`, AND differs from the IR only by collapsing adjacent identical classes

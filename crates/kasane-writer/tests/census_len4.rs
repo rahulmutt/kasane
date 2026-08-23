@@ -132,6 +132,27 @@ const LEN4_INEXPRESSIBLE_HEADER: &str = "\
 # relation at length 4, computed by the same `classify_with`, and nothing about
 # it is a separate claim.
 #
+# 10,153 entries, split by the two conditions `classify_with` files them under:
+#
+#   7,585  nest a same-class container directly -- `<em><em>x</em></em>` or
+#          `<strong><strong>x</strong></strong>`, which collapse onto one
+#          container wherever run and child must share a delimiter character.
+#   2,568  do not, and are here on the other condition alone: a `<strong>`
+#          whose sole child is an `<em>`, where `***x***` is the only
+#          single-character run that could carry both levels and CommonMark's
+#          tie-break always resolves it em-outermost.
+#
+# Every entry satisfies at least one and none satisfies neither. That is not a
+# coincidence to be maintained but a property of `classify_with`, and
+# `the_length_four_permanent_file_splits_by_its_two_permanence_conditions`
+# asserts all three numbers.
+#
+# This is NOT the length-3 file's split. That one separates 428 flanking-wall
+# entries from 5 deliberate condition-4 refusals -- a distinction by CAUSE that
+# no grep over ten thousand entries can make. 375 entries here nest a `Strong`
+# directly inside an `Emph`; how many of those are refusals rather than wall is
+# UNMEASURED, and neither this header nor its test claims a number for it.
+#
 # COMPUTED, never hand-edited. A shape lands here only if it BOTH nests,
 # directly, a same-class container or a `<strong>` whose sole child is an
 # `<em>`, AND differs from the IR only by collapsing adjacent identical classes
@@ -232,5 +253,78 @@ fn inline_structure_survives_rendering_for_every_shape_of_length_four() {
         inexpressible.len(),
         inexpressible.len() - ceiling,
         inexpressible.len(),
+    );
+}
+
+/// The one claim in [`LEN4_INEXPRESSIBLE_HEADER`] that nothing else gates.
+///
+/// `permanence_ceiling` gates the 10,153 total. The sentence splitting it into
+/// same-class nestings and strong-over-emph-only entries is hand-maintained
+/// prose inside a *generated* file: `ratchet` filters `#` lines, so a hand-edit
+/// there passes the checker and is silently reverted by the next bless. The
+/// length-3 file has the same hazard and
+/// `the_permanent_file_holds_exactly_the_five_condition_four_refusals` is its
+/// answer; this is that test at length 4.
+///
+/// The split is `classify_with`'s own two permanence conditions —
+/// `nests_same_class_directly` and `nests_strong_over_emph_directly` — and
+/// **not** the length-3 file's split, which separates a flanking wall from five
+/// deliberate condition-4 refusals. That is a distinction by cause, and no grep
+/// over ten thousand entries can make it. This test claims nothing about it.
+///
+/// The `neither` assertion is the one that would catch a broken bless rather
+/// than stale prose: every entry must satisfy at least one condition, because
+/// `classify_with` files a shape here only if it does. It cannot fail while the
+/// relation and the file agree, which is exactly why it is worth asserting.
+#[test]
+fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
+    const SAME_CLASS: usize = 7_585;
+    const STRONG_OVER_EMPH_ONLY: usize = 2_568;
+
+    let body = std::fs::read_to_string(LEN4_INEXPRESSIBLE)
+        .unwrap_or_else(|e| panic!("{LEN4_INEXPRESSIBLE} must exist and be readable: {e}"));
+    let entries: Vec<&str> = body
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+
+    let same_class = |l: &&str| l.contains("Emph([Emph(") || l.contains("Strong([Strong(");
+    let strong_over_emph = |l: &&str| l.contains("Strong([Emph(");
+
+    let n_same = entries.iter().filter(|l| same_class(l)).count();
+    let n_soe_only = entries
+        .iter()
+        .filter(|l| !same_class(l) && strong_over_emph(l))
+        .count();
+    let n_neither = entries
+        .iter()
+        .filter(|l| !same_class(l) && !strong_over_emph(l))
+        .count();
+
+    assert_eq!(
+        n_neither, 0,
+        "{n_neither} entr(ies) in {LEN4_INEXPRESSIBLE} satisfy neither \
+         permanence condition. `classify_with` files a shape here only if it \
+         nests a same-class container directly or a `<strong>` whose sole child \
+         is an `<em>`, so this cannot happen while the relation and the file \
+         agree -- the bless is broken, or the relation changed and the file was \
+         not re-blessed."
+    );
+    assert_eq!(
+        n_same, SAME_CLASS,
+        "{LEN4_INEXPRESSIBLE} holds {n_same} entries that nest a same-class \
+         container, but `LEN4_INEXPRESSIBLE_HEADER` says {SAME_CLASS}.\n\
+         \n\
+         That header is GENERATED from the constant in this file, and its split \
+         is hand-written prose no bless recomputes. Update the constant's text \
+         to match what the file now holds, re-bless, and update this test -- in \
+         the same commit, so the claim and the entries move together."
+    );
+    assert_eq!(
+        n_soe_only, STRONG_OVER_EMPH_ONLY,
+        "{LEN4_INEXPRESSIBLE} holds {n_soe_only} entries that are here on the \
+         strong-over-emph condition alone, but `LEN4_INEXPRESSIBLE_HEADER` says \
+         {STRONG_OVER_EMPH_ONLY}. Update the constant's text, re-bless, and \
+         update this test in the same commit."
     );
 }
