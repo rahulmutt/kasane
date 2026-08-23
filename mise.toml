@@ -78,6 +78,15 @@ run = "cargo run -p kasane-cli --"
 # It does NOT raise either permanence ceiling: a bless writes the shape files
 # and stops, so a growing permanent file still leaves the test failing until a
 # human raises the number in the same commit.
+#
+# `run` is fail-fast: mise stops at the first non-zero exit. Under
+# KASANE_CENSUS_BLESS=1 the `census` binary still runs its own split test
+# (`the_permanent_file_holds_exactly_the_five_condition_four_refusals`), which
+# fails whenever the length-3 split moved -- exactly the moment you are
+# blessing. That aborts here having rewritten the length-3 files and not the
+# length-4 ones: a real but recoverable rough edge, loud (CI fails on the
+# un-blessed tier) with an easy fix -- correct the split constant census.rs
+# expects and re-run this task.
 [tasks.census-bless]
 description = "Regenerate every census ratchet file, both tiers"
 run = [
@@ -186,13 +195,15 @@ printf '%-8s %8s %8s %8s   %s\\n' set base head delta verdict
 # is what makes the move safe to allow -- it forbids a shape becoming corrupt
 # that was not, so a growing permanent file can only be drawing from the queue.
 check() { # label base-set head-set gate skip-marker
-  local b h added n_b n_h verdict
+  local b h added n_b n_h verdict skipped
   b="$2"; h="$3"
   n_b="$(wc -l < "$b" | tr -d ' ')"; n_h="$(wc -l < "$h" | tr -d ' ')"
   added="$(comm -13 "$b" "$h")"
   verdict="ok"
+  skipped=0
   if [ -n "${5:-}" ] && [ -f "$5" ]; then
     verdict="skipped (no baseline)"
+    skipped=1
   elif [ -n "$added" ]; then
     local n_added
     n_added="$(printf '%s\\n' "$added" | wc -l | tr -d ' ')"
@@ -204,7 +215,12 @@ check() { # label base-set head-set gate skip-marker
     fi
   fi
   printf '%-8s %8s %8s %+8d   %s\\n' "$1" "$n_b" "$n_h" "$((n_h - n_b))" "$verdict"
-  if [ "$4" = gate ] && [ -n "$added" ]; then
+  # `skipped` guards this dump too: a skipped baseline reads its whole file as
+  # "added" (there is nothing yet to diff against), and without this check
+  # that printed ten sample shapes under a row that already says "skipped (no
+  # baseline)" with no verdict explaining them -- easy to misread as a failure
+  # on exactly the CI run that introduces the file.
+  if [ "$4" = gate ] && [ "$skipped" -eq 0 ] && [ -n "$added" ]; then
     # `sed -n 1,10p`, not `head -10`: head closes the pipe after ten lines,
     # which SIGPIPEs the writer, and under `set -e -o pipefail` that aborted
     # this script before it could finish the table or print its summary. sed
