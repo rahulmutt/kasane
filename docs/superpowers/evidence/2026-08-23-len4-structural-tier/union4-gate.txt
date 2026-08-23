@@ -1,0 +1,45 @@
+tier commit: 841bec90bdf7248ee487d19a94f5a69493ee92ad
+=== INJECTED-FAILURE RUN ===
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 841bec9 test(census): gate the length-4 permanent file's class split
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      433       +0   ok
+union        2044     2044       +0   ok
+queue4      41443    41444       +1   1 moved in (not gated)
+perm4       10153    10153       +0   ok
+union4      51596    51597       +1   FAIL -- 1 added
+           [Text("zzz"), Text("zzz"), Text("zzz"), Text("zzz")]
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet FAILED: the allowlists may only shrink against main.
+[census-ratchet] ERROR task failed
+exit=1
+
+=== RESTORE CHECK ===
+(diff --stat exit=0)
+
+=== CLEAN RUN ===
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 841bec9 test(census): gate the length-4 permanent file's class split
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      433       +0   ok
+union        2044     2044       +0   ok
+queue4      41443    41443       +0   ok
+perm4       10153    10153       +0   ok
+union4      51596    51596       +0   ok
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet ok
+exit=0

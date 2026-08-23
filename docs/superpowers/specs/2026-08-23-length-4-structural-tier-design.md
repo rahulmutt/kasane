@@ -227,10 +227,15 @@ landed — in a `git worktree`. Copy in this branch's `census_len4.rs` and
 `census_support/mod.rs`, and pin the three baseline files from `HEAD`. Run the
 tier.
 
-**Expected: it fails in both directions at once.** ~135 shapes newly
-structurally corrupt (absent from the queue file), and the same ~135 gone from
-the permanent file. Both halves of the two-directional ratchet fire, on the same
-shapes, which is a stronger signal than either alone.
+**Expected: the queue ratchet fails, naming ~135 shapes.** `ratchet`'s first
+assertion panics before its second, and before the permanent file's `ratchet`
+call runs at all — so one run reports one direction, never both. The permanent
+side is confirmed by blessing inside the worktree and diffing the two revisions'
+files: ~135 lines added to the queue and the same ~135 removed from the
+permanent file, which is `Inexpressible → Corrupt` shown shape by shape.
+
+That short-circuit is now recorded on `ratchet`'s own doc, so the next reader
+does not design a verification around a failure mode it cannot produce.
 
 `census_support/mod.rs`, `kasane-ir`, and `kasane-writer`'s public surface are
 byte-identical between `05bb516` and `97b2604` — only `choose_mark`'s body
