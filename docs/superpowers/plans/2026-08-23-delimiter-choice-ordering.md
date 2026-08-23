@@ -669,10 +669,40 @@ out. Re-run in debug against the real threading: 0 of 2,476,099."
 
 Four documents assert things the probes disproved. They are wrong *today*, so they close in this branch.
 
+> **Corrected during execution.** Commit `0909b3a` added a fourth condition to
+> `choose_mark` after this task was drafted, which moved five shapes back into
+> the permanent file. Every number and one file target below is stale; the
+> executed task followed these corrections, and the shipped prose is the record:
+>
+> - **Counts.** `census-inexpressible.txt` is **433**, not 428. The container-first
+>   grep gives **159** over the whole file, not 156 — 156 is the count *within
+>   the 428 flanking class*, which is the scope the prose actually needs. The
+>   wider `'^\[\(Emph\|Strong\)'` pattern matches **189**, not 184.
+> - **Step 4's third command is broken and always was.**
+>   `grep -vc 'Text("a")\|Text("b")' …` counts the file's `#` header lines,
+>   which contain no `Text("a")`. It printed **49** against the header this task
+>   inherited and prints **86** against the header this task shipped — the
+>   number is a function of header length and never of the shapes, which is
+>   exactly why it is useless as a check. The check it means is
+>   `grep '^\[' … | grep -vc 'Text("a")\|Text("b")'`, which returns **0**.
+> - **The residual is two mechanisms, not one.** 428 are the flanking wall; the
+>   five that condition 4 added are a deliberate refusal of a legal `_`, to
+>   avoid a cross-class fuse. Step 1's and Step 3's replacement text asserts a
+>   single clean class and was corrected rather than transcribed.
+> - **Step 2's file target does not exist as a file.** `census-inexpressible.txt`'s
+>   header is generated from the `INEXPRESSIBLE_HEADER` constant in `census.rs`;
+>   a hand-edit of the `.txt` passes the checker (it filters `#` lines) and is
+>   reverted by the next bless. Edit the constant, then re-bless.
+> - **A fifth document.** `…-delimiter-choice-ordering-design.md` acquired two
+>   falsehoods of its own — "zero regressions" in §1 and "all three" conditions
+>   in §3 — and `permanence_ceiling`'s doc in `census.rs` still gave the
+>   destroyed framing as the ceiling's reason. Both closed in the same commit.
+
 **Files:**
 - Modify: `AGENTS.md:354-364`
-- Modify: `crates/kasane-writer/tests/census-inexpressible.txt` (header comment block, lines 1-18)
+- Modify: `crates/kasane-writer/tests/census.rs` (`INEXPRESSIBLE_HEADER`, then re-bless the `.txt`)
 - Modify: `crates/kasane-writer/tests/census_support/mod.rs:272`
+- Modify: `docs/superpowers/specs/2026-08-23-delimiter-choice-ordering-design.md`
 
 **Interfaces:**
 - Consumes: the final census counts from Task 3. Produces nothing.

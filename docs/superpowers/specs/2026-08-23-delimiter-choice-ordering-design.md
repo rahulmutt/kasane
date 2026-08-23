@@ -1,6 +1,8 @@
 # kasane — Delimiter-Choice Ordering Design Spec
 
-**Status:** designed, not implemented.
+**Status:** implemented on branch `delimiter-choice-ordering`, with one
+correction the census ratchet forced after this document was written — see
+§1's headline and §3's fourth condition.
 **Date:** 2026-08-23.
 **Supersedes the framing of:** the "`_` alphabet" item, as described in
 `census-inexpressible.txt`'s header, `AGENTS.md` §census, and the
@@ -18,11 +20,45 @@ census's 19-element alphabet are wrong for this reason: 1,730 queued in
 
 This item makes the delimiter **character** a decision the writer takes *before*
 the splice consults it, and lets a run spell itself `_` when that is what keeps
-a child alive. Measured, it recovers **1,670** of those 3,714 shapes with zero
-regressions and zero new text loss.
+a child alive. Measured, it recovers **1,670** of those 3,714 shapes, with zero
+new text loss and — *after the fourth condition of §3* — zero structural
+regressions.
 
 It does not widen the writer's alphabet. The alphabet was never the constraint —
 see §2.
+
+### 1.1 The "zero regressions" this document claimed, and how it was wrong
+
+As drafted, this section claimed the recovery came "with zero regressions" full
+stop. That was false, and a gate caught it.
+
+The claim rested on §2.4's `broken (clean → wrong) = 0`, which was correctly
+measured and is still true. But `clean → wrong` is not the whole of
+"regression". A shape can also move from `Inexpressible` — a loss already
+accounted for and parked as permanent — to `Corrupt`, and probe 2 never counted
+that transition.
+When the reorder shipped as commit `05bb516`, `mise run census-ratchet` found
+**five length-3 shapes** that had done exactly that: an `Emph` saved from the
+splice fused into the `Strong` beside it, so a `<strong>` came back as an `<em>`
+and its text migrated across a structural boundary. Text was byte-identical
+either way, which is why the text tier and the 2.48M-shape length-5 sweep of
+§2.6 both stayed at zero and only the structural gate spoke.
+
+Five was the length-3 tip. A structural probe over the full census alphabet at
+lengths 4 and 5 —
+`docs/superpowers/evidence/2026-08-23-underscore-alphabet/harnesses/structural-len4-5-sweep.sh`,
+which runs `main`, `05bb516` and `0909b3a` side by side — measured **135
+regressions at length 4 and 3,134 at length 5** for the same reason.
+
+§3's fourth condition, shipped as `0909b3a`, closes every one of them. Re-run
+against `main`, the branch then has **zero `Inexpressible → Corrupt` and zero
+`clean → wrong` at lengths 3, 4 and 5**, with every recovery intact — 31,376
+shapes improved to `Clean` at length 4 and 588,423 at length 5, unchanged from
+the unfixed branch to the shape, not merely to the count. That, not the drafted
+sentence, is the measurement the headline now rests on.
+
+The transferable half is in §10; the gate that should have spoken earlier and
+did not is §6.1.
 
 ## 2. The measurement that gates this item, and the premise it destroyed
 
@@ -104,6 +140,13 @@ before anything is claimed.
 114 + 1,556 = 1,670, so **no shape moves from permanent into the queue**; both
 files purely shrink. §6 depends on this.
 
+Every figure in that table is a correct measurement of probe 2 and is left as
+measured. Note what the table does **not** have a row for: `Inexpressible →
+Corrupt`. `broken` counts only `clean → wrong`, so a shape that was already
+counted as a loss could get worse without moving any number here. That is the
+transition §1.1 is about, and it is why the shipped `census-inexpressible.txt`
+is 433 rather than the 428 this row predicts.
+
 ### 2.5 The context spread is the finding, not the headline
 
 | enclosing context | recovered | broken |
@@ -126,6 +169,11 @@ Dumping the 428 that remain permanent rather than counting them: **every one of
 them contains letter text adjacent to the nested container. Not one lacks it.**
 156 have the container first, so it is the *closing* delimiter that is
 letter-flanked; the rest are preceded by letter text and it is the opener.
+
+Those 428 are exactly the flanking class, and they are exactly 428 of the
+shipped file's 433 — verified shape-by-shape against
+`harnesses/p2-residual-permanent.txt`. The other five are §1.1's, and their
+mechanism is not this one; §9 says why they must not be folded in.
 
 So §2.5's context spread and the residual are one phenomenon, measured from two
 directions — the flanking wall outside the shape and inside it. And refusing is
@@ -154,7 +202,9 @@ was a symmetric-looking assumption; it is now a run measurement.
 
 ## 3. The rule
 
-A run spells itself `_` / `__` when **all three** hold. None subsumes another.
+A run spells itself `_` / `__` when **all four** hold. None subsumes another.
+Conditions 1–3 are as designed. Condition 4 was added after the census ratchet
+falsified §1's headline; see §1.1 for what it caught.
 
 1. **A collision would otherwise fire** — `edge_to_splice` or
    `same_delim_to_splice` names a child. Without this condition `_` would churn
@@ -171,6 +221,24 @@ A run spells itself `_` / `__` when **all three** hold. None subsumes another.
    permissive — take `_` itself, and emit `___a___`, which parses as em-over-
    strong and reintroduces the collision one level down.
 
+4. **Declining the splice actually saves the container** —
+   `!fuses_across_classes(raw_children, ledger)`. This one is not about
+   spelling. The other three ask whether `_` is *legal* and *useful*; this asks
+   whether the child a `_` keeps is worth keeping. A `_` run splices nothing, so
+   its children are neighbours in one printed line — and `run_len` groups
+   printed neighbours by the character a child is *predicted* to print
+   (`Delim::child_ch`, which is `*` for both `Emph` and `Strong`), not by class.
+   A saved `Emph` beside a `Strong` is therefore absorbed into it and its text
+   comes back wearing a class it was never in. A splice *erases* an emphasis
+   level; that fuse *substitutes* one, and the structural census counts a
+   substitution as corruption where it counts an erasure as merely
+   inexpressible. Where the choice is between them, `*` is the lesser loss.
+
+   Keyed on the **classes**, not on the bare fact of a fuse, and that
+   distinction is load-bearing: `[Emph([Emph a]), Emph([Emph b])]` fuses too,
+   loses no class doing it, and `_*ab*_` → `<em><em>ab</em></em>` is a genuine
+   recovery this must not give back. "Decline on any fusion" would have.
+
 Conditions 2 and 3 close different halves, measured:
 
 ```
@@ -181,7 +249,9 @@ _a*b*c_    → <em>a<em>b</em>c</em>   outer `_`, inner `*`: both survive
 ```
 
 Condition 2 is what makes the inner case safe; condition 3 is what makes the
-outer case safe.
+outer case safe. Condition 4 is what makes `[Emph([Emph a]), Emph([Strong a]),
+Emph([Emph a])]` print `*a**a**a*` rather than `_*aaa*_`, keeping the
+`<strong>`.
 
 Stated once: **two runs collide exactly when they are spelled with the same
 character.** That is what `Delim::ch()`'s doc comment has claimed the rule was
@@ -300,23 +370,55 @@ is why.
 
 ## 6. The census and the ratchet
 
-Expected motion, measured in §2.4:
+Expected motion, measured in §2.4, and what actually shipped:
 
-| file | before | after |
-|---|---|---|
-| `census-known-corrupt.txt` (text) | 0 | 0 |
-| `census-known-structure-corrupt.txt` | 1,730 | 1,616 |
-| `census-inexpressible.txt` | 1,984 | 428 |
-| `census-permanent-count.txt` | 1984 | 428 |
+| file | before | expected | **shipped** |
+|---|---|---|---|
+| `census-known-corrupt.txt` (text) | 0 | 0 | **0** |
+| `census-known-structure-corrupt.txt` | 1,730 | 1,616 | **1,611** |
+| `census-inexpressible.txt` | 1,984 | 428 | **433** |
+| `census-permanent-count.txt` | 1984 | 428 | **433** |
 
 Every motion is in a direction the ratchet already permits: a bless lowers the
 permanent ceiling to match a shrink and never raises it, the structure queue
-shrinks, and the union shrinks. No hand edit and no `+N` to explain — which
-holds only because §2.4 established that nothing moves permanent → queue.
+shrinks, and the union shrinks.
+
+The shipped column differs from the expected one by exactly the five shapes of
+§1.1: condition 4 returns them from the queue to the permanent file, so the
+queue is five shorter and the permanent file five longer than probe 2 predicted.
+The gated union is unchanged either way — 1,616 + 428 = 1,611 + 433 = 2,044,
+against 3,714 at base — so the full 1,670-shape recovery survives the
+correction whole.
+
+The one hand edit this branch needed is the ceiling raise, 428 → 433, in the
+commit that needed it (`permanence_ceiling`'s doc: a bless only ever lowers it).
+It is a permanence *claim*, and the asymmetry that makes raising it visible is
+deliberate. It is honest here because all five shapes were already permanent at
+the base `d4fc510` — the feature commit's bless had removed that headroom
+prematurely — and the ratchet reports `0 shape(s) newly permanent`. The drafted
+"no hand edit and no `+N` to explain" held only for the three-condition rule.
+
+### 6.1 The gate that should have spoken earlier, and the follow-up it names
+
+`census.rs`'s **structural** tier stops at length 3, and `census_len4.rs` is a
+**text**-only tier. So **no shipped gate prices structure above length 3.**
+§1.1's defect was caught only because the affected family happens to have a
+length-3 member; the same family is 135 shapes at length 4 and 3,134 at length 5, and a
+family that started at length 4 would have shipped silently.
+
+That is a real gap in this repo's guards, not a property of this item. A
+**structural** length-4 tier is the smallest shipped guard that would have
+spoken — roughly a second in release, where `census_len4.rs`'s own doc gives
+cost as the reason the longer tiers are not shipped. It is a named follow-up,
+not part of this branch. This branch measured the gap with an archived probe
+instead —
+`docs/superpowers/evidence/2026-08-23-underscore-alphabet/harnesses/zz_structural_len4_5.rs`,
+reproducible on demand via the sweep script beside it — rather than assuming it
+away.
 
 ## 7. Tests
 
-Beyond the re-bless, each of §3's three conditions is pinned separately, since
+Beyond the re-bless, each of §3's four conditions is pinned separately, since
 none subsumes another:
 
 1. The three spellings the header advertises now render: `Emph[Emph[a]]` →
@@ -338,20 +440,37 @@ none subsumes another:
 7. The length-5 text sweep re-run in debug, as a one-off plan task, not shipped
    — the same call `2026-08-21-declined-run-rescan-design.md` §2.2 made for
    lengths 5 and 6, and for the same reason: it costs minutes, not seconds.
+8. **Condition 4**, added after this list was drafted:
+   `a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class`
+   pins all five shapes of §1.1 end-to-end — the rendered Markdown and the
+   recovered HTML, plus an explicit assertion that the `<strong>` survives,
+   since that is the actual guarantee. It closes with the control that makes the
+   rule's boundary legible: `[Emph([Emph a]), Emph([Emph b])]` still prints
+   `_*ab*_`, so simplifying condition 4 to "any fusion" goes red naming the
+   recovery it would give back.
 
 ## 8. Documentation this item falsifies
 
 All of it is wrong *today*, so it is corrected in this branch rather than
 deferred.
 
-- **`AGENTS.md` §census (lines ~354–364)** — "the alphabet-widening item" and
-  the 1,740-of-1,984 figure. It was never the alphabet. Replace with the
-  ordering framing and the measured 1,556.
+- **`AGENTS.md` §census** — "the alphabet-widening item" and the
+  1,740-of-1,984 figure. It was never the alphabet. Replace with the ordering
+  framing and the measured drop, which shipped as 1,551 (1,984 → 433) rather
+  than the 1,556 this line was drafted with; see §6.
 - **`census-inexpressible.txt`'s header** — same claim, same correction, plus
-  the measured residual of 428 and why it is a floor.
+  the measured residual and why it is a floor. **The header is generated, not
+  stored:** `ratchet()` writes the `INEXPRESSIBLE_HEADER` constant in
+  `census.rs` ahead of the entries, and the checker filters `#` lines — so a
+  hand-edit of the `.txt` passes the gate and is silently reverted by the next
+  bless. Edit the constant and re-bless.
 - **`census_support/mod.rs:272`** — `Structure::Inexpressible` still reads
   "Markdown cannot express this shape at any level. Permanent." The 2026-08-17
   correction reached the `.txt` headers and `AGENTS.md` and missed this one.
+- **This document.** §1's "zero regressions" and §3's "all three" were
+  falsified by the branch's own gate before it merged; §1.1, §3 condition 4,
+  §6's shipped column and §6.1 are the correction. Left legible rather than overwritten,
+  which is the convention every file above is corrected under.
 - **`Delim::ch()`'s doc comment** — "the coincidence that this writer never
   spells emphasis with `_`" stops being true. It should state what now holds:
   the character is chosen per run, and the rule is keyed on the choice.
@@ -360,13 +479,20 @@ deferred.
 
 ## 9. Non-goals
 
-- **The 428 residual is a floor for `*`/`_`, and §2.5.1 says exactly why.**
-  Every one of them is flanked by letter text, where neither character can open
-  or close, and where emitting anyway loses *text*. Only an HTML tag spells
-  them. This is a floor for the two-character alphabet, not a floor for the
-  writer — see the next bullet — and it is emphatically not a queue.
+- **The 428 flanking residual is a floor for `*`/`_`, and §2.5.1 says exactly
+  why.** Every one of them is flanked by letter text, where neither character
+  can open or close, and where emitting anyway loses *text*. Only an HTML tag
+  spells them. This is a floor for the two-character alphabet, not a floor for
+  the writer — see the next bullet — and it is emphatically not a queue.
 
-  Two cautions on the number. It is **not** a floor because nesting depth
+  The shipped permanent file is **433**, not 428: condition 4 adds five shapes
+  that are *not* part of this floor. Those five are spellable with `_` — the
+  writer declines on purpose, because taking it would cost a class (§3
+  condition 4, §1.1). They are a deliberate trade, and if the fuse they dodge is
+  ever fixed at its source they leave the file. Do not read them as
+  representational limits, and do not fold them into the floor.
+
+  Two cautions on the 428. It is **not** a floor because nesting depth
   exhausts the alphabet: alternation handles depth 3 (`_*_a_*_`), and the first
   draft of this spec claimed otherwise. And it is not corroborated by the
   2026-08-17 probe's ~244: that figure came from a different method over a
@@ -407,3 +533,16 @@ call and one `grep`. A claim about a *floor* asserts that no future change can
 help, which is the one class of claim in this repo that nothing downstream
 re-examines; it should never be the part of a spec that was reasoned rather than
 run.
+
+**A third instance, and it is the same shape as the first.** §2.4 measured
+`broken (clean → wrong) = 0` and §1 reported it as "zero regressions". The
+measurement was right; the word was wider than the measurement. The transition
+that actually regressed — `Inexpressible → Corrupt`, a parked loss turning
+into an unparked one — was never in the probe's table, so a set that was already
+"wrong" could get worse without moving a counter. Ask which *transitions* a
+zero covers, not just which shapes: an allowlist is a place a regression can
+hide, because both sides of it read as failure.
+
+That one was caught by a gate rather than by a re-measurement, and only because
+the family had a length-3 member — which is §6.1's follow-up, and the reason
+that gap is written down here rather than left to the next person to rediscover.

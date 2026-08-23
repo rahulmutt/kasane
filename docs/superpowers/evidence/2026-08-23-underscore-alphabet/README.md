@@ -177,10 +177,32 @@ $ docs/superpowers/evidence/2026-08-23-underscore-alphabet/harnesses/structural-
 
 **135 shapes at length 4 and 3,134 at length 5 regressed from `Inexpressible`
 to `Corrupt` before the fix, and the fix closes every one of them — zero
-regressions against `main` at either length, every recovery intact.** These
-figures reproduce exactly the numbers measured (and archived only in a task
-report, not committed) by the fix's own author; this harness makes them
-reproducible on demand rather than asserted.
+regressions against `main` at either length, every recovery intact.** This
+harness makes those figures reproducible on demand rather than asserted.
+
+**Five of the six figures reproduce the fix author's own numbers identically
+(135, 0, 135, 3,134, 0, and 3,134 in the rows above). The sixth differs, and it
+is a labelling gap, not a measurement conflict.** The harness prints
+**588,423** improvements at length 5; the author's figure is **589,543**. They
+count different things:
+
+* 588,423 = 536,239 `INEXPR→CLEAN` + 52,184 `CORRUPT→CLEAN` — every shape that
+  reaches `Clean`, which is what this harness's `->CLEAN improvements` label
+  means.
+* 589,543 = 588,423 + 1,120 `CORRUPT→INEXPR` — the same set plus the shapes
+  that improve from corrupt to a parked, already-accounted-for loss without
+  reaching `Clean`.
+
+Both are correct counts of their own set. **588,423, labelled "improved to
+`Clean`", is the one to quote**, because it is what this reproducible harness
+prints, and it is what
+`2026-08-23-delimiter-choice-ordering-design.md` §1.1 uses. Length 4 has no such
+gap: 31,376 either way, since nothing moved `CORRUPT→INEXPR` there.
+
+Commit `0909b3a`'s message carries 589,543. That message cannot be corrected
+without rewriting history, which this repo is not doing, so this file is where
+the record is set straight: the commit message's number is the wider count, not
+a different measurement.
 
 A **structural** length-4 tier is the smallest shipped guard that would have
 spoken here; it is a follow-up, not part of this branch.

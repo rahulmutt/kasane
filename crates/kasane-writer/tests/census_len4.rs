@@ -16,8 +16,21 @@
 //! Zero here says nothing about text outside it, and the property tier
 //! (`properties.rs`) remains the only guard there. That scope statement is
 //! load-bearing: `census-inexpressible.txt` spent months asserting "Markdown
-//! cannot express" when it meant "this alphabet cannot express", and 88% of it
-//! was wrong.
+//! cannot express" when it meant "this writer does not express", and ~78% of
+//! it was wrong (1,984 entries down to 433 on 2026-08-23).
+//!
+//! This line said "this alphabet cannot express" and "88%" until 2026-08-23.
+//! Both came from a probe that measured what CommonMark can spell rather than
+//! what this pipeline can emit; the alphabet was never the constraint, decision
+//! order was, and the corrected figure is in `permanence_ceiling`'s doc in
+//! `census.rs`. The verdict survived its reason.
+//!
+//! **And this tier is text-only, which is its own gap.** `census.rs`'s
+//! structural tier stops at length 3, so no shipped gate prices structure above
+//! length 3 — which let a 3,134-shape structural regression through at length 5
+//! in this very branch, caught only because the family had a length-3 member.
+//! A structural length-4 tier is the named follow-up;
+//! `2026-08-23-delimiter-choice-ordering-design.md` §6.1 is the record.
 
 mod census_support;
 

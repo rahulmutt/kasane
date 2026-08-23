@@ -26,9 +26,13 @@
 //! tier compares, for each character, the stack of emphasis containers
 //! enclosing it on both sides, and runs only where the text tier already
 //! passes. `census-known-structure-corrupt.txt` is its queue, target zero;
-//! `census-inexpressible.txt` holds the shapes *this writer's `*`-only
-//! alphabet* cannot express — not, as this line said until 2026-08-17, shapes
-//! Markdown cannot express: `_*x*_` spells `<em><em>x</em></em>`. The split
+//! `census-inexpressible.txt` holds the shapes *this writer does not express* —
+//! not, as this line said until 2026-08-17, shapes Markdown cannot express:
+//! `_*x*_` spells `<em><em>x</em></em>`. It said *this writer's `*`-only
+//! alphabet* until 2026-08-23, which the delimiter-choice reorder retired too:
+//! the writer spells runs with `*` and `_`, and the alphabet was never the
+//! constraint (`2026-08-23-delimiter-choice-ordering-design.md` §2). See
+//! `INEXPRESSIBLE_HEADER` for the two reasons an entry lands there. The split
 //! between those two files is computed on every bless, never hand-edited, and
 //! growth of the permanent file is gated by `census-permanent-count.txt`
 //! (see `permanence_ceiling`).
@@ -256,9 +260,22 @@ fn blessing() -> bool {
 ///
 /// The gate exists because the claim went wrong at scale once already. A probe
 /// on 2026-08-17 searched every `*`/`_` spelling of each shape in this file and
-/// found 1,740 of 1,984 expressible — the file was 88% wrong, and 748 of those
-/// entries had been moved in by a single bless
-/// (`2026-08-16-cross-class-edge-splice-design.md` §4).
+/// found 1,740 of 1,984 expressible; 748 of those entries had been moved in by
+/// a single bless (`2026-08-16-cross-class-edge-splice-design.md` §4).
+///
+/// That probe's *reason* was itself wrong — it measured what CommonMark can
+/// spell, not what this pipeline can emit, and offering `_` at the emission
+/// site turned out to fix zero shapes
+/// (`2026-08-23-delimiter-choice-ordering-design.md` §2). Its *verdict* stood
+/// anyway: reordering the delimiter choice ahead of the splice took the file
+/// from 1,984 to 433 on 2026-08-23. The permanence claim was ~78% wrong, for a
+/// cause nobody had named.
+///
+/// And once, on this branch, the gate spoke in the other direction. The feature
+/// commit's bless lowered the ceiling to 428 while five shapes were sitting in
+/// the queue that belonged here; fixing that had to *raise* it back to 433 by
+/// hand, in the commit that needed it. Lowering is the cheap direction and it
+/// is also the direction that can quietly spend headroom a later fix needs.
 fn permanence_ceiling() -> usize {
     let raw = std::fs::read_to_string(PERMANENT_CEILING)
         .unwrap_or_else(|e| panic!("{PERMANENT_CEILING} must exist and be readable: {e}"));
@@ -315,46 +332,78 @@ fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<&str
 }
 
 const INEXPRESSIBLE_HEADER: &str = "\
-# Shapes whose structure THIS WRITER'S ALPHABET cannot express.
+# Shapes whose structure THIS WRITER DOES NOT EXPRESS.
 #
 # Not `Markdown cannot express`, which is what this line claimed until
-# 2026-08-17 and is false. Every mechanism below is forced by spelling emphasis
-# with `*` alone, and CommonMark also has `_`. Alternating the two spells all
-# three of these:
+# 2026-08-17 and is false. CommonMark has `_` as well as `*`, and alternating
+# the two spells all three of the mechanisms this file used to blame:
 #
 #   `_*x*_`     is `<em><em>x</em></em>`
 #   `__**x**__` is `<strong><strong>x</strong></strong>`
 #   `__*x*__`   is `<strong><em>x</em></strong>`
 #
-# A probe over every `*`/`_` spelling of every shape in this file found 1,740 of
-# 1,984 expressible -- so read this file as the queue for the item that widens
-# the alphabet, not as a statement about Markdown. What is genuinely
-# unspellable is narrower and has a different cause: CommonMark's left-flanking
-# rule, which stops any delimiter opening between a letter and punctuation, so
-# `aa*` + a code span + `*` cannot emphasize at all. `census-permanent-count.txt`
-# gates growth here for exactly this reason.
+# Since 2026-08-23 the writer emits exactly those. `choose_mark` picks a run's
+# delimiter CHARACTER before `splice_children` consults it, so a run spells
+# itself `_` where that is what keeps a colliding child alive.
 #
-# Two mechanisms, both forced by spelling emphasis with `*` alone:
+# This file held 1,984 entries until then and was described as the queue for an
+# alphabet-widening item, sized at 1,740 by a 2026-08-17 probe. That framing was
+# measured and destroyed: `_` offered at the delimiter-emission site fixes ZERO
+# shapes, because the colliding child is spliced away before any character is
+# chosen. The alphabet was never the constraint; decision order was. See
+# docs/superpowers/specs/2026-08-23-delimiter-choice-ordering-design.md §2.
+#
+# What is left is TWO classes, not one. As of 2026-08-23, 433 entries:
+#
+#   428, the flanking wall -- CommonMark stops either `*` or `_` opening or
+#     closing against a letter or digit, and the nested container in each of
+#     these has letter text against it. 156 have the container first, so it is
+#     the CLOSING delimiter that is blocked; the rest are blocked on the opener.
+#     (That 156 is scoped to this class. The same grep over the whole file gives
+#     159, because three of the five below also lead with a container -- for
+#     which leading position explains nothing, since flanking is not why they
+#     are here.)
+#     Emitting the delimiter anyway loses TEXT, not merely structure --
+#     `_*a*_a` parses as `_<em>a</em>_a`, underscores and all. Only an HTML tag
+#     spells these.
+#   5, a deliberate refusal -- three sibling `Emph`s, one of them wrapping a
+#     `Strong`. `choose_mark`'s fourth condition declines `_` here because the
+#     child that declining the splice would save then FUSES into the `Strong`
+#     beside it: `run_len` groups printed neighbours by character, not by class,
+#     so the saved `Emph` is absorbed and its text comes back wearing a class it
+#     was never in. That substitutes a class where the splice only erases a
+#     level, so the splice is paid and the shape lands here. Pinned by
+#     `a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class`.
+#
+# The structural loss itself is one of two mechanisms, both of them the cost of
+# spelling a run and its child with the SAME character. Alternation closes both
+# -- the three spellings above are what the writer now emits -- so these entries
+# are the ones where alternation is unavailable:
 #
 #   same-class nesting            -- a container whose sole child is the same
-#                                     class collapses: `<em><em>x</em></em>`
-#                                     prints `*x*`, not nested emphasis, and
+#                                     class collapses onto it: on one character
+#                                     alone, `<em><em>x</em></em>` prints `*x*`,
+#                                     not nested emphasis, and
 #                                     `<strong><strong>x</strong></strong>`
 #                                     prints `**x**`, not doubly strong --
 #                                     `****x****` is never what the writer
 #                                     prints, because the nested container is
 #                                     merged away before printing.
-#   `<strong><em>x</em></strong>` -- `***x***` is the only run that could carry
-#                                    both levels, and CommonMark's tie-break
-#                                    always resolves it em-outermost.
+#   `<strong><em>x</em></strong>` -- on one character alone, `***x***` is the
+#                                    only run that could carry both levels, and
+#                                    CommonMark's tie-break always resolves it
+#                                    em-outermost.
 #
 # The converse of the second, `<em><strong>x</strong></em>`, IS spellable and
 # is not here -- the writer prints `***x***` for it. That asymmetry is what
 # keeps a regression of the fixed family out of this file.
 #
-# No writer change can close these WITHOUT WIDENING THE ALPHABET, which is why
-# they are not in the queue (`census-known-structure-corrupt.txt`) -- the queue
-# is what the current alphabet can still reach.
+# These are not in the queue (`census-known-structure-corrupt.txt`) because no
+# choice of delimiter character closes them: the queue is what the writer can
+# still reach. This line said `no writer change can close these WITHOUT
+# WIDENING THE ALPHABET` until 2026-08-23, when the alphabet stopped being the
+# frame -- widening it further means emitting HTML, which is a product question
+# and its own item. `census-permanent-count.txt` gates growth here.
 #
 # COMPUTED, never hand-edited. A shape lands here only if it BOTH nests,
 # directly, a same-class container or a `<strong>` whose sole child is an
@@ -362,6 +411,11 @@ const INEXPRESSIBLE_HEADER: &str = "\
 # classes and dropping an emphasis directly inside a strong. Stop satisfying
 # either and it moves back to the queue on the next bless. See
 # `docs/superpowers/specs/2026-08-16-cross-class-edge-splice-design.md` §4.
+#
+# THIS HEADER IS GENERATED. It is the `INEXPRESSIBLE_HEADER` constant in
+# `census.rs`, written out ahead of the entries on every bless. The checker
+# filters `#` lines, so a hand-edit here passes the gate and is then silently
+# reverted by the next bless. Edit the constant and re-bless.
 #
 # Regenerate: KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census
 ";
