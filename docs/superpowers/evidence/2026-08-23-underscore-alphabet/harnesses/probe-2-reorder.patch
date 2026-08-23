@@ -1,0 +1,105 @@
+diff --git a/crates/kasane-writer/src/lib.rs b/crates/kasane-writer/src/lib.rs
+index 4f0358c..8a73722 100644
+--- a/crates/kasane-writer/src/lib.rs
++++ b/crates/kasane-writer/src/lib.rs
+@@ -8,6 +8,8 @@ mod markdown;
+ pub use library::{write_library_index, LibraryEntry, LibraryFailure};
+ pub use markdown::blocks_to_markdown;
+ #[doc(hidden)]
++pub use markdown::probe;
++#[doc(hidden)]
+ pub use markdown::{blocks_to_markdown_with_ledger, Ledger};
+ 
+ use anyhow::{bail, Context, Result};
+diff --git a/crates/kasane-writer/src/markdown.rs b/crates/kasane-writer/src/markdown.rs
+index f02c77b..89ac470 100644
+--- a/crates/kasane-writer/src/markdown.rs
++++ b/crates/kasane-writer/src/markdown.rs
+@@ -1475,7 +1475,34 @@ fn emphasis_run<'a>(
+     after: Flank,
+     ledger: Ledger,
+ ) -> RunOut<'a> {
+-    let children = splice_children(run_children(members), want, ledger);
++    // --- PROBE 2: choose the delimiter character BEFORE the splice ---
++    let raw = run_children(members);
++    let collides = edge_to_splice(&raw, want, ledger).is_some()
++        || same_delim_to_splice(&raw, want, ledger).is_some();
++    let parent_under = probe::PARENT_UNDER.load(std::sync::atomic::Ordering::SeqCst);
++    let flanks_ok = before != Flank::Other && after != Flank::Other;
++    let use_under = probe::MODE.load(std::sync::atomic::Ordering::SeqCst) == 3
++        && !parent_under
++        && collides
++        && flanks_ok;
++    if probe::MODE.load(std::sync::atomic::Ordering::SeqCst) == 3 && collides && !use_under {
++        probe::REFUSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    }
++    if use_under {
++        probe::CHOSE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++    }
++    let markup: &str = if use_under {
++        if want == escape::Delim::Strong { "__" } else { "_" }
++    } else {
++        markup
++    };
++    // With a different character than every child will print, no child can
++    // abut or mis-pair with this run's delimiters, so the splice is unneeded.
++    let children = if use_under {
++        raw
++    } else {
++        splice_children(raw, want, ledger)
++    };
+     // `probe_edges` reaches the same open/close decision `inner.trim()`'s own
+     // first and last characters used to, without rendering `inner` to get
+     // there -- see its doc, and `Edge`'s, for why the old order (render,
+@@ -1494,7 +1521,10 @@ fn emphasis_run<'a>(
+     // "prints, but only whitespace" leave neither field set), so matching
+     // both at once is exhaustive, not just convenient.
+     let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
+-        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger));
++        let prev_pu = probe::PARENT_UNDER.swap(use_under, std::sync::atomic::Ordering::SeqCst);
++        let r = inlines_to_md_flat(children, ctx, pos, ledger);
++        probe::PARENT_UNDER.store(prev_pu, std::sync::atomic::Ordering::SeqCst);
++        return RunOut::Emitted(r);
+     };
+     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
+     // the delimiter it appends, so when that whitespace exists it -- not
+@@ -1529,7 +1559,9 @@ fn emphasis_run<'a>(
+         // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
+         // context-threading fix in this same round did not remove it for
+         // free, and restructuring further was out of scope for the round.
++        let prev_pu = probe::PARENT_UNDER.swap(use_under, std::sync::atomic::Ordering::SeqCst);
+         let inner = inlines_to_md_flat(children, ctx, pos, ledger);
++        probe::PARENT_UNDER.store(prev_pu, std::sync::atomic::Ordering::SeqCst);
+         // The one maintainability cost of computing the flanking edges without
+         // rendering is that two functions now have to agree about them, and an
+         // edit to either could desynchronise them in silence. This path
+@@ -1625,6 +1657,29 @@ fn indent_continuation(body: &str, indent: &str) -> String {
+     out
+ }
+ 
++
++// ===== PROBE 2 HOOK (throwaway) =====
++#[doc(hidden)]
++pub mod probe {
++    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
++    /// 0 = ship. 3 = reorder: choose `_` before the splice and suppress it.
++    pub static MODE: AtomicU64 = AtomicU64::new(0);
++    pub static PARENT_UNDER: AtomicBool = AtomicBool::new(false);
++    /// Runs where `_` was chosen, and runs where a collision existed but the
++    /// flanks refused `_` (so the splice still had to fire).
++    pub static CHOSE: AtomicUsize = AtomicUsize::new(0);
++    pub static REFUSED: AtomicUsize = AtomicUsize::new(0);
++    pub fn reset(mode: u64) {
++        MODE.store(mode, SeqCst);
++        PARENT_UNDER.store(false, SeqCst);
++        CHOSE.store(0, SeqCst);
++        REFUSED.store(0, SeqCst);
++    }
++    pub fn counts() -> (usize, usize) {
++        (CHOSE.load(SeqCst), REFUSED.load(SeqCst))
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;

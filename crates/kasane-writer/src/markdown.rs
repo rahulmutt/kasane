@@ -270,7 +270,7 @@ fn flatten_into<'a>(inls: &'a [Inline], depth: usize, out: &mut Vec<Flat<'a>>) {
 fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
     let mut view = Vec::new();
     flatten_into(inls, depth, &mut view);
-    inlines_to_md_flat(view, ctx, pos, ledger)
+    inlines_to_md_flat(view, ctx, pos, ledger, None)
 }
 
 /// `pos` is threaded, not inferred: it names where the next character emitted
@@ -296,7 +296,22 @@ fn inlines_to_md_at(inls: &[Inline], depth: usize, ctx: Ctx, pos: Pos, ledger: L
 /// fused emphasis run's members' children are siblings too. Scanning IR
 /// siblings alone left the defect open one level down, at every container seam
 /// (`[Emph([Code("x")]), Emph([Code("y")])]` printed `` *`x``y`* ``).
-fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledger) -> String {
+///
+/// `parent_ch` is the delimiter character of the run this view is the *inside*
+/// of, and `None` for a view no emphasis run encloses — a paragraph, a heading,
+/// a table cell. It carries [`choose_mark`]'s third condition and is read
+/// nowhere else: a child that took its parent's character would rebuild one
+/// level down the very collision the parent chose that character to avoid
+/// (`___a___` is `<em><strong>a</strong></em>`, not two nested `<em>`s). Every
+/// run in this view is offered the same value, and a run that emits hands its
+/// *own* chosen character down to its children rather than passing this one on.
+fn inlines_to_md_flat<'a>(
+    items: Vec<Flat<'a>>,
+    ctx: Ctx,
+    pos: Pos,
+    ledger: Ledger,
+    parent_ch: Option<char>,
+) -> String {
     // The view is split at the cursor rather than held as one vector with an
     // index, and `pending` is held *reversed*, because a declined run rewrites
     // the view at the cursor and the obvious spelling of that rewrite is
@@ -377,16 +392,15 @@ fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledg
             Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
                 let after_class = next_class_of(pending[..tail].iter().rev().copied());
-                let markup = if d == escape::Delim::Emph { "*" } else { "**" };
                 match emphasis_run(
                     members,
                     d,
                     ctx,
                     pos,
-                    markup,
                     before_class,
                     after_class,
                     ledger,
+                    parent_ch,
                 ) {
                     RunOut::Emitted(t) => s.push_str(&t),
                     RunOut::Declined(children) => {
@@ -762,7 +776,7 @@ fn may_abut(outer: escape::Delim, inner: escape::Delim, site: Site, ledger: Ledg
 /// did not intend, so two adjacent emphasis runs of different classes are one
 /// run (design spec §2.1, seam two). Grouping only needs the character, and
 /// `items[start]`'s is always the right one to seed with even when
-/// `items[start]` is itself vacuous: `Delim::ch()` maps both `Emph` and
+/// `items[start]` is itself vacuous: `Delim::child_ch()` maps both `Emph` and
 /// `Strong` to `*` regardless of a container's contents, so no vacuous
 /// element can seed the wrong character. The run's *class* — which of
 /// `Emph`/`Strong` actually gets spelled — is a different question, and the
@@ -794,7 +808,7 @@ fn run_len<'a>(items: impl IntoIterator<Item = Flat<'a>>, ledger: Ledger) -> usi
     let Some(d) = escape::delim(first) else {
         return 1;
     };
-    let ch = d.ch();
+    let ch = d.child_ch();
     // The run's class, decided by its first *printing* member — `None` while
     // every member so far is vacuous. This is what makes a class-keyed seam
     // answerable from inside `run_end` without circularity: the walk is left
@@ -810,7 +824,7 @@ fn run_len<'a>(items: impl IntoIterator<Item = Flat<'a>>, ledger: Ledger) -> usi
             continue;
         }
         let Some(next) = escape::delim(el) else { break };
-        if next.ch() != ch {
+        if next.child_ch() != ch {
             break;
         }
         if class_so_far.is_some_and(|cls| may_abut(cls, next, Site::RunSeam, ledger)) {
@@ -866,8 +880,8 @@ fn run_children<'a>(members: &[Flat<'a>]) -> Vec<Flat<'a>> {
 /// One of two sources [`splice_children`] draws splice candidates from — see
 /// its doc for why this one tests the character and stops at the edges, while
 /// [`same_delim_to_splice`] is keyed on the `Delim` and looks everywhere.
-fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) -> Option<usize> {
-    let ch = want.ch();
+fn edge_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger) -> Option<usize> {
+    let ch = run.ch;
     let printing = |&(i, d): &Flat<'_>| !renders_empty(i, d);
     let first = children.iter().position(printing);
     let last = children.iter().rposition(printing);
@@ -875,7 +889,7 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
         let Some(inner) = escape::delim(children[idx].0) else {
             return false;
         };
-        if inner.ch() != ch {
+        if inner.child_ch() != ch {
             return false;
         }
         let site = if first == last {
@@ -885,7 +899,7 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
         } else {
             Site::TailEdge
         };
-        !may_abut(want, inner, site, ledger)
+        !may_abut(run.class, inner, site, ledger)
     })
 }
 
@@ -899,24 +913,208 @@ fn edge_to_splice(children: &[Flat<'_>], want: escape::Delim, ledger: Ledger) ->
 ///
 /// The `may_abut` query below is position-blind by construction: it always
 /// asks `Site::Interior`, even for a child [`edge_to_splice`] would have
-/// asked about with `HeadEdge`/`TailEdge`/`WholeRun` first. That is
-/// behaviour-neutral today, since no same-`Delim` triple has an arm at any
-/// site, but it is a live hazard for later widening — `edge_to_splice` runs
-/// first and only defers a child when `may_abut` licenses it there, so
-/// licensing a same-`Delim` cell at `WholeRun` (say) would make
-/// `edge_to_splice` decline that child while this function, asking the same
-/// child under the unlicensed `Interior`, splices it anyway on the very next
-/// loop iteration of `splice_children`. A future cell here has to widen
-/// *this* site, or teach this function the candidate's edge position too, not
-/// just add an arm to `bit_for`.
-fn same_delim_to_splice(
-    children: &[Flat<'_>],
-    want: escape::Delim,
-    ledger: Ledger,
-) -> Option<usize> {
+/// asked about with `HeadEdge`/`TailEdge`/`WholeRun` first. This used to be a
+/// live hazard for widening -- licensing a same-`Delim` cell at some other
+/// site would make `edge_to_splice` defer a child that this function then
+/// spliced anyway on the next loop iteration. The 2026-08-23 delimiter-choice
+/// item retired it: both rules are now keyed on the run's chosen character and
+/// agree before either fires, so a run that keeps a child cannot have that
+/// child removed by the other rule.
+fn same_delim_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger) -> Option<usize> {
     children.iter().position(|&(i, _)| {
-        escape::delim(i) == Some(want) && !may_abut(want, want, Site::Interior, ledger)
+        let Some(inner) = escape::delim(i) else {
+            return false;
+        };
+        inner == run.class
+            && inner.child_ch() == run.ch
+            && !may_abut(run.class, run.class, Site::Interior, ledger)
     })
+}
+
+/// Whether this run's children, left exactly as they are, contain a run that
+/// would fuse printing members of two different delimiter classes into one
+/// span.
+///
+/// [`run_len`] groups neighbours by the character a child is *predicted* to
+/// print, not by class, so an `Emph` beside a `Strong` is one run — deliberately,
+/// because `*` and `**` abut into a `***` a parser re-splits. The fused run is
+/// spelled with its first printing member's class, so every character from a
+/// member of the *other* class comes back wearing a class it was never in. That
+/// is a class substitution, which the structural census counts as corruption,
+/// where a splice only ever erases a level.
+///
+/// Only [`choose_mark`] asks this, and only about the *unspliced* children: it
+/// is one side of the trade, not a comparison of the two sides. A `true` here
+/// says a cross-class fuse exists among these children — not that declining the
+/// splice is what causes it, and not that splicing would remove the members
+/// that fuse. See [`choose_mark`]'s doc for what that costs.
+/// A run of members that all share one class is not a fusion this cares about —
+/// every character keeps its class, which is what makes adjacent-run fusion
+/// deliberate rather than a defect.
+fn fuses_across_classes(children: &[Flat<'_>], ledger: Ledger) -> bool {
+    let mut i = 0;
+    while i < children.len() {
+        // `run_len` returns 0 only for an exhausted iterator, and `children[i..]`
+        // is non-empty here; `max(1)` is what makes that reading structural
+        // rather than a comment, since a 0 would spin this loop forever.
+        let k = run_len(children[i..].iter().copied(), ledger).max(1);
+        let mut class = None;
+        for &(el, depth) in &children[i..i + k] {
+            if renders_empty(el, depth) {
+                continue;
+            }
+            let Some(this) = escape::delim(el) else {
+                continue;
+            };
+            match class {
+                None => class = Some(this),
+                Some(seen) if seen != this => return true,
+                Some(_) => {}
+            }
+        }
+        i += k;
+    }
+    false
+}
+
+/// Which character this run spells its delimiter with.
+///
+/// The single decision point. [`emphasis_run`] and [`probe_edges`] both call
+/// it and neither may re-derive it locally: the probe stands in for the
+/// render, so a second copy of this rule would be a second answer that nothing
+/// compares. (They call it with the *same* rule but not always with the same
+/// context, and so do not always reach the same answer — see "The
+/// probe/render invariant" below, which is where that is made safe.)
+///
+/// Chooses `_` where a collision would otherwise cost a container, the flanks
+/// permit it, the parent did not already take it, and the children it would
+/// keep contain no cross-class fuse (design spec
+/// `2026-08-23-delimiter-choice-ordering-design.md` §3, plus the fourth
+/// condition the census ratchet forced on 2026-08-23). Otherwise `*`.
+///
+/// The fourth condition is the one that is not about spelling. The other three
+/// ask whether `_` is *legal* and *useful*; this one weighs what keeping the
+/// children costs. A `_` run keeps its children, and kept children are
+/// neighbours in one printed line that [`run_len`] fuses by character rather
+/// than by class — so a saved `Emph` next to a `Strong` is absorbed into it and
+/// its text comes back wearing the wrong class. A splice erases an emphasis
+/// level; that fuse substitutes one, and the structural census counts a
+/// substitution as corruption and an erasure as merely inexpressible. Where
+/// the choice is between them, `*` is the lesser loss. See
+/// [`fuses_across_classes`], and
+/// `a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class`.
+///
+/// Condition 4 is **conservative**, in the same direction and for the same
+/// kind of reason `escape::Delim::child_ch` is. It does not compare the `_`
+/// world against the `*` world: [`fuses_across_classes`] asks only whether a
+/// cross-class fuse exists among the children *at all*, never whether it
+/// exists in the world where the splice is declined and not in the world where
+/// it fires. Where the fusing members are not the ones the splice would have
+/// removed, both worlds fuse identically, the `_` would have cost nothing, and
+/// it is declined anyway.
+/// `Emph([Emph([Emph a]), Text x, Emph b, Strong c])` is such a shape: the
+/// fusing pair is `[Emph b, Strong c]` at the tail, while [`edge_to_splice`]
+/// removes the head `Emph`. It prints `*axbc*`; the same shape with an `Emph c`
+/// in place of the `Strong c` prints `_*a*x*bc*_` and keeps a level. The cost
+/// is a missed recovery, never a corruption — an over-eager condition 4 only
+/// ever falls back to the splice, which is the erasure side of the very trade
+/// the condition exists to make.
+///
+/// # The probe/render invariant
+///
+/// [`emphasis_run`] renders; [`probe_edges`] is the cheap flanking probe that
+/// stands in for it; `debug_assert_eq!(edge, Edge::of(&inner))` holds the two
+/// together and compiles out of release. The probe does not always see the
+/// context the render will: for the first run in a view it falls back to
+/// `outer_before` where the render's own buffer is empty and answers
+/// [`Flank::Space`], and for the tail run it uses `outer_after` likewise (see
+/// [`probe_edges`]'s doc for why those are the right answers to *its*
+/// question). Since 2026-08-23 this function is a **second consumer** of that
+/// approximated context, and the two consumers do not read it the same way:
+/// [`can_open`]/[`can_close`] see it through `open_before`/`close_after`,
+/// which mask it to [`Flank::Space`] whenever the sub-view's own edge is
+/// whitespace, while condition 2 reads it raw.
+///
+/// So probe and render can pick *different characters for the same run*, and
+/// do. `[Text("x"), Emph([Strong([Emph([Text(" a")])])])]` renders
+/// `x *__*a*__*`: the enclosing probe evaluates that `Strong` run against
+/// [`Flank::Other`] (the `x`) and picks `**`, the render evaluates it against
+/// [`Flank::Space`] (its own empty buffer) and picks `__`, and both emit. The
+/// disagreement reaches the emit path; it is not structurally excluded from it.
+///
+/// Two things make it harmless, and both are properties of the *alphabet*
+/// rather than of either function:
+///
+/// 1. [`Edge`] records a character only through [`class_of`], and
+///    `class_of('*') == class_of('_') == Flank::Punct`. An emitting run
+///    contributes `first_class`/`last_class` of `Punct` whichever character it
+///    chose, so a character disagreement alone cannot move any field
+///    `debug_assert_eq!` compares. Pinned by
+///    `both_emphasis_characters_are_punctuation_to_the_flanking_rules`.
+/// 2. The character is not only a spelling: [`splice_children`] is keyed on
+///    it, so the `**` world splices a child the `__` world keeps and the two
+///    walk *different child views*. [`Edge`] cannot see that either, because an
+///    emitting run overwrites `first_class`/`last_class` with `Punct` and
+///    inherits only `leading_ws`/`trailing_ws`/`trailing_newline` from its
+///    sub-view — and splicing a container away removes only its delimiters,
+///    which are punctuation and never whitespace, [`emphasize`] having already
+///    hoisted a child's edge whitespace outside them. Nothing pins this half.
+///
+/// **The contract.** A third delimiter character, or a condition 2 replaced by
+/// CommonMark's exact `_` rule (which reads the flanks more finely than
+/// `!= Flank::Other`), touches neither [`probe_edges`] nor [`emphasis_run`] and
+/// breaks this coupling from here. Before either:
+///
+/// - every character this function can return must be `Flank::Punct` to
+///   [`class_of`], or point 1 fails and the probe's [`Edge`] starts recording
+///   which of the two worlds it came from;
+/// - a wider or finer rule makes probe and render disagree about the character
+///   *more often*. That is not itself a bug — only the render's choice is
+///   printed — but every such disagreement decides the enclosing run's
+///   emit/decline against a subtree that is not the one about to be printed,
+///   and point 2 is the whole of what keeps that from mattering. Point 2 is
+///   argued, not measured: widen the alphabet and it needs a differential
+///   harness, not a re-read.
+fn choose_mark(
+    want: escape::Delim,
+    raw_children: &[Flat<'_>],
+    before: Flank,
+    after: Flank,
+    parent_ch: Option<char>,
+    ledger: Ledger,
+) -> escape::Mark {
+    let star = escape::Mark::new(want, '*');
+    // Condition 1: only where a collision would otherwise cost a container.
+    // Without this, `_` would rewrite the spelling of documents that already
+    // round-trip and buy nothing; it is why the sweep measured 0 broken.
+    let collides = edge_to_splice(raw_children, star, ledger).is_some()
+        || same_delim_to_splice(raw_children, star, ledger).is_some();
+    // Condition 2: CommonMark forbids `_` opening or closing against a letter
+    // or digit. Emitting it anyway is *text* loss -- `_*a*_a` parses as
+    // `_<em>a</em>_a` -- so this is mandatory, not conservative.
+    let flanks_permit = before != Flank::Other && after != Flank::Other;
+    // Condition 3: a child taking its parent's character rebuilds the
+    // collision one level down. `___a___` is `<em><strong>a</strong></em>`.
+    // `None` is "no enclosing emphasis run", which no character equals.
+    let parent_took_it = parent_ch == Some('_');
+    // Condition 4: refuse `_` where the children it would keep contain a
+    // cross-class fuse. Kept children are neighbours in one printed line, and
+    // `run_len` fuses neighbours by character rather than by class -- so a saved
+    // `Emph` beside a `Strong` is absorbed into it and comes back wearing the
+    // wrong class. A splice erases a level; this substitutes one, which is
+    // strictly worse, so the trade is refused.
+    //
+    // This tests the unspliced children for such a fuse *at all*; it does not
+    // ask whether the splice would have removed the member that fuses. Where
+    // the splice would not have, both worlds fuse alike and a free `_` is
+    // refused -- a missed recovery, never a corruption. The function doc traces
+    // one such shape.
+    let fusion_would_cost_a_class = fuses_across_classes(raw_children, ledger);
+    if collides && flanks_permit && !parent_took_it && !fusion_would_cost_a_class {
+        escape::Mark::new(want, '_')
+    } else {
+        star
+    }
 }
 
 /// Splice a run's children wherever a container collides with the run's own
@@ -948,15 +1146,27 @@ fn same_delim_to_splice(
 ///   and which this run scan exists to retire rather than reimplement one
 ///   seam at a time. This rule also asks [`may_abut`] (`Site::Interior`)
 ///   rather than splicing unconditionally, but no triple licenses that site
-///   yet, so it still pays the cost on shapes it did not strictly have to —
-///   the same trade `fusing_adjacent_runs_costs_a_structural_boundary` pins
-///   for the run fuse, paid here for the same reason and pinned by
-///   `splicing_mid_buffer_costs_a_span_that_would_round_trip` (design spec §
-///   Confirmed). A container of a *different* length is unaffected and stays
+///   yet, so it still pays the cost when `choose_mark` cannot swap the
+///   character either — letter-flanked, a parent that already took `_`, or
+///   children that would fuse across classes if they were kept
+///   — the same trade `fusing_adjacent_runs_costs_a_structural_boundary`
+///   pins for the run fuse. Before 2026-08-23 it paid that cost
+///   unconditionally, even on a shape that would have round-tripped intact;
+///   `a_mid_buffer_span_that_would_round_trip_no_longer_costs_a_splice` pins
+///   that one example, now recovered instead of spliced because
+///   `choose_mark`'s rule chooses `_` before this splice ever runs (design
+///   spec § Confirmed). A container of a *different* length is unaffected and stays
 ///   where it is — `*a**b**c*` is exactly how
 ///   `<em>a<strong>b</strong>c</em>` is spelled and round-trips — which is
 ///   why this rule is keyed on `Delim` and not on the character the edge
 ///   rule uses.
+///
+///   Since 2026-08-23 there is a third option this rule does not have to
+///   reason about: a run that spells itself `_` shares no character with its
+///   `*` children, so CommonMark cannot pair them with each other at all and
+///   there is nothing to splice. That is why the alternative to splicing is
+///   choosing a different character, not mirroring the pairing algorithm
+///   §7 approach A rejects.
 ///
 /// These are two rules and not one rule with an inconsistent key: the
 /// character rule exists because two *different* classes abut into a run a
@@ -984,11 +1194,11 @@ fn same_delim_to_splice(
 /// `Flat` pairs. No `Inline` is cloned (design spec §2.2's constraint).
 fn splice_children<'a>(
     mut children: Vec<Flat<'a>>,
-    want: escape::Delim,
+    run: escape::Mark,
     ledger: Ledger,
 ) -> Vec<Flat<'a>> {
-    while let Some(idx) = edge_to_splice(&children, want, ledger)
-        .or_else(|| same_delim_to_splice(&children, want, ledger))
+    while let Some(idx) = edge_to_splice(&children, run, ledger)
+        .or_else(|| same_delim_to_splice(&children, run, ledger))
     {
         let (inline, depth) = children[idx];
         let (Inline::Emph(x) | Inline::Strong(x)) = inline else {
@@ -1255,6 +1465,13 @@ impl Edge {
 /// sampling past it. With that qualification, the function is exact for the
 /// reason its name claims: every run's own flanking decision matches what the real
 /// splice+rescan would reach, at any nesting depth and under any `Ledger`.
+///
+/// `parent_ch` is threaded for one reason and read in one place: it is
+/// [`choose_mark`]'s third condition, and the probe must offer it exactly what
+/// [`inlines_to_md_flat`] would offer at the same point or the two reach
+/// different rules rather than merely different answers. `None` means no
+/// enclosing emphasis run; see [`inlines_to_md_flat`] for what the condition is
+/// for.
 fn probe_edges(
     children: &[Flat<'_>],
     ctx: Ctx,
@@ -1262,6 +1479,7 @@ fn probe_edges(
     ledger: Ledger,
     outer_before: Flank,
     outer_after: Flank,
+    parent_ch: Option<char>,
 ) -> Edge {
     let mut acc = Edge::NONE;
     let mut pos = pos;
@@ -1282,7 +1500,6 @@ fn probe_edges(
         let contribution = match escape::delim(repr) {
             Some(escape::Delim::Backtick) => Edge::FIXED_PUNCT,
             Some(want @ (escape::Delim::Emph | escape::Delim::Strong)) => {
-                let inner_children = splice_children(run_children(members), want, ledger);
                 // Computed *before* the recursive call, not just before the
                 // flanking check below: they are this run's own outer
                 // context, and if this run itself declines, its children
@@ -1335,7 +1552,25 @@ fn probe_edges(
                 } else {
                     outer_after
                 };
-                let sub = probe_edges(&inner_children, ctx, pos, ledger, running_before, after_ctx);
+                let raw_inner = run_children(members);
+                let inner_mark = choose_mark(
+                    want,
+                    &raw_inner,
+                    running_before,
+                    after_ctx,
+                    parent_ch,
+                    ledger,
+                );
+                let inner_children = splice_children(raw_inner, inner_mark, ledger);
+                let sub = probe_edges(
+                    &inner_children,
+                    ctx,
+                    pos,
+                    ledger,
+                    running_before,
+                    after_ctx,
+                    Some(inner_mark.ch),
+                );
                 // Mirrors `emphasis_run`'s own `core.is_empty()` early return:
                 // an all-whitespace or empty sub-view gets no delimiters
                 // either way, so it never reaches the flanking question and
@@ -1416,7 +1651,7 @@ fn probe_edges(
                     );
                     let mut view = Vec::new();
                     flatten_into(inlines, depth + 1, &mut view);
-                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after)
+                    probe_edges(&view, ctx, pos, ledger, outer_before, outer_after, None)
                 }
             },
         };
@@ -1461,6 +1696,12 @@ enum RunOut<'a> {
 /// There is no per-member `pos` bookkeeping: the scan below owns the four `Pos`
 /// rules and applies them once per run member exactly as the outer loop does
 /// for any other neighbour.
+///
+/// `parent_ch` is the delimiter character of the run enclosing this one, and
+/// `None` where nothing encloses it. It is handed straight to [`choose_mark`]
+/// as its third condition and is read nowhere else here; what this run passes
+/// *down* is `run_mark.ch`, its own choice, never this. See
+/// [`inlines_to_md_flat`] for why a child may not take its parent's character.
 // Eight plain params, each threaded straight through from `inlines_to_md_flat`'s
 // one call site with no natural sub-grouping; a struct would just relocate the
 // noise.
@@ -1470,19 +1711,29 @@ fn emphasis_run<'a>(
     want: escape::Delim,
     ctx: Ctx,
     pos: Pos,
-    markup: &str,
     before: Flank,
     after: Flank,
     ledger: Ledger,
+    parent_ch: Option<char>,
 ) -> RunOut<'a> {
-    let children = splice_children(run_children(members), want, ledger);
+    let raw = run_children(members);
+    let run_mark = choose_mark(want, &raw, before, after, parent_ch, ledger);
+    let children = splice_children(raw, run_mark, ledger);
     // `probe_edges` reaches the same open/close decision `inner.trim()`'s own
     // first and last characters used to, without rendering `inner` to get
     // there -- see its doc, and `Edge`'s, for why the old order (render,
     // read four characters off the result, then on a decline throw the
     // whole rendered string away and have the caller re-render the same
     // subtree) cost `2^depth` for a chain of `depth` nested declines.
-    let edge = probe_edges(&children, ctx, pos, ledger, before, after);
+    let edge = probe_edges(
+        &children,
+        ctx,
+        pos,
+        ledger,
+        before,
+        after,
+        Some(run_mark.ch),
+    );
     // An all-whitespace or empty view gets no delimiters anyway --
     // `emphasize` says so itself -- and has no first or last character to
     // classify, so the flanking question does not arise. This is the one
@@ -1494,7 +1745,13 @@ fn emphasis_run<'a>(
     // "prints, but only whitespace" leave neither field set), so matching
     // both at once is exhaustive, not just convenient.
     let (Some(first_class), Some(last_class)) = (edge.first_class, edge.last_class) else {
-        return RunOut::Emitted(inlines_to_md_flat(children, ctx, pos, ledger));
+        return RunOut::Emitted(inlines_to_md_flat(
+            children,
+            ctx,
+            pos,
+            ledger,
+            Some(run_mark.ch),
+        ));
     };
     // `emphasize` moves any leading/trailing whitespace in `inner` to *outside*
     // the delimiter it appends, so when that whitespace exists it -- not
@@ -1529,7 +1786,7 @@ fn emphasis_run<'a>(
         // `MAX_INLINE_DEPTH`, so not a DoS; left as debt because the
         // context-threading fix in this same round did not remove it for
         // free, and restructuring further was out of scope for the round.
-        let inner = inlines_to_md_flat(children, ctx, pos, ledger);
+        let inner = inlines_to_md_flat(children, ctx, pos, ledger, Some(run_mark.ch));
         // The one maintainability cost of computing the flanking edges without
         // rendering is that two functions now have to agree about them, and an
         // edit to either could desynchronise them in silence. This path
@@ -1554,7 +1811,7 @@ fn emphasis_run<'a>(
              read off inlines_to_md_flat's own output. These two must agree, or a run's \
              emit/decline choice depends on which one was asked"
         );
-        RunOut::Emitted(emphasize(&inner, markup))
+        RunOut::Emitted(emphasize(&inner, run_mark.markup()))
     } else {
         // The delimiter would not flank where it lands, so a parser would read
         // it as a literal asterisk in the middle of the prose. The text is the
@@ -1629,6 +1886,149 @@ fn indent_continuation(body: &str, indent: &str) -> String {
 mod tests {
     use super::*;
     use kasane_ir::*;
+
+    fn md(inlines: Vec<Inline>) -> String {
+        blocks_to_markdown(&[Block::Para(inlines)], &AssetBag::default())
+            .trim_end()
+            .to_string()
+    }
+
+    fn em(i: Inline) -> Inline {
+        Inline::Emph(vec![i])
+    }
+    fn st(i: Inline) -> Inline {
+        Inline::Strong(vec![i])
+    }
+    fn tx(s: &str) -> Inline {
+        Inline::Text(s.into())
+    }
+
+    /// The three spellings `census-inexpressible.txt` advertised for two years and
+    /// the writer could not reach, because the container was spliced away before a
+    /// character was chosen (design spec 2026-08-23 §2.3).
+    #[test]
+    fn a_nested_container_survives_by_spelling_the_outer_run_with_an_underscore() {
+        assert_eq!(md(vec![em(em(tx("a")))]), "_*a*_");
+        assert_eq!(md(vec![st(st(tx("a")))]), "__**a**__");
+        assert_eq!(md(vec![st(em(tx("a")))]), "__*a*__");
+    }
+
+    /// Condition 2. `_` cannot open or close against a letter, and emitting it
+    /// anyway loses *text*, not merely structure: `_*a*_a` parses as
+    /// `_<em>a</em>_a`, with the underscores landing in the prose.
+    #[test]
+    fn a_letter_flank_refuses_the_underscore_and_the_splice_stands() {
+        assert_eq!(md(vec![tx("a"), em(em(tx("a"))), tx("c")]), "a*a*c");
+        assert_eq!(md(vec![em(em(tx("a"))), tx("a")]), "*a*a");
+        assert_eq!(md(vec![tx("a"), em(em(tx("a")))]), "a*a*");
+    }
+
+    /// Condition 3. A child taking its parent's character rebuilds the collision
+    /// one level down: `___a___` parses as `<em><strong>a</strong></em>`, not as
+    /// three nested emphases.
+    #[test]
+    fn a_child_never_takes_the_character_its_parent_took() {
+        for shape in [
+            vec![em(em(em(tx("a"))))],
+            vec![st(st(st(tx("a"))))],
+            vec![em(st(em(tx("a"))))],
+        ] {
+            let out = md(shape.clone());
+            assert!(!out.contains("___"), "{shape:?} produced {out:?}");
+        }
+    }
+
+    /// The cost of the conservative child prediction (design spec §4.2), pinned as
+    /// a limit of *that*, not as a representational one: Markdown spells this
+    /// shape as `_*_a_*_`. Outside the census alphabet, so it costs nothing today.
+    #[test]
+    fn the_conservative_child_prediction_still_loses_the_third_level() {
+        assert_eq!(md(vec![em(em(em(tx("a"))))]), "_*a*_");
+    }
+
+    /// `same_delim_to_splice` keys on class *and* character. A `Strong` inside an
+    /// `Emph` shares neither, and must still be left alone.
+    #[test]
+    fn a_strong_inside_an_emph_is_still_not_spliced() {
+        assert_eq!(
+            md(vec![Inline::Emph(vec![tx("a"), st(tx("b")), tx("c")])]),
+            "*a**b**c*"
+        );
+    }
+
+    #[test]
+    fn a_mark_spells_its_class_with_its_chosen_character() {
+        use escape::{Delim, Mark};
+        assert_eq!(Mark::new(Delim::Emph, '*').markup(), "*");
+        assert_eq!(Mark::new(Delim::Strong, '*').markup(), "**");
+        assert_eq!(Mark::new(Delim::Emph, '_').markup(), "_");
+        assert_eq!(Mark::new(Delim::Strong, '_').markup(), "__");
+        assert_eq!(Mark::new(Delim::Backtick, '`').markup(), "`");
+    }
+
+    /// Task 2 pinned the seam, not the rule: `choose_mark` is the only place a
+    /// character is decided. Until Task 3 it decided `*` every time; since
+    /// Task 3 (and Task 4a's fourth condition) it decides per the conditions
+    /// named on `choose_mark` itself, still from this one place
+    /// — `emphasis_run` and `probe_edges` still both call it and must still
+    /// reach the same answer.
+    ///
+    /// The first two cases collide (`kids` is a same-class `Emph` child, so
+    /// `same_delim_to_splice` would fire) with flanks that permit `_`, so
+    /// both choose it. The third has the same collision but `Other` flanks on
+    /// both sides, so condition 2 refuses `_` and it still says `*`.
+    #[test]
+    fn choose_mark_is_the_single_decision_point() {
+        use escape::{Delim, Mark};
+        let a = Inline::Emph(vec![Inline::Text("a".into())]);
+        let kids: Vec<Flat<'_>> = vec![(&a, 1)];
+        for (class, before, after, parent, want) in [
+            (
+                Delim::Emph,
+                Flank::Space,
+                Flank::Space,
+                None,
+                Mark::new(Delim::Emph, '_'),
+            ),
+            (
+                Delim::Strong,
+                Flank::Punct,
+                Flank::Punct,
+                None,
+                Mark::new(Delim::Strong, '_'),
+            ),
+            (
+                Delim::Emph,
+                Flank::Other,
+                Flank::Other,
+                Some('*'),
+                Mark::new(Delim::Emph, '*'),
+            ),
+        ] {
+            assert_eq!(
+                choose_mark(class, &kids, before, after, parent, Ledger::LICENSED),
+                want,
+            );
+        }
+    }
+
+    /// `Edge` classifies characters, and both emphasis characters classify the
+    /// same.
+    ///
+    /// This is point 1 of the probe/render contract written on `choose_mark`.
+    /// `probe_edges` and the render are handed different context in two
+    /// documented places, so they can choose different characters for the same
+    /// run — `[Text("x"), Emph([Strong([Emph([Text(" a")])])])]` is a shape
+    /// where they do — and this equality is the whole of why that cannot move
+    /// any field `debug_assert_eq!(edge, Edge::of(&inner))` compares. It is
+    /// also why widening the alphabet does not widen `Edge`'s surface (design
+    /// spec 2026-08-23 §4.4), *provided* the character added is punctuation to
+    /// `class_of` too — which is the assertion this test would have to grow.
+    #[test]
+    fn both_emphasis_characters_are_punctuation_to_the_flanking_rules() {
+        assert_eq!(class_of('*'), Flank::Punct);
+        assert_eq!(class_of('_'), Flank::Punct);
+    }
 
     #[test]
     fn renders_headings_emphasis_and_links() {
@@ -2654,6 +3054,104 @@ mod tests {
         );
     }
 
+    /// A run only spells itself `_` where that actually saves the container
+    /// the splice would have cost -- condition 4 of `choose_mark`'s rule.
+    ///
+    /// `choose_mark`'s condition 1 asks whether a collision exists, and
+    /// 2026-08-23's first cut stopped there. On these five shapes that was the
+    /// wrong question. Three sibling `Emph`s fuse into one run whose children
+    /// are the three containers; one of them collides, so the run took `_` and
+    /// `splice_children` found nothing to do. But the children it kept are
+    /// then plain neighbours in one printed line, and `run_len` groups
+    /// neighbours by the *character* a child prints (`Delim::child_ch` maps
+    /// both `Emph` and `Strong` to `*`), so the saved `Emph` fused into the
+    /// `Strong` beside it: `[Emph([Emph(a)]), Emph([Strong(a)]), Emph(a)]`
+    /// printed `_*aa*a_`, and the `<strong>` was gone with its text absorbed
+    /// into an `<em>` -- a class substitution, where the splice it was avoiding
+    /// only ever erased a level (`<em>a<strong>a</strong>a</em>`, one `<em>`
+    /// short of the IR). Erasing a level is bad; substituting one is worse, so
+    /// the `_` is declined and the splice paid instead.
+    ///
+    /// The control below is the other half of the rule, and the reason it is
+    /// keyed on the classes rather than on the bare fact of a fuse: two saved
+    /// `Emph`s fusing into each other lose no class at all -- that is
+    /// `fusing_adjacent_runs_costs_a_structural_boundary`'s cost only when the
+    /// members disagree -- so `_` is still taken there and
+    /// `<em><em>ab</em></em>` still round-trips.
+    #[test]
+    fn a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class() {
+        let em = |x: Vec<Inline>| Inline::Emph(x);
+        let st = |x: Vec<Inline>| Inline::Strong(x);
+        let t = |s: &str| Inline::Text(s.into());
+        let code = |s: &str| Inline::Code(s.into());
+
+        // All five shapes the census ratchet caught, with the structure a
+        // parser recovers -- not the bytes alone, which is what let the
+        // regression through: text loss stayed at zero the whole time.
+        for (inls, bytes, html) in [
+            (
+                vec![
+                    em(vec![em(vec![t("a")])]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![t("a")]),
+                ],
+                "*a**a**a*",
+                "<em>a<strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![t("a")]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![em(vec![t("a")])]),
+                ],
+                "*a**a**a*",
+                "<em>a<strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![em(vec![t("a")])]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![em(vec![t("a")])]),
+                ],
+                "*a**a**a*",
+                "<em>a<strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![code("x")]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![em(vec![t("a")])]),
+                ],
+                "*`x`**a**a*",
+                "<em><code>x</code><strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![em(vec![t("a")])]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![code("x")]),
+                ],
+                "*a**a**`x`*",
+                "<em>a<strong>a</strong><code>x</code></em>",
+            ),
+        ] {
+            assert_eq!(para(inls.clone()), bytes);
+            assert_eq!(recovered_html(inls.clone()), html, "printed {bytes}");
+            // The `<strong>` survives, which is the whole guarantee: every
+            // one of these recovers a `<strong>` wrapping exactly one `a`.
+            assert!(
+                recovered_html(inls.clone()).contains("<strong>a</strong>"),
+                "the strong was absorbed again: {bytes}"
+            );
+        }
+
+        // The control: same fuse, one class, so nothing is substituted and the
+        // `_` is still worth taking.
+        let same_class = vec![em(vec![em(vec![t("a")])]), em(vec![em(vec![t("b")])])];
+        assert_eq!(para(same_class.clone()), "_*ab*_");
+        assert_eq!(recovered_html(same_class), "<em><em>ab</em></em>");
+    }
+
     /// A vacuous leading member must not dictate the run's class. Before this
     /// test's fix, the emit loop's class match was read off `items[i]` — the
     /// run's *first* member — rather than its first *printing* one, so
@@ -2816,11 +3314,16 @@ mod tests {
     /// Both members' children sit at the run's own two edges (the run has
     /// exactly two members, so each one's child is both a first and a last),
     /// and both children's delimiter shares the `*` character with the run's
-    /// own (`Delim::ch`, not `Delim` equality — a `Strong` and an `Emph`
+    /// own (`Delim::child_ch`, not `Delim` equality — a `Strong` and an `Emph`
     /// collide on the character even though they are different `Delim`s), so
-    /// `splice_children`'s edge rule splices both away. The run then prints
-    /// with only its own delimiter: one pair, not the nested two the base
-    /// recovered `ab` through, and still exactly `ab`.
+    /// `splice_children`'s edge rule would have spliced both away.
+    ///
+    /// Since 2026-08-23 the run's own character is chosen first, and that
+    /// same edge collision is exactly condition 1 of `choose_mark`'s rule: the
+    /// run spells itself `_`, which shares no character with the children's
+    /// `*`, so `edge_to_splice` finds nothing and both nested pairs survive
+    /// intact — two pairs, not the one the old edge rule flattened to — still
+    /// recovering exactly `ab`.
     #[test]
     fn fusing_nested_emphasis_does_not_leak_its_delimiters() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
@@ -2830,15 +3333,15 @@ mod tests {
         let cases = [
             (
                 vec![em(vec![em(vec![t("a")])]), em(vec![em(vec![t("b")])])],
-                "*ab*",
+                "_*ab*_",
             ),
             (
                 vec![em(vec![st(vec![t("a")])]), em(vec![st(vec![t("b")])])],
-                "*ab*",
+                "_**ab**_",
             ),
             (
                 vec![st(vec![em(vec![t("a")])]), st(vec![em(vec![t("b")])])],
-                "**ab**",
+                "__*ab*__",
             ),
         ];
         for (inls, bytes) in cases {
@@ -2853,9 +3356,10 @@ mod tests {
     /// (Task 3) — and left alone in the middle when its `Delim` differs from
     /// the run's own, where content on both sides means nothing abuts
     /// (`a_container_mid_buffer_is_left_alone` pins that control on its own;
-    /// a same-`Delim` container in the middle is a different case, closed by
-    /// this task's own rule and pinned by
-    /// `a_same_class_container_mid_buffer_is_spliced`).
+    /// a same-`Delim` container in the middle is a different case that
+    /// `same_delim_to_splice` closed by splicing before 2026-08-23, and that
+    /// `choose_mark`'s rule now recovers instead by choosing `_`, pinned by
+    /// `a_same_class_container_mid_buffer_survives_via_underscore`).
     ///
     /// The leaking case was a regression the fusion item introduced:
     /// `[Emph([Emph(a)]), Emph([Text("bc")])]` printed `**a***bc*` at base and
@@ -2863,36 +3367,51 @@ mod tests {
     /// were concatenated and recovered `**abc`. The three edge cases below were
     /// broken at base too, in the same shape and for the same reason, and close
     /// with it.
+    ///
+    /// Since 2026-08-23 the fused run's own edge collision (each nested
+    /// `Emph` sits at a first-or-last position, so `edge_to_splice` would
+    /// have caught it) is condition 1 of `choose_mark`'s rule, so the run
+    /// spells itself `_` instead of splicing: the nested pair survives
+    /// alongside the run's own plain text, rather than being flattened into
+    /// it.
     #[test]
     fn a_nested_emphasis_beside_other_content_joins_its_run() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
         let t = |s: &str| Inline::Text(s.into());
 
-        for inls in [
-            vec![em(vec![em(vec![t("a")])]), em(vec![t("bc")])],
-            vec![em(vec![t("a")]), em(vec![em(vec![t("bc")])])],
-            vec![em(vec![em(vec![t("a")]), t("bc")])],
+        for (inls, want) in [
+            (
+                vec![em(vec![em(vec![t("a")])]), em(vec![t("bc")])],
+                "_*a*bc_",
+            ),
+            (
+                vec![em(vec![t("a")]), em(vec![em(vec![t("bc")])])],
+                "_a*bc*_",
+            ),
+            (vec![em(vec![em(vec![t("a")]), t("bc")])], "_*a*bc_"),
         ] {
-            assert_eq!(para(inls.clone()), "*abc*");
+            assert_eq!(para(inls.clone()), want);
             assert_eq!(recovered(inls.clone()), "abc");
             assert_eq!(kasane_gfm::rendered_text(&inls), "abc");
         }
 
-        // Mid-buffer, not an edge — and, before controller-authored task 5b,
-        // left alone here because the edge rule only looks at the first and
-        // last printing element. That used to print `*a*b*c*`, which is worse
-        // than it looks: with no whitespace around the inner `*`s they flank
-        // on both sides, so a parser pairs delimiter 0 with 2 and 4 with 6,
-        // and "b" comes back in neither `<em>` at all, silently losing the
-        // emphasis the source put on it. (Whitespace changes this --
-        // `splicing_mid_buffer_costs_a_span_that_would_round_trip` pins the
-        // shape where the inner span would have round-tripped intact -- but
-        // task 5b's `Delim`-keyed rule splices the inner `Emph` away
-        // wherever it sits regardless, so this now joins the outer run
-        // exactly as the edge cases above do, and "b" comes back inside the
-        // one `<em>` that actually reaches it.)
+        // Mid-buffer, not an edge — so `edge_to_splice` never sees it. Before
+        // controller-authored task 5b that meant it printed `*a*b*c*`, which is
+        // worse than it looks: with no whitespace around the inner `*`s they
+        // flank on both sides, so a parser pairs delimiter 0 with 2 and 4 with
+        // 6, and "b" comes back in neither `<em>` at all, silently losing the
+        // emphasis the source put on it. Task 5b's `Delim`-keyed
+        // `same_delim_to_splice` closed that by splicing the inner `Emph`
+        // away unconditionally, joining it into the outer run's plain text.
+        //
+        // Since 2026-08-23 that same-`Delim` collision is condition 1 of
+        // `choose_mark`'s rule too, so the outer run spells itself `_` before
+        // `same_delim_to_splice` ever runs, and the `_`/`*` mismatch means it
+        // finds nothing to splice: the inner pair survives as its own `*b*`,
+        // and "b" still comes back inside the one `<em>` that actually
+        // reaches it.
         let mid = vec![em(vec![t("a"), em(vec![t("b")]), t("c")])];
-        assert_eq!(para(mid.clone()), "*abc*");
+        assert_eq!(para(mid.clone()), "_a*b*c_");
         assert_eq!(recovered(mid.clone()), "abc");
         assert_eq!(kasane_gfm::rendered_text(&mid), "abc");
     }
@@ -2907,24 +3426,37 @@ mod tests {
     /// (`kasane-adapters::epub::tests::the_inline_depth_bound_holds_on_a_real_epub`),
     /// so nothing depends on the delimiter count any more. A run whose only
     /// member is a nested container is a run whose one element is both the
-    /// first and the last, so `splice_children`'s edge rule treats it exactly
-    /// like any other edge and it collapses all the way down to one delimiter
-    /// pair, same as `splicing_repeats_until_neither_rule_finds_anything`. The
-    /// text still survives intact either way.
+    /// first and the last, so before 2026-08-23 `splice_children`'s edge rule
+    /// treated it exactly like any other edge and it collapsed all the way
+    /// down to one delimiter pair, same as
+    /// `splicing_repeats_until_neither_rule_finds_anything`. The text still
+    /// survives intact either way.
+    ///
+    /// Since 2026-08-23 that same edge collision is condition 1 of
+    /// `choose_mark`'s rule, so the outer run spells itself `_` before the
+    /// splice ever runs and the nested pair survives as its own `*a*` — this
+    /// no longer collapses to one pair, it collapses to two. Three levels of
+    /// nesting still print only two pairs: the outer `_` forces its child to
+    /// keep `*` (condition 3), and that child's own child then collides with
+    /// *it* on the conservative `*` prediction and is spliced —
+    /// `the_conservative_child_prediction_still_loses_the_third_level` pins
+    /// that cost on its own.
+    ///
+    /// Renamed 2026-08-23 from `a_lone_nested_emphasis_collapses_to_one_delimiter_pair`.
     #[test]
-    fn a_lone_nested_emphasis_collapses_to_one_delimiter_pair() {
+    fn a_lone_nested_emphasis_collapses_to_two_delimiter_pairs() {
         let em = |x: Vec<Inline>| Inline::Emph(x);
         let t = |s: &str| Inline::Text(s.into());
 
-        assert_eq!(para(vec![em(vec![em(vec![t("a")])])]), "*a*");
-        assert_eq!(para(vec![em(vec![em(vec![em(vec![t("a")])])])]), "*a*");
+        assert_eq!(para(vec![em(vec![em(vec![t("a")])])]), "_*a*_");
+        assert_eq!(para(vec![em(vec![em(vec![em(vec![t("a")])])])]), "_*a*_");
         // Vacuous company is no company: the nested span is still alone.
         assert_eq!(
             para(vec![em(vec![
                 em(vec![t("a")]),
                 Inline::Text(String::new())
             ])]),
-            "*a*"
+            "_*a*_"
         );
     }
 
@@ -2989,32 +3521,42 @@ mod tests {
 
     /// A container at the *tail* of a run's children carries a delimiter that
     /// abuts the one `emphasize` is about to append, so the two merge into a
-    /// longer run and the parser splits it in the wrong place. The edge trim
-    /// removes the tail container's own delimiter (design spec §1); grouping
-    /// by delimiter *character* then also merges this run with the preceding
-    /// `Emph` run, since both share `*` (design spec §2.1, seam two),
-    /// collapsing the whole shape into one span.
+    /// longer run and the parser splits it in the wrong place. Grouping by
+    /// delimiter *character* merges this run with the preceding `Emph` run,
+    /// since both share `*` (design spec §2.1, seam two), fusing the whole
+    /// shape's own delimiters into one run — that fusion precedes this task
+    /// and is unchanged by it.
+    ///
+    /// What changed on 2026-08-23: the tail container's collision with that
+    /// fused run's own delimiter is condition 1 of `choose_mark`'s rule, and
+    /// with the top-level flanks permitting it and no parent already holding
+    /// `_`, the fused run now spells itself `_` rather than trimming the tail
+    /// container into it — the tail's own `*c*` pair survives.
+    ///
+    /// Renamed 2026-08-23 from `a_container_at_a_runs_tail_is_trimmed_into_it`.
     #[test]
-    fn a_container_at_a_runs_tail_is_trimmed_into_it() {
+    fn a_container_at_a_runs_tail_keeps_its_own_delimiter_pair() {
         let em = |s: &str| Inline::Emph(vec![Inline::Text(s.into())]);
         let inls = vec![
             em("a"),
             Inline::Strong(vec![Inline::Text("b".into())]),
             Inline::Strong(vec![em("c")]),
         ];
-        assert_eq!(para(inls.clone()), "*abc*");
+        assert_eq!(para(inls.clone()), "_ab*c*_");
         assert_eq!(recovered(inls), "abc");
     }
 
     /// The same at the head of the run.
+    ///
+    /// Renamed 2026-08-23 from `a_container_at_a_runs_head_is_trimmed_into_it`.
     #[test]
-    fn a_container_at_a_runs_head_is_trimmed_into_it() {
+    fn a_container_at_a_runs_head_keeps_its_own_delimiter_pair() {
         assert_eq!(
             para(vec![
                 Inline::Emph(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
                 Inline::Emph(vec![Inline::Text("bc".into())]),
             ]),
-            "*abc*"
+            "_*a*bc_"
         );
     }
 
@@ -3025,12 +3567,21 @@ mod tests {
     /// step (a one-element buffer is simultaneously the first, the last, and
     /// a same-`Delim` match), so what this pins is the loop's repetition
     /// itself, not which rule does the catching.
+    ///
+    /// Since 2026-08-23 that same collision is condition 1 of `choose_mark`'s
+    /// rule, so a bare `Emph(Emph(Emph(a)))` at the top of a paragraph now
+    /// spells its outer run `_` instead of ever entering the splice loop
+    /// (`the_conservative_child_prediction_still_loses_the_third_level` pins
+    /// that shape). Flanking the run with letters on both sides blocks
+    /// condition 2, forcing `*` at every level exactly as before, so the loop
+    /// still has to repeat to reach the same one-pair collapse.
     #[test]
     fn splicing_repeats_until_neither_rule_finds_anything() {
         let inner = Inline::Emph(vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
             "a".into(),
         )])])]);
-        assert_eq!(para(vec![inner]), "*a*");
+        let inls = vec![Inline::Text("x".into()), inner, Inline::Text("y".into())];
+        assert_eq!(para(inls), "x*a*y");
     }
 
     /// A container *between* other content whose `Delim` **differs** from
@@ -3044,10 +3595,14 @@ mod tests {
     /// ways; splicing on the character alone would flatten it for no gain.
     ///
     /// A *same*-`Delim` container in the middle is a different case, not
-    /// this one — it is spliced unconditionally, even on a shape that would
-    /// have round-tripped intact — and it is pinned separately by
-    /// `a_same_class_container_mid_buffer_is_spliced` and
-    /// `splicing_mid_buffer_costs_a_span_that_would_round_trip`.
+    /// this one. Before 2026-08-23 `same_delim_to_splice` spliced it
+    /// unconditionally, even on a shape that would have round-tripped
+    /// intact; since 2026-08-23 `choose_mark`'s rule intercepts that same
+    /// collision first, so the run spells itself `_` instead whenever its
+    /// flanks permit and its parent has not already taken it, and the
+    /// container survives — pinned separately by
+    /// `a_same_class_container_mid_buffer_survives_via_underscore` and
+    /// `a_mid_buffer_span_that_would_round_trip_no_longer_costs_a_splice`.
     #[test]
     fn a_container_mid_buffer_is_left_alone() {
         let inls = vec![Inline::Emph(vec![
@@ -3539,35 +4094,43 @@ mod tests {
         assert_eq!(out, "xxbya");
     }
 
-    /// A container of the run's own class sitting *between* other content is
-    /// spliced, not left alone. Before this task this shape printed
+    /// A container of the run's own class sitting *between* other content
+    /// used to be spliced, not left alone. Before Task 5b this shape printed
     /// `*a*a*`x`*`: the opener at index 0 pairs with the inner span's own
     /// opener at index 2, so the delimiters at 4 and 8 are left with no
     /// opener to pair with and survive into the visible text as literal
     /// asterisks -- recovering `aa*x*` instead of `aax` (added mid-execution
     /// as Task 5b; see the plan's "Amendments during execution" section,
     /// `docs/superpowers/plans/2026-08-15-emphasis-seam.md`, and the design
-    /// spec's §8 result note, `2026-08-15-emphasis-seam-design.md`).
+    /// spec's §8 result note, `2026-08-15-emphasis-seam-design.md`). Task
+    /// 5b's `same_delim_to_splice` closed that by splicing any same-`Delim`
+    /// container regardless of position, even one that would not actually
+    /// have corrupted -- see
+    /// `a_mid_buffer_span_that_would_round_trip_no_longer_costs_a_splice` for
+    /// that shape, and `splice_children`'s doc for why the rule flattens both
+    /// alike rather than telling them apart.
     ///
-    /// The splice happens even though not every same-`Delim` nest would
-    /// actually corrupt this way — see
-    /// `splicing_mid_buffer_costs_a_span_that_would_round_trip` for the
-    /// shape where it wouldn't have, and `splice_children`'s doc for why the
-    /// rule flattens both alike rather than telling them apart.
+    /// Since 2026-08-23 that same collision is condition 1 of `choose_mark`'s
+    /// rule: this fused run's own flanks permit `_` and no parent has already
+    /// taken it, so it now spells itself `_` and the mid-buffer collision
+    /// with the `*`-predicted nested `Emph` never reaches `splice_children`
+    /// at all — the nested pair survives as its own `*a*`.
+    ///
+    /// Renamed 2026-08-23 from `a_same_class_container_mid_buffer_is_spliced`.
     #[test]
-    fn a_same_class_container_mid_buffer_is_spliced() {
+    fn a_same_class_container_mid_buffer_survives_via_underscore() {
         let inls = vec![
             Inline::Emph(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
             Inline::Strong(vec![Inline::Emph(vec![Inline::Text("a".into())])]),
             Inline::Strong(vec![Inline::Code("x".into())]),
         ];
-        assert_eq!(para(inls.clone()), "*aa`x`*");
+        assert_eq!(para(inls.clone()), "_*aa*`x`_");
         assert_eq!(recovered(inls), "aax");
     }
 
-    /// The trade `splice_children`'s `Delim` rule pays on a shape that was
+    /// The trade `splice_children`'s `Delim` rule paid on a shape that was
     /// not broken, in the same spirit as
-    /// `fusing_adjacent_runs_costs_a_structural_boundary`. Before this task,
+    /// `fusing_adjacent_runs_costs_a_structural_boundary`. Before Task 5b,
     /// `Emph([Text("a "), Emph([Text("b")]), Text(" c")])` printed
     /// `*a *b* c*`, and a real parser keeps the inner `<em>` intact: the
     /// whitespace on both sides of the inner `*`s stops them from flanking
@@ -3575,8 +4138,8 @@ mod tests {
     /// other, not with the run's own delimiters. `same_delim_to_splice` does
     /// not reason about that — it splices any same-`Delim` container
     /// regardless of whether nesting it would actually have collided — so
-    /// this now prints `*a b c*` and the inner `<em>` is gone on a shape
-    /// that used to round-trip structurally as well as textually.
+    /// Task 5b made this print `*a b c*` and the inner `<em>` was gone on a
+    /// shape that used to round-trip structurally as well as textually.
     ///
     /// The alternative — check whether the inner delimiters would actually
     /// flank and pair before splicing, and leave them alone when they
@@ -3586,23 +4149,34 @@ mod tests {
     /// than reimplement one seam at a time (see the design spec's §8 result
     /// note, `2026-08-15-emphasis-seam-design.md`, and the plan's
     /// "Amendments during execution" section for the ruling that inserted
-    /// Task 5b rather than reopening Task 5). The invariant this item holds
-    /// is text, not structure, and the text survives here unchanged.
+    /// Task 5b rather than reopening Task 5).
+    ///
+    /// Since 2026-08-23 the cost is paid back, incidentally rather than by
+    /// design: `choose_mark`'s condition 1 does not reason about flanking
+    /// either — it fires on the bare fact that `same_delim_to_splice` would
+    /// otherwise find something — but firing at all is enough to make the
+    /// outer run spell itself `_`, which shares no character with the inner
+    /// `Emph`'s predicted `*`, so nothing is spliced and the inner `<em>`
+    /// survives without the writer ever reasoning about whitespace. The
+    /// invariant this item holds is text, not structure, and the text
+    /// survives here unchanged either way.
+    ///
+    /// Renamed 2026-08-23 from `splicing_mid_buffer_costs_a_span_that_would_round_trip`.
     #[test]
-    fn splicing_mid_buffer_costs_a_span_that_would_round_trip() {
+    fn a_mid_buffer_span_that_would_round_trip_no_longer_costs_a_splice() {
         let inls = vec![Inline::Emph(vec![
             Inline::Text("a ".into()),
             Inline::Emph(vec![Inline::Text("b".into())]),
             Inline::Text(" c".into()),
         ])];
-        assert_eq!(para(inls.clone()), "*a b c*");
+        assert_eq!(para(inls.clone()), "_a *b* c_");
         assert_eq!(recovered(inls), "a b c");
     }
 
     /// The defect this task closes. `Emph` wrapping nothing but a `Strong`
     /// prints `***a***`, and a parser splitting that run resolves it
     /// em-outermost — exactly what the IR meant. The old edge rule spliced the
-    /// `Strong` away because `Delim::ch()` maps both classes to `*`, and the
+    /// `Strong` away because `Delim::child_ch()` maps both classes to `*`, and the
     /// `<strong>` vanished from a document converter's output
     /// (`2026-08-16-cross-class-edge-splice-design.md` §1).
     #[test]
@@ -3615,33 +4189,59 @@ mod tests {
         assert_eq!(recovered(inls), "a");
     }
 
-    /// The cost, pinned so a later reader meets it as a decision. The converse
-    /// shape prints the same `***a***`, and the tie-break resolves it
-    /// em-outermost *against* the IR, so there is no `*`-only spelling of
-    /// `<strong><em>a</em></strong>` — it keeps splicing and Task 2 files it
-    /// permanent (design spec §2).
+    /// The cost, pinned so a later reader meets it as a decision — until
+    /// 2026-08-23. The converse shape prints the same `***a***`, and the
+    /// tie-break resolves it em-outermost *against* the IR, so there was no
+    /// `*`-only spelling of `<strong><em>a</em></strong>`; it kept splicing
+    /// and an earlier item filed it permanent (design spec §2).
+    ///
+    /// That is exactly the collision condition 1 of `choose_mark`'s rule
+    /// exists to close: the outer `Strong` run's flanks permit `_` and no
+    /// parent has already taken it, so it now spells itself `_` and the inner
+    /// `Emph` survives as its own `*a*` rather than being spliced away. This
+    /// shape is the one `census-inexpressible.txt` classified `_*x*_`-shaped
+    /// containers under, and it is the reason the file shrank from 1,984 to
+    /// 428 (design spec §2.3).
+    ///
+    /// Renamed 2026-08-23 from `a_strong_run_wrapping_only_an_emph_still_loses_its_emph`.
     #[test]
-    fn a_strong_run_wrapping_only_an_emph_still_loses_its_emph() {
+    fn a_strong_run_wrapping_only_an_emph_recovers_it_with_double_underscore() {
         let inls = vec![Inline::Strong(vec![Inline::Emph(vec![Inline::Text(
             "a".into(),
         )])])];
-        assert_eq!(para(inls.clone()), "**a**");
-        assert_eq!(recovered_html(inls.clone()), "<strong>a</strong>");
+        assert_eq!(para(inls.clone()), "__*a*__");
+        assert_eq!(recovered_html(inls.clone()), "<strong><em>a</em></strong>");
         assert_eq!(recovered(inls), "a");
     }
 
-    /// The control for `bit_for`'s absence of an `(Emph, Emph, WholeRun)` arm.
-    /// A same-class sole child is *not* licensed to abut and must keep
-    /// splicing; `same_delim_to_splice` would catch it anyway (its own
-    /// `Site::Interior` query, unconditionally true today), which is
-    /// precisely why `edge_to_splice` tests the site itself rather than
-    /// relying on the other rule's ordering (design spec §3.2).
+    /// Until 2026-08-23 this was the control for `bit_for`'s absence of an
+    /// `(Emph, Emph, WholeRun)` arm: a same-class sole child is *not* licensed
+    /// to abut, so `edge_to_splice` had to keep splicing it, which is why that
+    /// rule tests the site itself rather than relying on the other rule's
+    /// ordering (design spec §3.2).
+    ///
+    /// It is not that control any more, and this doc claimed it still was
+    /// until the whole-branch review. The shape cannot distinguish that cell:
+    /// `choose_mark`'s condition 1 is already satisfied by
+    /// `same_delim_to_splice`'s own `Site::Interior` query, which no ledger
+    /// licenses, so the outer run spells itself `_` and prints `_*a*_`
+    /// whichever way `(Emph, Emph, WholeRun)` reads — and once `_` is chosen
+    /// neither splice rule reaches `may_abut` at all, both bailing on
+    /// `inner.child_ch() != run.ch` first. The guarantee that an unlisted
+    /// triple stays refused is held by `an_unlisted_triple_is_refused`, which
+    /// asserts `!may_abut(Emph, Emph, Site::WholeRun, Ledger::LICENSED)`
+    /// directly and cannot be satisfied by a writer that stopped asking.
+    ///
+    /// What this test is now is a second pin of the recovery itself, beside
+    /// `a_nested_container_survives_by_spelling_the_outer_run_with_an_underscore`.
+    ///
+    /// Renamed 2026-08-23 from `an_emph_run_wrapping_only_an_emph_is_still_spliced`.
     #[test]
-    fn an_emph_run_wrapping_only_an_emph_is_still_spliced() {
+    fn an_emph_run_wrapping_only_an_emph_recovers_it_with_single_underscore() {
         let inls = vec![Inline::Emph(vec![Inline::Emph(vec![Inline::Text(
             "a".into(),
         )])])];
-        assert_eq!(para(inls.clone()), "*a*");
+        assert_eq!(para(inls.clone()), "_*a*_");
         assert_eq!(recovered(inls), "a");
     }
 
@@ -3652,19 +4252,31 @@ mod tests {
     ///
     /// The outer `Emph` run declines and keeps its `Strong`; the inner
     /// `Strong` run does not qualify — `bit_for` has no `(Strong, Emph,
-    /// WholeRun)` arm, so `Site::WholeRun` is unlicensed for that pair — so it
-    /// splices its `Emph` and prints `**b**`; the whole prints `***b***`. The innermost
-    /// `Emph` is lost, but that is the `Strong`-outer limit reappearing one
-    /// level down, not a new corruption, and Task 2 files the shape permanent
-    /// on the strength of the `Strong[Emph[…]]` it contains. A `****b****`
-    /// here would mean the exemption is recursing where it must not.
+    /// WholeRun)` arm, so `Site::WholeRun` is unlicensed for that pair — so
+    /// before 2026-08-23 it spliced its `Emph` and printed `**b**`; the whole
+    /// printed `***b***`. The innermost `Emph` was lost, but that was the
+    /// `Strong`-outer limit reappearing one level down, not a new
+    /// corruption, and an earlier item filed the shape permanent on the
+    /// strength of the `Strong[Emph[…]]` it contains.
+    ///
+    /// Since 2026-08-23 the inner `Strong` run's own collision with its
+    /// `Emph` child is condition 1 of `choose_mark`'s rule, so that inner run
+    /// now spells itself `_` instead of splicing, and the whole prints
+    /// `*__*b*__*` — every level survives. A `****b****` here would mean the
+    /// exemption is recursing where it must not; a `*__*b*__*` with any level
+    /// missing would mean condition 3 (a child taking its parent's
+    /// character) has failed to stop the outer and inner runs both reaching
+    /// for `_`.
     #[test]
     fn the_exemption_composes_one_level_down() {
         let inls = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Emph(
             vec![Inline::Text("b".into())],
         )])])];
-        assert_eq!(para(inls.clone()), "***b***");
-        assert_eq!(recovered_html(inls.clone()), "<em><strong>b</strong></em>");
+        assert_eq!(para(inls.clone()), "*__*b*__*");
+        assert_eq!(
+            recovered_html(inls.clone()),
+            "<em><strong><em>b</em></strong></em>"
+        );
         assert_eq!(recovered(inls), "b");
     }
 
@@ -3728,11 +4340,17 @@ mod tests {
     /// must actually carry `ledger` down to the rule, not silently substitute
     /// `Ledger::LICENSED` at some call site along the way -- the exact failure
     /// every other test in this file cannot see, since the census and every
-    /// existing render test run under `LICENSED` alone. Under `CONSERVATIVE`
-    /// the sole-child `Strong` must still splice, exactly as it did before this
-    /// task (and as `sole_child_nests_canonically` did on `main`); under
-    /// `LICENSED` (`para`, which renders through the public `blocks_to_markdown`)
-    /// it must not.
+    /// existing render test run under `LICENSED` alone. Under `LICENSED`
+    /// (`para`, which renders through the public `blocks_to_markdown`) the
+    /// sole-child `Strong` abuts and both keep `*`.
+    ///
+    /// Under `CONSERVATIVE` no triple abuts, so before 2026-08-23 the
+    /// sole-child `Strong` had to splice (as `sole_child_nests_canonically`
+    /// did on `main`). Since 2026-08-23 that same collision is condition 1 of
+    /// `choose_mark`'s rule, so under `CONSERVATIVE` the outer run now spells
+    /// itself `_` instead of splicing -- proof the ledger genuinely reaches
+    /// `choose_mark` too, not only `edge_to_splice` and
+    /// `same_delim_to_splice`.
     #[test]
     fn the_ledger_parameter_actually_reaches_the_rules() {
         let inls = vec![Inline::Emph(vec![Inline::Strong(vec![Inline::Text(
@@ -3745,7 +4363,7 @@ mod tests {
                 &AssetBag::default(),
                 Ledger::CONSERVATIVE
             ),
-            "*a*\n\n"
+            "_**a**_\n\n"
         );
     }
 }

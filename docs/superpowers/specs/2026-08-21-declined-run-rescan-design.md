@@ -469,6 +469,16 @@ Risks, in the order they deserve worry:
    bearing rather than modest: `census-inexpressible.txt` spent months asserting
    "Markdown cannot express" when it meant "this alphabet cannot express," and
    88% of it was wrong.
+
+   > **Corrected, 2026-08-23.** The example survives; two of its details do
+   > not. It was never "this alphabet" either — the 88% came from a probe that
+   > measured what CommonMark can spell rather than what this pipeline can
+   > emit, and offering `_` at the emission site fixes zero shapes. Choosing
+   > the delimiter character *before* the splice is what closed it, taking the
+   > file from 1,984 entries to 433: ~78% wrong, for a cause nobody had named.
+   > See `2026-08-23-delimiter-choice-ordering-design.md` §2. The point this
+   > entry is making — that a scope statement is load-bearing — is if anything
+   > strengthened: the claim was wrong about its own scope, not just its size.
 3. **Suite wall-clock, +29%** (§6). Mitigation: measured before committing, and
    the tier is text-only at a single length for exactly this reason.
 

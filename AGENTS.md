@@ -351,17 +351,30 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   tier and caught by the second. It runs only where the text tier already
   passes, since per-character alignment presupposes equal strings.
   `census-known-structure-corrupt.txt` is its queue, target zero;
-  `census-inexpressible.txt` holds the shapes **this writer's `*`-only
-  alphabet** cannot express. It is not a statement about Markdown, which is
-  what this entry claimed until 2026-08-17: CommonMark also has `_`, and
-  alternating the two spells every mechanism the file names — `_*x*_` is
-  `<em><em>x</em></em>`, `__**x**__` is doubly strong, `__*x*__` is
-  `<strong><em>x</em></strong>`. A probe over every `*`/`_` spelling found
-  1,740 of its 1,984 entries expressible, so read it as the queue for the
-  alphabet-widening item. What is genuinely unspellable is narrower and has a
-  different cause — CommonMark's left-flanking rule, which stops any delimiter
-  opening between a letter and punctuation, so `[Text("a"), Text("a"),
-  Emph([Code("x")])]` cannot emphasize with `*` or `_`.
+  `census-inexpressible.txt` holds the shapes **this writer does not express**.
+  It is not a statement about Markdown, which is what this entry claimed until
+  2026-08-17: CommonMark also has `_`, and alternating the two spells every
+  mechanism the file names — `_*x*_` is `<em><em>x</em></em>`, `__**x**__` is
+  doubly strong, `__*x*__` is `<strong><em>x</em></strong>`. Since 2026-08-23
+  the writer emits exactly those.
+  A 2026-08-17 probe put 1,740 of its then-1,984 entries within reach of `_`
+  and named the follow-up "the alphabet-widening item". Both were wrong, and
+  `2026-08-23-delimiter-choice-ordering-design.md` §2 is the measurement:
+  offering `_` at the delimiter-emission site fixes **zero** shapes, because
+  `splice_children` runs first and deletes the colliding child to dodge a
+  collision with a character nothing has chosen yet. The alphabet was never the
+  constraint; decision order was. Choosing the character before the splice
+  recovered 1,670 shapes and took this file to its present **433** — which are
+  two classes, not one, and the header says which is which. **428** are the
+  flanking wall: every one has letter text against the nested container, where
+  CommonMark stops either character opening — or, for the 156 that lead with
+  the container, closing — and emitting anyway would lose text rather than
+  structure. Only an HTML tag spells those. The remaining **5** are a
+  deliberate refusal, not a wall: `choose_mark`'s fourth condition declines `_`
+  where the child that declining the splice would save then fuses into a
+  sibling of a different delimiter class, substituting a `<strong>` for an
+  `<em>`. The splice's erasure of a level is the lesser loss, so it is paid and
+  the shape lands here.
   The split between those two files is **computed on every bless,
   never hand-edited**: a shape is permanent only if it both nests, directly, a
   same-class container (`<em><em>x</em></em>` or

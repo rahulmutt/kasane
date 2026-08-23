@@ -1,0 +1,90 @@
+diff --git a/crates/kasane-writer/src/lib.rs b/crates/kasane-writer/src/lib.rs
+index 4f0358c..8a73722 100644
+--- a/crates/kasane-writer/src/lib.rs
++++ b/crates/kasane-writer/src/lib.rs
+@@ -8,6 +8,8 @@ mod markdown;
+ pub use library::{write_library_index, LibraryEntry, LibraryFailure};
+ pub use markdown::blocks_to_markdown;
+ #[doc(hidden)]
++pub use markdown::probe;
++#[doc(hidden)]
+ pub use markdown::{blocks_to_markdown_with_ledger, Ledger};
+ 
+ use anyhow::{bail, Context, Result};
+diff --git a/crates/kasane-writer/src/markdown.rs b/crates/kasane-writer/src/markdown.rs
+index f02c77b..f858cee 100644
+--- a/crates/kasane-writer/src/markdown.rs
++++ b/crates/kasane-writer/src/markdown.rs
+@@ -377,7 +377,7 @@ fn inlines_to_md_flat<'a>(items: Vec<Flat<'a>>, ctx: Ctx, pos: Pos, ledger: Ledg
+             Some(d @ (escape::Delim::Emph | escape::Delim::Strong)) => {
+                 let before_class = s.chars().next_back().map_or(Flank::Space, class_of);
+                 let after_class = next_class_of(pending[..tail].iter().rev().copied());
+-                let markup = if d == escape::Delim::Emph { "*" } else { "**" };
++                let markup = probe::markup(d, before_class, after_class);
+                 match emphasis_run(
+                     members,
+                     d,
+@@ -1625,6 +1625,63 @@ fn indent_continuation(body: &str, indent: &str) -> String {
+     out
+ }
+ 
++
++// ===== PROBE HOOK (throwaway; see docs/superpowers/evidence/2026-08-23-underscore-alphabet) =====
++#[doc(hidden)]
++pub mod probe {
++    use super::{escape, Flank};
++    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
++    use std::sync::Mutex;
++
++    /// 0 = ship behaviour (`*`/`**`). 1 = assignment mode (consume BITS).
++    /// 2 = rule mode (`_` iff neither flank is alphanumeric).
++    pub static MODE: AtomicU64 = AtomicU64::new(0);
++    pub static BITS: AtomicU64 = AtomicU64::new(0);
++    pub static IDX: AtomicUsize = AtomicUsize::new(0);
++    /// One entry per emission: (is_strong, before_class, after_class, chose_underscore).
++    pub static LOG: Mutex<Vec<(u8, u8, u8, u8)>> = Mutex::new(Vec::new());
++
++    fn cls(f: Flank) -> u8 {
++        match f {
++            Flank::Space => 0,
++            Flank::Punct => 1,
++            Flank::Other => 2,
++        }
++    }
++
++    pub fn reset(mode: u64, bits: u64) {
++        MODE.store(mode, SeqCst);
++        BITS.store(bits, SeqCst);
++        IDX.store(0, SeqCst);
++        LOG.lock().unwrap().clear();
++    }
++
++    pub fn log() -> Vec<(u8, u8, u8, u8)> {
++        LOG.lock().unwrap().clone()
++    }
++
++    pub(super) fn markup(d: escape::Delim, before: Flank, after: Flank) -> &'static str {
++        let strong = d == escape::Delim::Strong;
++        let under = match MODE.load(SeqCst) {
++            1 => {
++                let i = IDX.fetch_add(1, SeqCst);
++                i < 64 && (BITS.load(SeqCst) >> i) & 1 == 1
++            }
++            2 => before != Flank::Other && after != Flank::Other,
++            _ => false,
++        };
++        LOG.lock()
++            .unwrap()
++            .push((strong as u8, cls(before), cls(after), under as u8));
++        match (strong, under) {
++            (false, false) => "*",
++            (true, false) => "**",
++            (false, true) => "_",
++            (true, true) => "__",
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;

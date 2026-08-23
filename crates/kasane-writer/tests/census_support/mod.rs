@@ -269,7 +269,29 @@ pub enum Structure {
     Clean,
     /// A real, fixable loss. Belongs in the queue.
     Corrupt,
-    /// Markdown cannot express this shape at any level. Permanent.
+    /// This writer does not express this shape at any level.
+    ///
+    /// Two reasons, and the split is measured, not assumed — see
+    /// `census-inexpressible.txt`'s header. For almost all of them CommonMark's
+    /// flanking rule stops either `*` or `_` opening or closing against the
+    /// letter text beside the nested container, and only an HTML tag spells
+    /// those. Those are **permanent**: no writer change reaches them.
+    ///
+    /// For five of them it is **not** permanent, and this line said it was
+    /// until 2026-08-23. The writer *declines* a legal `_` there, because the
+    /// child it would save would then fuse into a sibling of another delimiter
+    /// class and come back wearing it; erasing a level is the lesser loss. That
+    /// is a deliberate trade against a defect in the fuse, not a limit of
+    /// Markdown or of this alphabet, and fixing the fuse at its source takes
+    /// those five out of this file
+    /// (`2026-08-23-delimiter-choice-ordering-design.md` §9). `permanence_ceiling`'s
+    /// doc explains why the difference matters: permanence is the one claim in
+    /// this census that nothing downstream re-examines.
+    ///
+    /// This said "Markdown cannot express this shape" until 2026-08-23, which
+    /// was false in a way that cost an item its estimate: `_*x*_` is
+    /// `<em><em>x</em></em>`. The 2026-08-17 correction reached the `.txt`
+    /// headers and `AGENTS.md` and missed this line.
     Inexpressible,
 }
 
