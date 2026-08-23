@@ -922,6 +922,49 @@ fn same_delim_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger
     })
 }
 
+/// Whether this run's children, left exactly as they are, contain a run that
+/// would fuse printing members of two different delimiter classes into one
+/// span.
+///
+/// [`run_len`] groups neighbours by the character a child is *predicted* to
+/// print, not by class, so an `Emph` beside a `Strong` is one run — deliberately,
+/// because `*` and `**` abut into a `***` a parser re-splits. The fused run is
+/// spelled with its first printing member's class, so every character from a
+/// member of the *other* class comes back wearing a class it was never in. That
+/// is a class substitution, which the structural census counts as corruption,
+/// where a splice only ever erases a level.
+///
+/// Only [`choose_mark`] asks this, and only about the *unspliced* children: it
+/// is the cost of declining to splice, weighed against the cost of splicing.
+/// A run of members that all share one class is not a fusion this cares about —
+/// every character keeps its class, which is what makes adjacent-run fusion
+/// deliberate rather than a defect.
+fn fuses_across_classes(children: &[Flat<'_>], ledger: Ledger) -> bool {
+    let mut i = 0;
+    while i < children.len() {
+        // `run_len` returns 0 only for an exhausted iterator, and `children[i..]`
+        // is non-empty here; `max(1)` is what makes that reading structural
+        // rather than a comment, since a 0 would spin this loop forever.
+        let k = run_len(children[i..].iter().copied(), ledger).max(1);
+        let mut class = None;
+        for &(el, depth) in &children[i..i + k] {
+            if renders_empty(el, depth) {
+                continue;
+            }
+            let Some(this) = escape::delim(el) else {
+                continue;
+            };
+            match class {
+                None => class = Some(this),
+                Some(seen) if seen != this => return true,
+                Some(_) => {}
+            }
+        }
+        i += k;
+    }
+    false
+}
+
 /// Which character this run spells its delimiter with.
 ///
 /// The single decision point. [`emphasis_run`] and [`probe_edges`] both call
@@ -929,9 +972,23 @@ fn same_delim_to_splice(children: &[Flat<'_>], run: escape::Mark, ledger: Ledger
 /// `debug_assert_eq!(edge, Edge::of(&inner))` is comparing two different runs.
 /// Neither may re-derive this locally.
 ///
-/// Chooses `_` where a collision would otherwise cost a container, the
-/// flanks permit it, and the parent did not already take it (design spec
-/// `2026-08-23-delimiter-choice-ordering-design.md` §3). Otherwise `*`.
+/// Chooses `_` where a collision would otherwise cost a container, the flanks
+/// permit it, the parent did not already take it, and keeping the children
+/// unspliced does not itself cost a class (design spec
+/// `2026-08-23-delimiter-choice-ordering-design.md` §3, plus the fourth
+/// condition the census ratchet forced on 2026-08-23). Otherwise `*`.
+///
+/// The fourth condition is the one that is not about spelling. The other three
+/// ask whether `_` is *legal* and *useful*; this one asks whether declining to
+/// splice actually saves anything. A `_` run keeps its children, and kept
+/// children are neighbours in one printed line that [`run_len`] fuses by
+/// character rather than by class — so a saved `Emph` next to a `Strong` is
+/// absorbed into it and its text comes back wearing the wrong class. A splice
+/// erases an emphasis level; that fuse substitutes one, and the structural
+/// census counts a substitution as corruption and an erasure as merely
+/// inexpressible. Where the choice is between them, `*` is the lesser loss.
+/// See [`fuses_across_classes`], and
+/// `a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class`.
 fn choose_mark(
     want: escape::Delim,
     raw_children: &[Flat<'_>],
@@ -953,7 +1010,14 @@ fn choose_mark(
     // Condition 3: a child taking its parent's character rebuilds the
     // collision one level down. `___a___` is `<em><strong>a</strong></em>`.
     let parent_took_it = parent_ch == '_';
-    if collides && flanks_permit && !parent_took_it {
+    // Condition 4: only where declining to splice actually saves the container.
+    // The children a `_` keeps are then neighbours in one printed line, and
+    // `run_len` fuses neighbours by character rather than by class -- so a saved
+    // `Emph` beside a `Strong` is absorbed into it and comes back wearing the
+    // wrong class. A splice erases a level; this substitutes one, which is
+    // strictly worse, so the trade is refused.
+    let fusion_would_cost_a_class = fuses_across_classes(raw_children, ledger);
+    if collides && flanks_permit && !parent_took_it && !fusion_would_cost_a_class {
         escape::Mark::new(want, '_')
     } else {
         star
@@ -990,7 +1054,8 @@ fn choose_mark(
 ///   seam at a time. This rule also asks [`may_abut`] (`Site::Interior`)
 ///   rather than splicing unconditionally, but no triple licenses that site
 ///   yet, so it still pays the cost when `choose_mark` cannot swap the
-///   character either — letter-flanked, or a parent that already took `_`
+///   character either — letter-flanked, a parent that already took `_`, or
+///   children that would fuse across classes if they were kept
 ///   — the same trade `fusing_adjacent_runs_costs_a_structural_boundary`
 ///   pins for the run fuse. Before 2026-08-23 it paid that cost
 ///   unconditionally, even on a shape that would have round-tripped intact;
@@ -1783,7 +1848,8 @@ mod tests {
 
     /// Task 2 pinned the seam, not the rule: `choose_mark` is the only place a
     /// character is decided. Until Task 3 it decided `*` every time; since
-    /// Task 3 it decides per the three conditions, still from this one place
+    /// Task 3 (and Task 4a's fourth condition) it decides per the conditions
+    /// named on `choose_mark` itself, still from this one place
     /// — `emphasis_run` and `probe_edges` still both call it and must still
     /// reach the same answer.
     ///
@@ -2858,6 +2924,104 @@ mod tests {
             ]),
             "*ab*"
         );
+    }
+
+    /// A run only spells itself `_` where that actually saves the container
+    /// the splice would have cost -- condition 4 of `choose_mark`'s rule.
+    ///
+    /// `choose_mark`'s condition 1 asks whether a collision exists, and
+    /// 2026-08-23's first cut stopped there. On these five shapes that was the
+    /// wrong question. Three sibling `Emph`s fuse into one run whose children
+    /// are the three containers; one of them collides, so the run took `_` and
+    /// `splice_children` found nothing to do. But the children it kept are
+    /// then plain neighbours in one printed line, and `run_len` groups
+    /// neighbours by the *character* a child prints (`Delim::child_ch` maps
+    /// both `Emph` and `Strong` to `*`), so the saved `Emph` fused into the
+    /// `Strong` beside it: `[Emph([Emph(a)]), Emph([Strong(a)]), Emph(a)]`
+    /// printed `_*aa*a_`, and the `<strong>` was gone with its text absorbed
+    /// into an `<em>` -- a class substitution, where the splice it was avoiding
+    /// only ever erased a level (`<em>a<strong>a</strong>a</em>`, one `<em>`
+    /// short of the IR). Erasing a level is bad; substituting one is worse, so
+    /// the `_` is declined and the splice paid instead.
+    ///
+    /// The control below is the other half of the rule, and the reason it is
+    /// keyed on the classes rather than on the bare fact of a fuse: two saved
+    /// `Emph`s fusing into each other lose no class at all -- that is
+    /// `fusing_adjacent_runs_costs_a_structural_boundary`'s cost only when the
+    /// members disagree -- so `_` is still taken there and
+    /// `<em><em>ab</em></em>` still round-trips.
+    #[test]
+    fn a_run_declines_underscore_when_the_child_it_saves_would_fuse_into_another_class() {
+        let em = |x: Vec<Inline>| Inline::Emph(x);
+        let st = |x: Vec<Inline>| Inline::Strong(x);
+        let t = |s: &str| Inline::Text(s.into());
+        let code = |s: &str| Inline::Code(s.into());
+
+        // All five shapes the census ratchet caught, with the structure a
+        // parser recovers -- not the bytes alone, which is what let the
+        // regression through: text loss stayed at zero the whole time.
+        for (inls, bytes, html) in [
+            (
+                vec![
+                    em(vec![em(vec![t("a")])]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![t("a")]),
+                ],
+                "*a**a**a*",
+                "<em>a<strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![t("a")]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![em(vec![t("a")])]),
+                ],
+                "*a**a**a*",
+                "<em>a<strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![em(vec![t("a")])]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![em(vec![t("a")])]),
+                ],
+                "*a**a**a*",
+                "<em>a<strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![code("x")]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![em(vec![t("a")])]),
+                ],
+                "*`x`**a**a*",
+                "<em><code>x</code><strong>a</strong>a</em>",
+            ),
+            (
+                vec![
+                    em(vec![em(vec![t("a")])]),
+                    em(vec![st(vec![t("a")])]),
+                    em(vec![code("x")]),
+                ],
+                "*a**a**`x`*",
+                "<em>a<strong>a</strong><code>x</code></em>",
+            ),
+        ] {
+            assert_eq!(para(inls.clone()), bytes);
+            assert_eq!(recovered_html(inls.clone()), html, "printed {bytes}");
+            // The `<strong>` survives, which is the whole guarantee: every
+            // one of these recovers a `<strong>` wrapping exactly one `a`.
+            assert!(
+                recovered_html(inls.clone()).contains("<strong>a</strong>"),
+                "the strong was absorbed again: {bytes}"
+            );
+        }
+
+        // The control: same fuse, one class, so nothing is substituted and the
+        // `_` is still worth taking.
+        let same_class = vec![em(vec![em(vec![t("a")])]), em(vec![em(vec![t("b")])])];
+        assert_eq!(para(same_class.clone()), "_*ab*_");
+        assert_eq!(recovered_html(same_class), "<em><em>ab</em></em>");
     }
 
     /// A vacuous leading member must not dictate the run's class. Before this
