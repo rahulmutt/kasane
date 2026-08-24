@@ -1,6 +1,8 @@
 # kasane — Length-4 Structural Tier Design Spec
 
-**Status:** designed, not implemented.
+**Status:** implemented on branch `len4-structural-tier` (PR #50). §6.1's
+deliberate gap was closed afterwards on branch `len4-union-gate-case` — see
+that section.
 **Date:** 2026-08-23.
 **Closes the follow-up named by:**
 `2026-08-23-delimiter-choice-ordering-design.md` §6.1.
@@ -261,6 +263,29 @@ new union bites.
 This is a deliberate scope decision, taken with the gap known. Closing it is a
 one-case extension of an existing script and remains available as a follow-up.
 
+**Closed 2026-08-24**, on branch `len4-union-gate-case`, exactly as predicted:
+one more direction in `ratchet_gate_cases.sh`, injecting a shape outside the
+census alphabet into `census-len4-known-structure-corrupt.txt` and requiring
+`union4 ... FAIL -- 1 added`. Evidence:
+`docs/superpowers/evidence/2026-08-24-len4-union-gate-case/`, including the
+runs that prove each new assertion can fail. The paragraphs above stay as
+written — they were
+true of *this* branch, and the reasoning for taking the gap knowingly is worth
+more on record than a rewrite that pretends it never existed.
+
+Two things surfaced in the closing that this section did not predict. First,
+the existing direction asserted only that `census-ratchet` **exited non-zero**,
+which cannot distinguish the gate under test from any of the other seven rows
+that fail the same task — so the extension was not additive: both directions
+had to start matching their own row. Second, a `union4` that skips for want of
+a baseline catches nothing, so the *passing* direction now refuses a skipped
+row and says to rebase, rather than letting the negative direction report a
+gate proven that never ran.
+
+Still uncovered, and stated for the same reason §6.1 was: the length-3 union
+gate and both ceilings' no-gratuitous-raise check are still only ever seen
+passing.
+
 ## 7. Documentation this item falsifies
 
 Each of these is false the moment the tier lands, and each is corrected in the
@@ -298,7 +323,9 @@ same commit as the code:
   is asserted against the entries. The length-4 split is computed during
   implementation and written into both places at once.
 - **No new instrument guards** (§4.3).
-- **No extension of `ratchet_gate_cases.sh`** (§6.1).
+- **No extension of `ratchet_gate_cases.sh`** (§6.1). *(Scope of this branch,
+  left standing as written. The extension landed 2026-08-24 on
+  `len4-union-gate-case`; §6.1 records what it took.)*
 
 ## 9. Non-goals
 

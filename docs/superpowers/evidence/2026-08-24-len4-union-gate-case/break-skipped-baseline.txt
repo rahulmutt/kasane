@@ -1,0 +1,23 @@
+== direction 1: this branch's census files must PASS ==
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 97b2604 Merge pull request #49 from rahulmutt/delimiter-choice-ordering
+
+SKIP census-len4-known-structure-corrupt.txt -- absent at the base, so there is no baseline to ratchet against
+SKIP census-len4-inexpressible.txt -- absent at the base, so there is no baseline to ratchet against
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      433       +0   ok
+union        2044     2044       +0   ok
+queue4          0    41443   +41443   skipped (no baseline)
+perm4           0    10153   +10153   skipped (no baseline)
+union4          0    51596   +51596   skipped (no baseline)
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): absent at the base -- introduced by this change, nothing to compare
+
+census ratchet ok
+FAIL: union4 skipped -- no length-4 baseline at this base, so direction 3
+      cannot be exercised. Rebase onto a commit that carries the
+      length-4 census files.

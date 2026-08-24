@@ -27,11 +27,17 @@ the instrument measures the older writer without contamination.
   to the tier commit, once with a shape injected into the length-4 queue
   (`union4 FAIL -- 1 added`, exit 1) and once clean (exit 0).
 
-**Scope, stated rather than implied.** That union check is a one-off, run by
-hand on 2026-08-23. `ratchet_gate_cases.sh` is deliberately not extended
-(design §6.1), so in CI the length-4 union gate only ever runs in its passing
-direction — the silent-gate failure mode this repo has recorded twice. Closing
-it is a one-case extension of that script and remains available.
+**Scope, stated rather than implied.** That union check was a one-off, run by
+hand on 2026-08-23. `ratchet_gate_cases.sh` was deliberately not extended
+(design §6.1), so in CI the length-4 union gate only ever ran in its passing
+direction — the silent-gate failure mode this repo has recorded twice.
+
+**Superseded 2026-08-24.** The extension landed on branch
+`len4-union-gate-case`: `ratchet_gate_cases.sh` now carries a third direction
+that reproduces `union4-gate.txt`'s injection on every CI run, so this file is
+history rather than the only proof. Design §6.1 records what closing it took.
+The files here are kept as the record of the by-hand run that stood in the
+meantime.
 
 ## Wall clock
 
