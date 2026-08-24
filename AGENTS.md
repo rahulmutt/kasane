@@ -306,7 +306,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 ## Workflows
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
 - `mise run census-ratchet` — the census allowlists may only shrink against `main`
-- `mise run census-ratchet-cases` — both directions of the queue gate, including the negative one
+- `mise run census-ratchet-cases` — the census gates' negative directions: the length-3 queue gate and the length-4 union
 - `mise run census-bless` — regenerate every census ratchet file, both tiers
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
 - In this sandbox, `mise run fuzz <target>` false-positives as a crash for
@@ -439,17 +439,23 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   spoke at length 3.
   `mise run census-ratchet` runs in CI *after* `mise run test`, because it takes the
   files' accuracy on trust and only the test establishes that; `mise run
-  census-ratchet-cases` runs after both and is the queue gate's *negative*
-  direction, injecting an unjustified growth and failing if the gate accepts
+  census-ratchet-cases` runs after both and is the gates' *negative*
+  direction, injecting an unjustified growth and failing if a gate accepts
   it (`crates/kasane-writer/tests/ratchet_gate_cases.sh`). The ratchet task on
-  its own only ever exercises the gate where it passes, which is
-  indistinguishable from a gate that always passes.
-  That is still true of the **length-4** union: `ratchet_gate_cases.sh` covers
-  the length-3 queue gate only, and extending it was deliberately left out of
-  scope (`2026-08-23-length-4-structural-tier-design.md` §6.1). The length-4
-  union was exercised against an injected growth once, by hand, and the output
-  is in `docs/superpowers/evidence/2026-08-23-len4-structural-tier/`. Nothing
-  re-proves it.
+  its own only ever exercises its gates where they pass, which is
+  indistinguishable from gates that always pass.
+  Two gates have a negative direction there: the length-3 queue gate (the case
+  abutment ledger spec §2b.4 recorded) and the **length-4** union, added
+  2026-08-24 as the follow-up `2026-08-23-length-4-structural-tier-design.md`
+  §6.1 left open. Until then the length-4 union had been driven into failure
+  once, by hand, with the output in
+  `docs/superpowers/evidence/2026-08-23-len4-structural-tier/`, and nothing
+  re-proved it. Each direction asserts the *row* its gate prints, not merely
+  that the task exited non-zero: eight rows can fail that task, so an exit
+  status cannot tell the gate under test from an unrelated one that spoke
+  first — and the length-4 case, which mutates a file no length-3 gate reads,
+  cannot be checked by exit status at all. Still only ever seen passing: the
+  length-3 union gate and both ceilings' no-gratuitous-raise check.
   `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
   a tier measures with the census's own instrument rather than a copy that
   drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers
