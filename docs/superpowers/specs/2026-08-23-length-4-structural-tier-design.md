@@ -286,6 +286,35 @@ Still uncovered, and stated for the same reason §6.1 was: the length-3 union
 gate and both ceilings' no-gratuitous-raise check are still only ever seen
 passing.
 
+**Closed 2026-08-25**, on branch `ceiling-and-union3-gate-cases`, as four more
+directions in the same script — one per gate, plus one that is not a gate case
+at all. Two things the paragraph above did not anticipate.
+
+First, the length-3 union cannot be exercised the way the length-4 one was. A
+shape appended to the queue trips `queue+` as well, and a row that fails
+alongside another proves only that *something* spoke. The injection goes into
+the **permanent** file instead, where `perm` is report-only and no other gate
+reads the file, leaving `union` as the only gate that can speak. Direction 2's
+own table is the evidence for the alternative being unusable: it shows `queue+`
+and `union` failing together on the same injection.
+
+Second, the ceilings needed a direction that asserts a **pass**. Alone among
+these gates, `ceiling_check`'s predicate has two terms — `raised` **and**
+`nothing moved in` — so driving it into failure exercises only the first. A
+check that had lost `&& [ "$grew" -eq 0 ]` would reject every raise, including
+the legitimate ones the ceiling exists to make reviewable, and both failure
+directions would stay green. Direction 7 models a real promotion (one shape out
+of the queue into the permanent file, ceiling raised by one) and requires the
+whole task green. That is measured rather than argued: the evidence directory
+carries a run per gate-break, and the `grew`-term break is red *only* at
+direction 7.
+
+Both facts generalise past this script. A negative direction is worth what its
+isolation is worth — which is why every direction here matches its own row or
+line — and a gate with a compound predicate needs a positive direction as well,
+or half of it is untested. Evidence:
+`docs/superpowers/evidence/2026-08-25-ceiling-and-union3-gate-cases/`.
+
 ## 7. Documentation this item falsifies
 
 Each of these is false the moment the tier lands, and each is corrected in the

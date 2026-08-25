@@ -1,0 +1,83 @@
+[census-ratchet-cases] $ crates/kasane-writer/tests/ratchet_gate_cases.sh
+== direction 1: this branch's census files must PASS ==
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 66eccad Merge pull request #51 from rahulmutt/len4-union-gate-case
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      433       +0   ok
+union        2044     2044       +0   ok
+queue4      41443    41443       +0   ok
+perm4       10153    10153       +0   ok
+union4      51596    51596       +0   ok
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet ok
+base for the ceiling directions: 66eccad
+
+== direction 2: a length-3 queue growth with no text removal must FAIL ==
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 66eccad Merge pull request #51 from rahulmutt/len4-union-gate-case
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1612       +1   1 moved in (not gated)
+queue+                           +1   FAIL -- queue growth with no matching text removal
+           [Code("x"), Code("x"), Emph([Emph([Text("a")])])]
+perm          433      433       +0   ok
+union        2044     2045       +1   1 moved in (not gated)
+queue4      41443    41443       +0   ok
+perm4       10153    10153       +0   ok
+union4      51596    51596       +0   ok
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet FAILED: the allowlists may only shrink against main.
+[census-ratchet] ERROR task failed
+
+== direction 3: a length-4 union growth must FAIL ==
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 66eccad Merge pull request #51 from rahulmutt/len4-union-gate-case
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      433       +0   ok
+union        2044     2044       +0   ok
+queue4      41443    41444       +1   1 moved in (not gated)
+perm4       10153    10153       +0   ok
+union4      51596    51597       +1   FAIL -- 1 added
+           [Text("z"), Text("z"), Text("z"), Text("z")]
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet FAILED: the allowlists may only shrink against main.
+[census-ratchet] ERROR task failed
+
+== direction 4: a length-3 union growth must FAIL ==
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 66eccad Merge pull request #51 from rahulmutt/len4-union-gate-case
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      434       +1   1 moved in (not gated)
+union        2044     2045       +1   1 moved in (not gated)
+queue4      41443    41443       +0   ok
+perm4       10153    10153       +0   ok
+union4      51596    51596       +0   ok
+
+ceiling(len3): 433 -> 433 (1 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet ok
+FAIL: the gate accepted a length-3 union growth
+[census-ratchet-cases] ERROR task failed

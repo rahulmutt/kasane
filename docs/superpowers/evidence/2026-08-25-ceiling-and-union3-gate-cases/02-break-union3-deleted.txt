@@ -1,0 +1,20 @@
+[census-ratchet-cases] $ crates/kasane-writer/tests/ratchet_gate_cases.sh
+== direction 1: this branch's census files must PASS ==
+[census-ratchet] $ # Every sort and every `comm` in this script must agree on c…
+base: 66eccad Merge pull request #51 from rahulmutt/len4-union-gate-case
+
+set          base     head    delta   verdict
+text            0        0       +0   ok
+queue        1611     1611       +0   ok
+queue+                           +0   ok
+perm          433      433       +0   ok
+queue4      41443    41443       +0   ok
+perm4       10153    10153       +0   ok
+union4      51596    51596       +0   ok
+
+ceiling(len3): 433 -> 433 (0 shape(s) newly permanent)
+ceiling(len4): 10153 -> 10153 (0 shape(s) newly permanent)
+
+census ratchet ok
+FAIL: no passing 'union ... ok' row; the length-3 union gate did not run.
+[census-ratchet-cases] ERROR task failed
