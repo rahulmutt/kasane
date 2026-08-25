@@ -306,7 +306,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 ## Workflows
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
 - `mise run census-ratchet` — the census allowlists may only shrink against `main`
-- `mise run census-ratchet-cases` — the census gates' negative directions: the length-3 queue gate and the length-4 union
+- `mise run census-ratchet-cases` — the census gates' negative directions: every gate the ratchet table prints, plus one justified-raise case that must pass
 - `mise run census-bless` — regenerate every census ratchet file, both tiers
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
 - In this sandbox, `mise run fuzz <target>` false-positives as a crash for
@@ -444,18 +444,36 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   it (`crates/kasane-writer/tests/ratchet_gate_cases.sh`). The ratchet task on
   its own only ever exercises its gates where they pass, which is
   indistinguishable from gates that always pass.
-  Two gates have a negative direction there: the length-3 queue gate (the case
-  abutment ledger spec §2b.4 recorded) and the **length-4** union, added
-  2026-08-24 as the follow-up `2026-08-23-length-4-structural-tier-design.md`
-  §6.1 left open. Until then the length-4 union had been driven into failure
-  once, by hand, with the output in
-  `docs/superpowers/evidence/2026-08-23-len4-structural-tier/`, and nothing
+  Since **2026-08-25 every gate that task prints has a direction there**, in
+  seven of them: the length-3 queue gate (the case abutment ledger spec §2b.4
+  recorded); the length-4 union, added 2026-08-24 as the follow-up
+  `2026-08-23-length-4-structural-tier-design.md` §6.1 left open; the length-3
+  union; and both ceilings' no-gratuitous-raise check. Before each was added
+  the gate had been driven into failure at most once, by hand — the length-4
+  union's output is in
+  `docs/superpowers/evidence/2026-08-23-len4-structural-tier/` — and nothing
   re-proved it. Each direction asserts the *row* its gate prints, not merely
   that the task exited non-zero: eight rows can fail that task, so an exit
   status cannot tell the gate under test from an unrelated one that spoke
   first — and the length-4 case, which mutates a file no length-3 gate reads,
-  cannot be checked by exit status at all. Still only ever seen passing: the
-  length-3 union gate and both ceilings' no-gratuitous-raise check.
+  cannot be checked by exit status at all. The ceilings speak in a sentence
+  rather than a table row, so those directions match the line instead, numbers
+  included.
+  Two choices in there are load-bearing and easy to undo by accident. The
+  length-3 union case injects into the **permanent** file, not the queue:
+  `perm` is report-only and no other gate reads that file, so `union` is the
+  only gate left that can speak — the same shape in the queue trips `queue+`
+  as well, which is visible in direction 2's own table and would make the row
+  prove nothing. And direction 7 asserts a **pass**, not a failure: a justified
+  raise, one shape promoted out of the queue in the same change. `ceiling_check`
+  is the only gate here whose predicate has two terms (`raised` **and**
+  `nothing moved in`), and dropping `&& [ "$grew" -eq 0 ]` leaves directions 5
+  and 6 green while rejecting every legitimate raise — measured, not argued:
+  `docs/superpowers/evidence/2026-08-25-ceiling-and-union3-gate-cases/`
+  carries a run per gate-break showing which direction speaks.
+  What is *not* covered, and cannot usefully be: the `text` gate, whose file is
+  empty at both ends, so any growth injected into it is caught by the union
+  first.
   `tests/census_support/mod.rs` is the oracle all of this shares, extracted so
   a tier measures with the census's own instrument rather than a copy that
   drifts: `alphabet` and `shapes` build the corpus, `parsed_text` recovers
