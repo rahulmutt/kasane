@@ -1,0 +1,39 @@
+name: census-deep
+
+# The length-6 census tier. ~10 minutes, so it does not belong in PR CI.
+#
+# It commits no files, so unlike `mise run census-ratchet` there is nothing
+# here that needs a merge base -- which is why this job wants no `fetch-depth`
+# at all. The guard is the tier's own assertion, and that works the same on
+# main as on a branch (design spec §3.2).
+#
+# Weekly means a novel-at-6 regression surfaces on main up to a week late. That
+# is the same bargain fuzz.yml makes, and it is why length 5 -- not length 6 --
+# is the one in PR CI.
+on:
+  workflow_dispatch:
+  # Offset an hour from fuzz.yml (08:00 Monday), which is itself offset from
+  # audit.yml (07:00), so the three do not contend.
+  schedule:
+    - cron: '0 9 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: census-deep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  census-len6:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # --include-ignored is inside the task; see mise.toml.
+      - name: Census length 6
+        run: mise run census-len6
