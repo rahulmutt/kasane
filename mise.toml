@@ -110,6 +110,17 @@ run = [
 description = "Both census tiers plus the novelty check at length 5"
 run = "cargo test -p kasane-writer --release --test census_len5 -- --include-ignored"
 
+# The length-6 tier. ~10 min, so it lives in the weekly census-deep workflow
+# rather than PR CI -- .github/workflows/census-deep.yml.
+#
+# It commits no files, so there is no census-bless line for it and
+# `mise run census-ratchet` has nothing here to compare. Its guard is the
+# tier's own assertion, which works the same on main as on a branch
+# (design spec §3.2).
+[tasks.census-len6]
+description = "Both census tiers plus the novelty check at length 6 (~10 min)"
+run = "cargo test -p kasane-writer --release --test census_len6 -- --include-ignored"
+
 # The other half of the census ratchet. `cargo test` proves the allowlist files
 # match reality (census.rs's `ratchet` fails in both directions); this proves
 # they only ever got better. It compares committed file to committed file across
