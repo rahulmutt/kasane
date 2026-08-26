@@ -559,3 +559,66 @@ pub fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<
             .collect::<String>()
     );
 }
+
+/// Non-clean shapes of one length, as a bitset keyed by base-`ALPHABET_LEN`
+/// index.
+///
+/// A bitset rather than a `BTreeSet<String>` of `format!("{seq:?}")`, which is
+/// what the ratchet files use and what the design probes used first. At length
+/// 5 that set is ~100 MB and materially slower to build and query, and the
+/// length-6 novelty check needs the length-5 set **resident** while it walks
+/// 47 million shapes. 19^5 bits is 310 KB.
+///
+/// This is an in-memory index, never a committed file. Nothing blesses it and
+/// nothing reads it across revisions -- design spec §2.2 is why lengths 5 and
+/// 6 commit no per-shape files at all.
+pub struct NonClean {
+    bits: Vec<u64>,
+    len: usize,
+}
+
+impl NonClean {
+    /// An empty bitset with room for every shape of `len`.
+    pub fn new(len: usize) -> Self {
+        NonClean {
+            bits: vec![0u64; pow19(len) / 64 + 1],
+            len,
+        }
+    }
+
+    /// The shape length this bitset indexes.
+    pub fn shape_len(&self) -> usize {
+        self.len
+    }
+
+    pub fn set(&mut self, i: usize) {
+        self.bits[i / 64] |= 1 << (i % 64);
+    }
+
+    pub fn get(&self, i: usize) -> bool {
+        self.bits[i / 64] >> (i % 64) & 1 == 1
+    }
+
+    /// How many bits are set.
+    pub fn count(&self) -> usize {
+        self.bits.iter().map(|w| w.count_ones() as usize).sum()
+    }
+}
+
+/// Classify every shape of `len` and record the non-clean ones.
+///
+/// "Non-clean" is `Structure::Corrupt` **or** `Structure::Inexpressible`, i.e.
+/// the union the ratchet gates -- not the queue alone. `is_novel` asks whether
+/// a shape's family is already visible to a shipped tier, and a shape filed as
+/// permanent is just as visible as one in the queue.
+pub fn nonclean_bitset(len: usize, ledger: Ledger) -> NonClean {
+    let mut bits = NonClean::new(len);
+    let mut value = 0usize;
+    for_each_shape(len, |seq, _| {
+        if classify_with(seq, ledger) != Structure::Clean {
+            bits.set(value);
+        }
+        value += 1;
+    });
+    bits
+}

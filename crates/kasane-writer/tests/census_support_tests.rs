@@ -10,7 +10,10 @@
 
 mod census_support;
 
-use census_support::{alphabet, for_each_shape, ALPHABET_LEN};
+use census_support::{
+    alphabet, classify_with, for_each_shape, nonclean_bitset, NonClean, Structure, ALPHABET_LEN,
+};
+use kasane_writer::Ledger;
 
 /// The shared odometer agrees with the length-4 one it replaced.
 ///
@@ -41,4 +44,41 @@ fn the_shared_odometer_yields_shapes_in_base_19_digit_order() {
 #[test]
 fn alphabet_len_matches_the_radix() {
     assert_eq!(alphabet().len(), ALPHABET_LEN);
+}
+
+/// A bitset round-trips the bits set in it and counts them.
+#[test]
+fn nonclean_bitset_stores_and_counts_bits() {
+    let mut b = NonClean::new(2);
+    assert_eq!(b.count(), 0);
+    assert!(!b.get(0));
+    b.set(0);
+    b.set(64); // across a word boundary -- the off-by-one that a 1-word test misses
+    b.set(360); // 19^2 - 1, the last valid index
+    assert!(b.get(0) && b.get(64) && b.get(360));
+    assert!(!b.get(1) && !b.get(63) && !b.get(65));
+    assert_eq!(b.count(), 3);
+}
+
+/// The bitset built from the writer agrees with a set built the obvious way.
+///
+/// Length 2 because it is small enough to hold both forms at once; the point
+/// is the base-19 indexing, which does not vary with length.
+#[test]
+fn nonclean_bitset_agrees_with_a_direct_walk_at_length_two() {
+    let bits = nonclean_bitset(2, Ledger::LICENSED);
+    let mut direct = 0usize;
+    for_each_shape(2, |seq, idx| {
+        let value = idx.iter().fold(0usize, |acc, &d| acc * ALPHABET_LEN + d);
+        let nonclean = classify_with(seq, Ledger::LICENSED) != Structure::Clean;
+        assert_eq!(
+            bits.get(value),
+            nonclean,
+            "disagreement at index {value}: {seq:?}"
+        );
+        if nonclean {
+            direct += 1;
+        }
+    });
+    assert_eq!(bits.count(), direct);
 }
