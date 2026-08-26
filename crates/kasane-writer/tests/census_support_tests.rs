@@ -216,16 +216,27 @@ fn counts_ratchet_rejects_a_stale_file() {
 /// runs tests on threads, so two blessing tests in flight at once would see
 /// each other's variable.
 ///
+/// Restores the environment variable via a Drop guard, so a panicking closure
+/// cannot leak bless state that would cause subsequent ratchet checks to
+/// silently write instead of verify.
+///
 /// No `unsafe` block: this workspace is edition 2021 (`Cargo.toml:8`), where
 /// `set_var` is safe. Wrapping it would trip `unused_unsafe` and fail the
 /// `-D warnings` lint gate. If the workspace ever moves to edition 2024 this
 /// needs an `unsafe` block and a SAFETY comment naming the mutex.
 fn temp_env_bless<T>(f: impl FnOnce() -> T) -> T {
     use std::sync::Mutex;
+
+    struct BlessGuard;
+    impl Drop for BlessGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("KASANE_CENSUS_BLESS");
+        }
+    }
+
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("KASANE_CENSUS_BLESS", "1");
-    let out = f();
-    std::env::remove_var("KASANE_CENSUS_BLESS");
-    out
+    let _bless_guard = BlessGuard;
+    f()
 }
