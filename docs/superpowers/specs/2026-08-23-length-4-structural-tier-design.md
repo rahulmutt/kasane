@@ -362,6 +362,10 @@ same commit as the code:
   This item ships a guard, and a guard that also changes the writer cannot be
   trusted to have measured the writer.
 - **Length 5 or 6.** Minutes, not seconds. Unchanged.
+  *(Landed 2026-08-26 as `census_len5.rs` and `census_len6.rs` —
+  `2026-08-26-length-5-6-novelty-tier-design.md`. The sentence above stays as
+  written: it was true of this branch, and "minutes, not seconds" was the
+  honest reading of a debug-profile measurement at the time.)*
 - **Widening the census alphabet.** The 19 elements are the census's own, and
   zero at length 4 says nothing about text outside them — the property tier
   remains the only guard there. That scope statement is load-bearing:

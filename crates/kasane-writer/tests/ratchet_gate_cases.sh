@@ -29,10 +29,16 @@
 #     failure directions above cannot tell it from a check that rejects every
 #     raise. Dropping `&& [ "$grew" -eq 0 ]` from the task leaves 5 and 6
 #     green and only this direction red.
+#   direction 8 -- the length-5 union gate. Its counts file carries no
+#     promotion rule, the same as union4's: any growth on the gated number is
+#     a regression. `queue5` and `perm5` are report-only, so `union5` is the
+#     only one of the three that can speak.
 #
-# Every gate the ratchet table prints now has a direction here. What that does
-# NOT cover: the `text` gate, whose file is empty at both ends, so there is no
-# growth to inject that the union would not also catch first.
+# Every gate the ratchet table prints now has a direction here: queue+, union,
+# union4, union5, both ceilings' no-gratuitous-raise check, and the ceiling's
+# positive direction. What that does NOT cover: the `text` gate, whose file is
+# empty at both ends, so there is no growth to inject that the union would not
+# also catch first.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -41,6 +47,7 @@ q4=crates/kasane-writer/tests/census-len4-known-structure-corrupt.txt
 perm=crates/kasane-writer/tests/census-inexpressible.txt
 ceil=crates/kasane-writer/tests/census-permanent-count.txt
 ceil4=crates/kasane-writer/tests/census-len4-permanent-count.txt
+counts5=crates/kasane-writer/tests/census-len5-counts.txt
 
 tmp="$(mktemp -d)"
 
@@ -99,7 +106,7 @@ ratchet() { # out-file
 # Does one row of the gate's table say this?
 #
 # Matching the row rather than the exit status is what makes the directions
-# below mean anything. `census-ratchet` fails as a whole for any of eight
+# below mean anything. `census-ratchet` fails as a whole for any of nine
 # reasons, so "it exited non-zero" cannot tell the gate under test from an
 # unrelated one that spoke first -- and direction 3, which mutates a length-4
 # file, cannot be checked that way at all.
@@ -113,7 +120,7 @@ row_says() { # label-regex verdict-regex out-file
 # `ceiling(lenN): ...` on success and `FAIL ceiling(lenN) raised ...` on
 # failure, neither of which `row_says` can match. Directions 5-7 need the same
 # specificity the table directions get, for the same reason: the ceiling is one
-# of eight things that fail this task.
+# of nine things that fail this task.
 line_says() { # regex out-file
   grep -Eq "$1" "$2"
 }
@@ -165,6 +172,19 @@ fi
 # accepts everything in silence.
 if ! row_says union '[[:space:]]ok$' "$tmp/out.1"; then
   echo "FAIL: no passing 'union ... ok' row; the length-3 union gate did not run." >&2
+  exit 1
+fi
+# The same argument for union5, which direction 8 targets. Like union4 it CAN
+# skip -- its counts file is absent at any base predating it -- so it has the
+# same two failure modes: a stale branch, or a gate that was removed.
+if row_says union5 'skipped \(no baseline\)' "$tmp/out.1"; then
+  echo "FAIL: union5 skipped -- no length-5 counts at this base, so direction 8" >&2
+  echo "      cannot be exercised. Rebase onto a commit that carries" >&2
+  echo "      census-len5-counts.txt." >&2
+  exit 1
+fi
+if ! row_says union5 '[[:space:]]ok$' "$tmp/out.1"; then
+  echo "FAIL: no passing 'union5 ... ok' row; the length-5 union gate did not run." >&2
   exit 1
 fi
 # And for both ceilings, whose check returns 0 early when the ceiling file is
@@ -235,7 +255,7 @@ echo "== direction 4: a length-3 union growth must FAIL =="
 # cannot speak; `queue+` and `check queue` never read this file; the text gate
 # never reads it either. `union` is the only gate left, which is what makes
 # `union ... FAIL -- 1 added` a verdict on the length-3 union specifically
-# rather than on whichever of the eight rows happened to fail first. The same
+# rather than on whichever of the nine rows happened to fail first. The same
 # shape appended to the queue would trip `queue+` as well and prove nothing.
 #
 # Both files are checked for the probe, not just the one being written: a shape
@@ -342,6 +362,26 @@ if ! line_says "^ceiling\(len3\): $cb3 -> $((cb3 + 1)) \(1 shape\(s\) newly perm
   echo "      one shape that justified it." >&2
   exit 1
 fi
+
+echo
+echo "== direction 8: a length-5 union growth must FAIL =="
+back_up "$counts5"
+# +1 on the gated number only. queue5 and perm5 are report-only, so leaving
+# them alone is what proves union5 spoke rather than a neighbour: this file
+# cannot trip any other row.
+awk '$1 == "union" { print $1, $2 + 1; next } { print }' "$counts5" > "$tmp/counts5.new"
+cat "$tmp/counts5.new" > "$counts5"
+if ratchet "$tmp/out.8"; then
+  echo "FAIL: the gate accepted a length-5 union growth" >&2
+  exit 1
+fi
+if ! row_says union5 'FAIL' "$tmp/out.8"; then
+  echo "FAIL: census-ratchet failed, but not on the union5 row -- so this" >&2
+  echo "      direction proves nothing about the gate under test." >&2
+  exit 1
+fi
+echo "  ok: union5 refused the growth"
+cp -f "$tmp/backup.$n_backups" "$counts5"
 
 echo
 echo "every direction behaved correctly"

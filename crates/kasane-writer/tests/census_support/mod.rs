@@ -1,7 +1,9 @@
 //! The census oracle, shared by every census tier.
 //!
-//! Two test binaries render the same shapes through the same parser and ask
-//! the same structural question: `census.rs` (lengths 1-3, the ratchet) and
+//! Six test binaries include this module now (`census`, `census_probe`,
+//! `census_len4`, `census_len5`, `census_len6`, `census_support_tests`); two of
+//! them render the same shapes through the same parser and ask the same
+//! structural question: `census.rs` (lengths 1-3, the ratchet) and
 //! `census_probe.rs` (design spec §2's re-measurement). A copy of
 //! `classify_with` in either would drift from the other, which is the same
 //! reason `section::canonicalize_inlines` is a `#[doc(hidden)] pub` seam
@@ -198,6 +200,63 @@ pub fn shapes() -> Vec<Vec<Inline>> {
         }
     }
     out
+}
+
+/// The census alphabet's size, and the radix every shape index is written in.
+///
+/// A shape of length `n` is a base-`ALPHABET_LEN` numeral with `n` digits, most
+/// significant first, and that numeral is its index everywhere in this module.
+/// `nonclean_bitset` keys on it and `is_novel` does deletion arithmetic with
+/// it, both of which would be wrong rather than merely slow if this drifted
+/// from `alphabet().len()`. `alphabet_len_matches_the_radix` pins them
+/// together.
+pub const ALPHABET_LEN: usize = 19;
+
+/// `ALPHABET_LEN.pow(k)`, as a `usize`.
+///
+/// Written as a fold rather than `pow` to keep the multiply itself visible;
+/// either way, debug overflow checks catch it: an overflow at length 7 and up
+/// panics on the multiply rather than wrapping silently. 19^7 fits a `usize`,
+/// but nothing here bounds what a future caller passes.
+pub fn pow19(k: usize) -> usize {
+    (0..k).fold(1usize, |a, _| a * ALPHABET_LEN)
+}
+
+/// Every sequence of `len` elements over the census alphabet, in ascending
+/// base-`ALPHABET_LEN` order, handed to `f` one at a time.
+///
+/// Streamed rather than materialized: a `Vec` of 19^5 shapes held at once is a
+/// cost the odometer does not pay, and at 19^6 it is not payable at all.
+///
+/// `f` receives the digit slice as well as the shape, because the deep tiers
+/// need the shape's index to do `is_novel`'s deletion arithmetic and
+/// recomputing it from the shape would mean a reverse lookup per element.
+/// Callers that do not need it take `|seq, _|`.
+///
+/// This is the **only** carry loop in the census. It lived in `census_len4.rs`
+/// as `for_each_length_four_shape` until lengths 5 and 6 needed one too, and a
+/// second copy there would have been exactly the drift this module exists to
+/// prevent -- the same argument `blessing()`'s doc makes about itself.
+pub fn for_each_shape(len: usize, mut f: impl FnMut(&[Inline], &[usize])) {
+    let a = alphabet();
+    assert_eq!(a.len(), ALPHABET_LEN);
+    let mut idx = vec![0usize; len];
+    loop {
+        let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
+        f(&seq, &idx);
+        let mut k = len;
+        loop {
+            if k == 0 {
+                return;
+            }
+            k -= 1;
+            idx[k] += 1;
+            if idx[k] < ALPHABET_LEN {
+                break;
+            }
+            idx[k] = 0;
+        }
+    }
 }
 
 /// One emphasis container, as it appears on the stack enclosing a character.
@@ -501,5 +560,227 @@ pub fn ratchet(path: &str, found: &BTreeSet<String>, noun: &str, header: Option<
             .take(10)
             .map(|s| format!("  {s}\n"))
             .collect::<String>()
+    );
+}
+
+/// Non-clean shapes of one length, as a bitset keyed by base-`ALPHABET_LEN`
+/// index.
+///
+/// A bitset rather than a `BTreeSet<String>` of `format!("{seq:?}")`, which is
+/// what the ratchet files use and what the design probes used first. At length
+/// 5 that set is ~100 MB and materially slower to build and query, and the
+/// length-6 novelty check needs the length-5 set **resident** while it walks
+/// 47 million shapes. 19^5 bits is 310 KB.
+///
+/// This is an in-memory index, never a committed file. Nothing blesses it and
+/// nothing reads it across revisions -- design spec §2.2 is why lengths 5 and
+/// 6 commit no per-shape files at all.
+pub struct NonClean {
+    bits: Vec<u64>,
+    len: usize,
+}
+
+impl NonClean {
+    /// An empty bitset with room for every shape of `len`.
+    pub fn new(len: usize) -> Self {
+        NonClean {
+            bits: vec![0u64; pow19(len) / 64 + 1],
+            len,
+        }
+    }
+
+    /// The shape length this bitset indexes.
+    pub fn shape_len(&self) -> usize {
+        self.len
+    }
+
+    pub fn set(&mut self, i: usize) {
+        self.bits[i / 64] |= 1 << (i % 64);
+    }
+
+    pub fn get(&self, i: usize) -> bool {
+        self.bits[i / 64] >> (i % 64) & 1 == 1
+    }
+
+    /// How many bits are set.
+    pub fn count(&self) -> usize {
+        self.bits.iter().map(|w| w.count_ones() as usize).sum()
+    }
+}
+
+/// Classify every shape of `len` and record the non-clean ones.
+///
+/// "Non-clean" is `Structure::Corrupt` **or** `Structure::Inexpressible`, i.e.
+/// the union the ratchet gates -- not the queue alone. `is_novel` asks whether
+/// a shape's family is already visible to a shipped tier, and a shape filed as
+/// permanent is just as visible as one in the queue.
+pub fn nonclean_bitset(len: usize, ledger: Ledger) -> NonClean {
+    let mut bits = NonClean::new(len);
+    let mut value = 0usize;
+    for_each_shape(len, |seq, _| {
+        if classify_with(seq, ledger) != Structure::Clean {
+            bits.set(value);
+        }
+        value += 1;
+    });
+    bits
+}
+
+/// Whether a shape is **novel**: non-clean for a reason no shorter shape shows.
+///
+/// `idx` is the shape's base-`ALPHABET_LEN` digits; `shorter` is the non-clean
+/// bitset one length down. The shape is novel when **all** of its
+/// single-deletion sub-shapes are clean. The caller has already established
+/// that the shape itself is non-clean -- this function does not re-classify it.
+///
+/// **Deletion, not contiguous substring**, and that is measured rather than
+/// chosen: of the 1,204,312 non-clean length-5 shapes, all 1,204,312 have a
+/// non-clean single-deletion sub-shape but only 1,204,044 have a non-clean
+/// contiguous one. A substring relation reports 268 false novelties on a clean
+/// tree. `an_interior_deletion_is_enough_to_make_a_shape_derivative` is what
+/// stops someone "simplifying" this into one.
+///
+/// Novelty is **zero at every length measured** -- 4 against <=3, 5 against
+/// <=4, 6 against <=5 -- which is why lengths 5 and 6 assert zero and commit no
+/// per-shape files (design spec §2.2). That zero is a property of this writer
+/// today, not a theorem.
+pub fn is_novel(idx: &[usize], shorter: &NonClean) -> bool {
+    debug_assert_eq!(idx.len(), shorter.shape_len() + 1);
+    for i in 0..idx.len() {
+        let mut sub = 0usize;
+        for (p, &d) in idx.iter().enumerate() {
+            if p != i {
+                sub = sub * ALPHABET_LEN + d;
+            }
+        }
+        if shorter.get(sub) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The three census counts at one length.
+///
+/// `union` is `queue + permanent` and is stored rather than derived, because
+/// it is the number the ratchet **gates** and a reader of the committed file
+/// should not have to add two numbers to find the gated one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Counts {
+    pub queue: usize,
+    pub permanent: usize,
+    pub union: usize,
+}
+
+/// Everything one walk over a length yields.
+///
+/// The two zero-assertions carry their offending shapes rather than only
+/// counts, because a failure of either is a design event -- see
+/// `census_len5.rs`'s failure text -- and the first thing anyone will want is
+/// an example.
+pub struct DeepScan {
+    pub text_corrupt: Vec<String>,
+    pub counts: Counts,
+    pub novel: Vec<String>,
+}
+
+/// How many offending shapes a failing assertion reports.
+const DEEP_SCAN_SAMPLE: usize = 10;
+
+/// One walk over every shape of `len`: both tiers and the novelty check.
+///
+/// `shorter` must be the non-clean bitset for `len - 1`.
+///
+/// **This renders each shape twice** -- `text_is_clean` and `classify_with`
+/// each call `render` -- and the measured costs in design spec §2 already
+/// include that. Folding them into one render means restructuring
+/// `classify_with`, which is shared with the length-1-3 and length-4 tiers and
+/// is not worth the risk to save minutes on a weekly job. §10 records that the
+/// figure is reported rather than hidden.
+pub fn deep_scan(len: usize, shorter: &NonClean, ledger: Ledger) -> DeepScan {
+    let mut text_corrupt: Vec<String> = Vec::new();
+    let mut novel: Vec<String> = Vec::new();
+    let (mut queue, mut permanent) = (0usize, 0usize);
+    let mut n_text = 0usize;
+    let mut n_novel = 0usize;
+
+    for_each_shape(len, |seq, idx| {
+        if !text_is_clean(seq, ledger) {
+            n_text += 1;
+            if text_corrupt.len() < DEEP_SCAN_SAMPLE {
+                text_corrupt.push(format!("{seq:?}"));
+            }
+        }
+        match classify_with(seq, ledger) {
+            Structure::Clean => return,
+            Structure::Corrupt => queue += 1,
+            Structure::Inexpressible => permanent += 1,
+        }
+        if is_novel(idx, shorter) {
+            n_novel += 1;
+            if novel.len() < DEEP_SCAN_SAMPLE {
+                novel.push(format!("{seq:?}"));
+            }
+        }
+    });
+
+    // The samples are capped; the counts are not. A caller asserting zero needs
+    // the true total in its message, so the capped vectors are padded with a
+    // tail marker rather than silently under-reporting.
+    if n_text > text_corrupt.len() {
+        text_corrupt.push(format!("... and {} more", n_text - text_corrupt.len()));
+    }
+    if n_novel > novel.len() {
+        novel.push(format!("... and {} more", n_novel - novel.len()));
+    }
+
+    DeepScan {
+        text_corrupt,
+        counts: Counts {
+            queue,
+            permanent,
+            union: queue + permanent,
+        },
+        novel,
+    }
+}
+
+/// Bless or check one counts file.
+///
+/// The counts analogue of [`ratchet`], and deliberately **not** a ratchet: it
+/// asserts equality in both directions, exactly as `ratchet` does for a shape
+/// file. Whether a count may only shrink is `mise run census-ratchet`'s
+/// question, asked across revisions; this one asks only whether the committed
+/// file still describes the writer. Design spec §5 is why the two must not be
+/// merged: the ratchet takes this file's accuracy on trust, which is only
+/// earned once this assertion has run.
+pub fn counts_ratchet(path: &str, found: Counts, header: &str) {
+    let body = format!(
+        "{header}queue {}\npermanent {}\nunion {}\n",
+        found.queue, found.permanent, found.union
+    );
+    if blessing() {
+        std::fs::write(path, body).expect("writing the counts file");
+        return;
+    }
+
+    let known = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("{path} must exist -- bless it with KASANE_CENSUS_BLESS=1"));
+    let strip = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    };
+    assert_eq!(
+        strip(&known),
+        strip(&body),
+        "{path} no longer describes this writer.\n\
+         \n\
+         Committed above, measured below. Every one of these numbers moving is \
+         normal on a change that improves the writer -- re-bless with \
+         `mise run census-bless`. What is NOT normal is `union` going UP: that \
+         is a shape becoming corrupt that was not, and \
+         `mise run census-ratchet` will refuse it against main."
     );
 }

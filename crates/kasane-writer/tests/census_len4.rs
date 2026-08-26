@@ -10,8 +10,12 @@
 //! every row of every table while text losses ran into the thousands, because
 //! the census stops at length 3 and the losses lived at length >= 4. A guard at
 //! 4 is the smallest one that would have spoken. Lengths 5 and 6 were swept
-//! too (`2026-08-21-declined-run-rescan-design.md` §2.2, also zero) and are not
-//! shipped: they cost minutes, not seconds.
+//! too (`2026-08-21-declined-run-rescan-design.md` §2.2, also zero) and **now
+//! ship**, as `census_len5.rs` and `census_len6.rs` -- neither with a
+//! per-shape file. The old reason for holding them back, "minutes, not
+//! seconds", was measured against the debug profile; this binary is 5.64 s in
+//! debug and 0.72 s in release (`2026-08-26-length-5-6-novelty-tier-design.md`
+//! §1).
 //!
 //! **What this does not cover.** The alphabet is the census's own 19 elements.
 //! Zero here says nothing about text outside it, and the property tier
@@ -34,13 +38,16 @@
 //! structural tier below closes that gap;
 //! `2026-08-23-delimiter-choice-ordering-design.md` §6.1 named it and
 //! `2026-08-23-length-4-structural-tier-design.md` is its design. Lengths 5
-//! and 6 remain unpriced for structure as well as text, for the same reason:
-//! minutes, not seconds.
+//! and 6 are priced and guarded since 2026-08-26. They assert **novelty** --
+//! that no shape is corrupt for a reason a shorter shape does not already
+//! show -- rather than carrying allowlists of their own, because every
+//! non-clean shape at 5 and 6 has a non-clean single-deletion sub-shape and a
+//! file there would index this one.
 
 mod census_support;
 
 use census_support::{
-    alphabet, blessing, classify_with, permanence_ceiling, ratchet, text_is_clean, Structure,
+    blessing, classify_with, for_each_shape, permanence_ceiling, ratchet, text_is_clean, Structure,
 };
 use kasane_ir::Inline;
 use kasane_writer::Ledger;
@@ -49,32 +56,12 @@ use std::collections::BTreeSet;
 /// Every sequence of length 4 over the census alphabet, handed to `f` one at a
 /// time.
 ///
-/// Both tiers in this file walk the same 19^4 = 130,321 shapes, by odometer
-/// rather than by `shapes()`, which is fixed at lengths 1-3 — and streamed
-/// rather than materialized, since a `Vec` of 130,321 shapes held at once is a
-/// cost the odometer does not pay. One carry loop, called twice: two copies in
-/// one file is the drift `census_support` exists to prevent, one file closer
-/// in.
+/// A thin wrapper over `census_support::for_each_shape`, which is the census's
+/// one carry loop. This function kept its own copy until lengths 5 and 6
+/// needed the same loop; two copies in two files is the drift `census_support`
+/// exists to prevent, and three would have been worse.
 fn for_each_length_four_shape(mut f: impl FnMut(&[Inline])) {
-    let a = alphabet();
-    let n = a.len();
-    let mut idx = [0usize; 4];
-    loop {
-        let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
-        f(&seq);
-        let mut k = 4;
-        loop {
-            if k == 0 {
-                return;
-            }
-            k -= 1;
-            idx[k] += 1;
-            if idx[k] < n {
-                break;
-            }
-            idx[k] = 0;
-        }
-    }
+    for_each_shape(4, |seq, _| f(seq));
 }
 
 /// The corpus size the odometer must visit.
@@ -444,5 +431,39 @@ fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
          prose and the NESTED_STRONG_IN_EMPH constant have drifted apart -- \
          update the header's prose, re-bless, and update this test in the \
          same commit."
+    );
+}
+
+/// Length-4 corruption is entirely inherited from lengths <= 3.
+///
+/// The cheap end of the measurement lengths 5 and 6 rest on (design spec §2.1):
+/// novelty is zero at every length measured. This one is affordable in the
+/// default test run, so it is the tripwire that fires first if the novelty
+/// relation ever stops holding -- long before the weekly length-6 job speaks.
+#[test]
+fn no_length_four_shape_is_corrupt_for_a_reason_length_three_does_not_show() {
+    let shorter = census_support::nonclean_bitset(3, Ledger::LICENSED);
+    let mut novel = 0usize;
+    let mut first: Vec<String> = Vec::new();
+    for_each_shape(4, |seq, idx| {
+        if classify_with(seq, Ledger::LICENSED) != Structure::Clean
+            && census_support::is_novel(idx, &shorter)
+        {
+            novel += 1;
+            if first.len() < 10 {
+                first.push(format!("{seq:?}"));
+            }
+        }
+    });
+    assert_eq!(
+        novel,
+        0,
+        "{novel} length-4 shape(s) are corrupt for a reason no length-3 shape \
+         shows. Design spec §2.2's case for lengths 5 and 6 committing no \
+         per-shape files rests on this being zero -- if it is not, that \
+         argument is void and the deep tiers need re-designing, not \
+         re-blessing.\nFirst {}:\n  {}",
+        first.len(),
+        first.join("\n  ")
     );
 }

@@ -71,6 +71,13 @@ A is the parent spec's proposal, stated exactly.
 set difference (`comm` over the sorted shape dumps from both worktrees), not a
 count comparison; at length 6 the head total is 0, so it holds trivially.
 
+**Landed 2026-08-26.** The length-5 and length-6 sweeps this table reports
+landed as `census_len5.rs` and `census_len6.rs` —
+`2026-08-26-length-5-6-novelty-tier-design.md`. The rows above stay as
+written: they measured a probe against this branch's own emit-loop change,
+not the shipped tiers, and rewriting them to pretend the census gates existed
+here would falsify the record they exist to keep.
+
 ### 2.3 What the measurement changed
 
 **A closes 16 of 32, not 32.** The survivors are exactly the head half,

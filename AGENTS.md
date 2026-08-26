@@ -307,7 +307,9 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
 - `mise run census-ratchet` — the census allowlists may only shrink against `main`
 - `mise run census-ratchet-cases` — the census gates' negative directions: every gate the ratchet table prints, plus one justified-raise case that must pass
-- `mise run census-bless` — regenerate every census ratchet file, both tiers
+- `mise run census-bless` — regenerate every census ratchet file, every tier
+- `mise run census-len5` — both tiers plus the novelty check at length 5 (release, ~35 s); runs in PR CI
+- `mise run census-len6` — the same at length 6 (~10 min); weekly via `.github/workflows/census-deep.yml`
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
 - In this sandbox, `mise run fuzz <target>` false-positives as a crash for
   every target, not just `slug`: LeakSanitizer's atexit leak scan needs
@@ -425,9 +427,24 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   splits by `classify_with`'s two conditions — 7,585 same-class nestings, 2,568
   strong-over-emph-only, none satisfying neither — and **not** by the length-3
   file's flanking-wall-vs-refusal split, which is a distinction by cause that no
-  grep over ten thousand entries can make. Lengths 5 and 6 stay unpriced for
-  structure as well as text: minutes, not seconds.
+  grep over ten thousand entries can make.
   (`2026-08-23-length-4-structural-tier-design.md`).
+  Lengths 5 and 6 are priced and guarded, since 2026-08-26, and **neither
+  commits a per-shape file**. Every non-clean shape at 4, 5 and 6 has a
+  non-clean single-deletion sub-shape — corruption in this alphabet never
+  *originates* above length 3 — so a length-5 allowlist would be a 112 MB
+  index of the length-4 tier rather than evidence about length 5. What ships
+  instead is a **novelty** assertion at each length (zero, no file, on the
+  length-4 text tier's contract) plus three counts at length 5:
+  `census-len5-counts.txt`, queue 983,694, permanent 220,618, union 1,204,312,
+  of which `mise run census-ratchet` gates `union` alone. Length 6 commits
+  nothing at all — counts on a weekly cadence go stale on main, and zero stays
+  zero under improvement. `mise run census-len5` runs in PR CI at ~35 s;
+  `mise run census-len6` is ~10 min and runs weekly via
+  `.github/workflows/census-deep.yml`. The old "minutes, not seconds" reason
+  for leaving both unpriced was measured against the **debug** profile: the
+  length-4 binary is 5.64 s debug and 0.72 s release
+  (`2026-08-26-length-5-6-novelty-tier-design.md`).
   Length 4 gets a **second union**, its queue plus its permanent file, gated the
   same way. Two files rather than three, because there is no length-4 text file
   — which is also why the promotion rule has no length-4 form: that rule exists
@@ -445,15 +462,16 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   its own only ever exercises its gates where they pass, which is
   indistinguishable from gates that always pass.
   Since **2026-08-25 every gate that task prints has a direction there**, in
-  seven of them: the length-3 queue gate (the case abutment ledger spec §2b.4
+  eight of them: the length-3 queue gate (the case abutment ledger spec §2b.4
   recorded); the length-4 union, added 2026-08-24 as the follow-up
-  `2026-08-23-length-4-structural-tier-design.md` §6.1 left open; the length-3
-  union; and both ceilings' no-gratuitous-raise check. Before each was added
-  the gate had been driven into failure at most once, by hand — the length-4
-  union's output is in
+  `2026-08-23-length-4-structural-tier-design.md` §6.1 left open; the length-5
+  union, added 2026-08-26 (`2026-08-26-length-5-6-novelty-tier-design.md`
+  §6.1); the length-3 union; and both ceilings' no-gratuitous-raise check.
+  Before each was added the gate had been driven into failure at most once, by
+  hand — the length-4 union's output is in
   `docs/superpowers/evidence/2026-08-23-len4-structural-tier/` — and nothing
   re-proved it. Each direction asserts the *row* its gate prints, not merely
-  that the task exited non-zero: eight rows can fail that task, so an exit
+  that the task exited non-zero: nine rows can fail that task, so an exit
   status cannot tell the gate under test from an unrelated one that spoke
   first — and the length-4 case, which mutates a file no length-3 gate reads,
   cannot be checked by exit status at all. The ceilings speak in a sentence

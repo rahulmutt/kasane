@@ -1,0 +1,26 @@
+# The length-5 census, as three counts.
+#
+# NOT a per-shape file, and that is a measurement rather than a concession to
+# size. Every one of the 1,204,312 non-clean shapes at this length has a
+# non-clean single-deletion sub-shape, so a per-shape allowlist here would be a
+# 112 MB index of census-len4-known-structure-corrupt.txt -- it would assert
+# nothing the length-4 tier does not already assert shape by shape. See
+# docs/superpowers/specs/2026-08-26-length-5-6-novelty-tier-design.md §2.2.
+#
+#   queue      structurally corrupt: a real, fixable loss.
+#   permanent  this writer does not express it at any level.
+#   union      queue + permanent. THE GATED NUMBER.
+#
+# `mise run census-ratchet` gates `union` alone and reports the other two, which
+# is the length-3/4 logic reproduced: `permanent` growing while `union` is flat
+# IS queue -> permanent movement, and `permanent` growing while `union` grows
+# fails on `union`. So the permanence ceiling has no length-5 form -- there is
+# no set difference to compute `newly permanent` from, and nothing asks for one.
+#
+# Every number here moving DOWN is normal on a change that improves the writer.
+# `union` moving UP is a shape becoming corrupt that was not.
+#
+# COMPUTED, never hand-edited. Regenerate: mise run census-bless
+queue 983694
+permanent 220618
+union 1204312

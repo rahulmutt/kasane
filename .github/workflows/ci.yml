@@ -40,6 +40,17 @@ jobs:
       - name: Test
         run: mise run test
 
+      # Before "Census ratchet", not after, and for the same reason that step
+      # already runs after Test: the ratchet compares census-len5-counts.txt
+      # across revisions and takes its ACCURACY on trust. A hand-edited
+      # `union 1204311` sails through the ratchet -- the union shrank -- and
+      # only this tier's own assertion catches the lie.
+      #
+      # Release profile, ~35s. In debug the same three tests take ~3.3 min for
+      # the same answer, which is why they are #[ignore]d out of `mise run test`.
+      - name: Census length 5
+        run: mise run census-len5
+
       # After Test, not before: this compares the committed allowlists across
       # revisions and takes their accuracy on trust, which is only earned once
       # census.rs has asserted that they match what the writer actually does.
@@ -47,11 +58,11 @@ jobs:
       - name: Census ratchet
         run: mise run census-ratchet
 
-      # Directions 2-7. The step above only ever runs the gates where they
+      # Directions 2-8. The step above only ever runs the gates where they
       # pass, and a gate exercised only in its passing direction is the
       # silent-gate failure mode this repo has recorded twice. This one drives
-      # every gate that step prints into failure -- both queues' rules, both
-      # unions, both ceilings -- and fails if any accepts the injection. One
+      # every gate that step prints into failure -- both queues' rules, all
+      # three unions, both ceilings -- and fails if any accepts the injection. One
       # direction goes the other way, requiring a justified ceiling raise to
       # pass, because the ceiling is the only gate here whose predicate has two
       # terms. It mutates tracked census files and restores every one of them
