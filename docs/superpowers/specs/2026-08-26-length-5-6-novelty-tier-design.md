@@ -1,6 +1,9 @@
 # kasane — Length-5/6 Novelty Tier Design Spec
 
-**Status:** designed 2026-08-26; not yet implemented.
+**Status:** designed 2026-08-26; implemented 2026-08-26 on
+`length-5-6-novelty-tier`. Every probe figure reproduced by the shipped
+tiers; the length-6 split, unmeasured in §2, came out queue 21,985,812 /
+permanent 4,515,624. Observed: `census-len5` ~25 s, `census-len6` ~9 min.
 **Date:** 2026-08-26.
 **Closes the standing item:** "lengths 5 and 6 stay unpriced for structure as
 well as text" — `AGENTS.md`'s census entry,

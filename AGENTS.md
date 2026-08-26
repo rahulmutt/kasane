@@ -425,8 +425,23 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   splits by `classify_with`'s two conditions — 7,585 same-class nestings, 2,568
   strong-over-emph-only, none satisfying neither — and **not** by the length-3
   file's flanking-wall-vs-refusal split, which is a distinction by cause that no
-  grep over ten thousand entries can make. Lengths 5 and 6 stay unpriced for
-  structure as well as text: minutes, not seconds.
+  grep over ten thousand entries can make.
+  Lengths 5 and 6 are priced and guarded, since 2026-08-26, and **neither
+  commits a per-shape file**. Every non-clean shape at 4, 5 and 6 has a
+  non-clean single-deletion sub-shape — corruption in this alphabet never
+  *originates* above length 3 — so a length-5 allowlist would be a 112 MB
+  index of the length-4 tier rather than evidence about length 5. What ships
+  instead is a **novelty** assertion at each length (zero, no file, on the
+  length-4 text tier's contract) plus three counts at length 5:
+  `census-len5-counts.txt`, queue 983,694, permanent 220,618, union 1,204,312,
+  of which `mise run census-ratchet` gates `union` alone. Length 6 commits
+  nothing at all — counts on a weekly cadence go stale on main, and zero stays
+  zero under improvement. `mise run census-len5` runs in PR CI at ~35 s;
+  `mise run census-len6` is ~10 min and runs weekly via
+  `.github/workflows/census-deep.yml`. The old "minutes, not seconds" reason
+  for leaving both unpriced was measured against the **debug** profile: the
+  length-4 binary is 5.64 s debug and 0.72 s release
+  (`2026-08-26-length-5-6-novelty-tier-design.md`).
   (`2026-08-23-length-4-structural-tier-design.md`).
   Length 4 gets a **second union**, its queue plus its permanent file, gated the
   same way. Two files rather than three, because there is no length-4 text file

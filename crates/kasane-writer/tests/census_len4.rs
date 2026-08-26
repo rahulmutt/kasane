@@ -10,8 +10,12 @@
 //! every row of every table while text losses ran into the thousands, because
 //! the census stops at length 3 and the losses lived at length >= 4. A guard at
 //! 4 is the smallest one that would have spoken. Lengths 5 and 6 were swept
-//! too (`2026-08-21-declined-run-rescan-design.md` §2.2, also zero) and are not
-//! shipped: they cost minutes, not seconds.
+//! too (`2026-08-21-declined-run-rescan-design.md` §2.2, also zero) and **now
+//! ship**, as `census_len5.rs` and `census_len6.rs` -- neither with a
+//! per-shape file. The old reason for holding them back, "minutes, not
+//! seconds", was measured against the debug profile; this binary is 5.64 s in
+//! debug and 0.72 s in release (`2026-08-26-length-5-6-novelty-tier-design.md`
+//! §1).
 //!
 //! **What this does not cover.** The alphabet is the census's own 19 elements.
 //! Zero here says nothing about text outside it, and the property tier
@@ -34,8 +38,11 @@
 //! structural tier below closes that gap;
 //! `2026-08-23-delimiter-choice-ordering-design.md` §6.1 named it and
 //! `2026-08-23-length-4-structural-tier-design.md` is its design. Lengths 5
-//! and 6 remain unpriced for structure as well as text, for the same reason:
-//! minutes, not seconds.
+//! and 6 are priced and guarded since 2026-08-26. They assert **novelty** --
+//! that no shape is corrupt for a reason a shorter shape does not already
+//! show -- rather than carrying allowlists of their own, because every
+//! non-clean shape at 5 and 6 has a non-clean single-deletion sub-shape and a
+//! file there would index this one.
 
 mod census_support;
 
