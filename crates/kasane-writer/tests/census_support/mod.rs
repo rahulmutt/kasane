@@ -1,7 +1,9 @@
 //! The census oracle, shared by every census tier.
 //!
-//! Two test binaries render the same shapes through the same parser and ask
-//! the same structural question: `census.rs` (lengths 1-3, the ratchet) and
+//! Six test binaries include this module now (`census`, `census_probe`,
+//! `census_len4`, `census_len5`, `census_len6`, `census_support_tests`); two of
+//! them render the same shapes through the same parser and ask the same
+//! structural question: `census.rs` (lengths 1-3, the ratchet) and
 //! `census_probe.rs` (design spec §2's re-measurement). A copy of
 //! `classify_with` in either would drift from the other, which is the same
 //! reason `section::canonicalize_inlines` is a `#[doc(hidden)] pub` seam
@@ -212,9 +214,10 @@ pub const ALPHABET_LEN: usize = 19;
 
 /// `ALPHABET_LEN.pow(k)`, as a `usize`.
 ///
-/// Written as a fold rather than `pow` so an overflow at length 7 and up
-/// panics in debug on the multiply rather than wrapping silently: 19^7 fits a
-/// `usize`, but nothing here bounds what a future caller passes.
+/// Written as a fold rather than `pow` to keep the multiply itself visible;
+/// either way, debug overflow checks catch it: an overflow at length 7 and up
+/// panics on the multiply rather than wrapping silently. 19^7 fits a `usize`,
+/// but nothing here bounds what a future caller passes.
 pub fn pow19(k: usize) -> usize {
     (0..k).fold(1usize, |a, _| a * ALPHABET_LEN)
 }

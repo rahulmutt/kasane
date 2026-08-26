@@ -398,14 +398,15 @@ echo "census ratchet ok"
 # The ratchet gates' *negative* directions. `census-ratchet` above only ever
 # runs in the direction that passes, and a gate exercised only where it
 # succeeds is indistinguishable from a gate that always succeeds -- the
-# silent-gate failure mode this repo has now recorded twice. Since 2026-08-25
-# every gate the table prints has a direction there: the length-3 queue gate,
-# against a growth with no matching text removal (the case abutment ledger spec
-# §2b.4 recorded); both unions, against any growth at all (neither has a
-# promotion rule to excuse one); and both ceilings, against a raise with no
-# shape newly claimed permanent. Each asserts the row -- or, for the ceilings,
-# the line -- its own gate prints, because nine rows can fail this task and an
-# exit status cannot say which one did.
+# silent-gate failure mode this repo has now recorded twice. Since 2026-08-25,
+# and completed 2026-08-26 with the length-5 union, every gate the table prints
+# has a direction there: the length-3 queue gate, against a growth with no
+# matching text removal (the case abutment ledger spec §2b.4 recorded); all
+# three unions, against any growth at all (none of the three has a
+# promotion rule to excuse one); and both ceilings, against a raise
+# with no shape newly claimed permanent. Each asserts the row -- or, for the
+# ceilings, the line -- its own gate prints, because nine rows can fail this
+# task and an exit status cannot say which one did.
 #
 # One direction asserts a PASS rather than a failure: a ceiling raise that is
 # justified, one shape promoted out of the queue in the same change. The

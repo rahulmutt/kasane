@@ -10,7 +10,7 @@
 //! file is rejected on what it would record, not on its size
 //! (`2026-08-26-length-5-6-novelty-tier-design.md` §2.2).
 //!
-//! What replaces it is `no_length_five_shape_is_corrupt_for_a_novel_reason`
+//! What replaces it is the novelty assertion inside `the_length_five_census`
 //! below -- zero, with no file, on `census_len4.rs`'s text-tier contract: the
 //! answer is zero and a file it does not have cannot rot into stale excuses --
 //! plus three counts covering the one gap novelty leaves, a change that

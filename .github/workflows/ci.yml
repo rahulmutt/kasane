@@ -58,11 +58,11 @@ jobs:
       - name: Census ratchet
         run: mise run census-ratchet
 
-      # Directions 2-7. The step above only ever runs the gates where they
+      # Directions 2-8. The step above only ever runs the gates where they
       # pass, and a gate exercised only in its passing direction is the
       # silent-gate failure mode this repo has recorded twice. This one drives
-      # every gate that step prints into failure -- both queues' rules, both
-      # unions, both ceilings -- and fails if any accepts the injection. One
+      # every gate that step prints into failure -- both queues' rules, all
+      # three unions, both ceilings -- and fails if any accepts the injection. One
       # direction goes the other way, requiring a justified ceiling raise to
       # pass, because the ceiling is the only gate here whose predicate has two
       # terms. It mutates tracked census files and restores every one of them

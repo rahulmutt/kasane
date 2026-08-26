@@ -307,7 +307,9 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
 - `mise run test` — all tests   - `mise run lint` — fmt + clippy   - `mise run convert <file> -o <dir>` — convert
 - `mise run census-ratchet` — the census allowlists may only shrink against `main`
 - `mise run census-ratchet-cases` — the census gates' negative directions: every gate the ratchet table prints, plus one justified-raise case that must pass
-- `mise run census-bless` — regenerate every census ratchet file, both tiers
+- `mise run census-bless` — regenerate every census ratchet file, every tier
+- `mise run census-len5` — both tiers plus the novelty check at length 5 (release, ~35 s); runs in PR CI
+- `mise run census-len6` — the same at length 6 (~10 min); weekly via `.github/workflows/census-deep.yml`
 - `mise run fuzz <target>` / `mise run fuzz-all` — fuzz the untrusted-input boundary (nightly; see README)
 - In this sandbox, `mise run fuzz <target>` false-positives as a crash for
   every target, not just `slug`: LeakSanitizer's atexit leak scan needs
@@ -460,15 +462,16 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   its own only ever exercises its gates where they pass, which is
   indistinguishable from gates that always pass.
   Since **2026-08-25 every gate that task prints has a direction there**, in
-  seven of them: the length-3 queue gate (the case abutment ledger spec §2b.4
+  eight of them: the length-3 queue gate (the case abutment ledger spec §2b.4
   recorded); the length-4 union, added 2026-08-24 as the follow-up
-  `2026-08-23-length-4-structural-tier-design.md` §6.1 left open; the length-3
-  union; and both ceilings' no-gratuitous-raise check. Before each was added
-  the gate had been driven into failure at most once, by hand — the length-4
-  union's output is in
+  `2026-08-23-length-4-structural-tier-design.md` §6.1 left open; the length-5
+  union, added 2026-08-26 (`2026-08-26-length-5-6-novelty-tier-design.md`
+  §6.1); the length-3 union; and both ceilings' no-gratuitous-raise check.
+  Before each was added the gate had been driven into failure at most once, by
+  hand — the length-4 union's output is in
   `docs/superpowers/evidence/2026-08-23-len4-structural-tier/` — and nothing
   re-proved it. Each direction asserts the *row* its gate prints, not merely
-  that the task exited non-zero: eight rows can fail that task, so an exit
+  that the task exited non-zero: nine rows can fail that task, so an exit
   status cannot tell the gate under test from an unrelated one that spoke
   first — and the length-4 case, which mutates a file no length-3 gate reads,
   cannot be checked by exit status at all. The ceilings speak in a sentence
