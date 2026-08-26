@@ -404,7 +404,7 @@ echo "census ratchet ok"
 # §2b.4 recorded); both unions, against any growth at all (neither has a
 # promotion rule to excuse one); and both ceilings, against a raise with no
 # shape newly claimed permanent. Each asserts the row -- or, for the ceilings,
-# the line -- its own gate prints, because eight rows can fail this task and an
+# the line -- its own gate prints, because nine rows can fail this task and an
 # exit status cannot say which one did.
 #
 # One direction asserts a PASS rather than a failure: a ceiling raise that is
