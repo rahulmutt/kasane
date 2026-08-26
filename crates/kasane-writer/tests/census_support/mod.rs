@@ -656,3 +656,128 @@ pub fn is_novel(idx: &[usize], shorter: &NonClean) -> bool {
     }
     true
 }
+
+/// The three census counts at one length.
+///
+/// `union` is `queue + permanent` and is stored rather than derived, because
+/// it is the number the ratchet **gates** and a reader of the committed file
+/// should not have to add two numbers to find the gated one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Counts {
+    pub queue: usize,
+    pub permanent: usize,
+    pub union: usize,
+}
+
+/// Everything one walk over a length yields.
+///
+/// The two zero-assertions carry their offending shapes rather than only
+/// counts, because a failure of either is a design event -- see
+/// `census_len5.rs`'s failure text -- and the first thing anyone will want is
+/// an example.
+pub struct DeepScan {
+    pub text_corrupt: Vec<String>,
+    pub counts: Counts,
+    pub novel: Vec<String>,
+}
+
+/// How many offending shapes a failing assertion reports.
+const DEEP_SCAN_SAMPLE: usize = 10;
+
+/// One walk over every shape of `len`: both tiers and the novelty check.
+///
+/// `shorter` must be the non-clean bitset for `len - 1`.
+///
+/// **This renders each shape twice** -- `text_is_clean` and `classify_with`
+/// each call `render` -- and the measured costs in design spec §2 already
+/// include that. Folding them into one render means restructuring
+/// `classify_with`, which is shared with the length-1-3 and length-4 tiers and
+/// is not worth the risk to save minutes on a weekly job. §10 records that the
+/// figure is reported rather than hidden.
+pub fn deep_scan(len: usize, shorter: &NonClean, ledger: Ledger) -> DeepScan {
+    let mut text_corrupt: Vec<String> = Vec::new();
+    let mut novel: Vec<String> = Vec::new();
+    let (mut queue, mut permanent) = (0usize, 0usize);
+    let mut n_text = 0usize;
+    let mut n_novel = 0usize;
+
+    for_each_shape(len, |seq, idx| {
+        if !text_is_clean(seq, ledger) {
+            n_text += 1;
+            if text_corrupt.len() < DEEP_SCAN_SAMPLE {
+                text_corrupt.push(format!("{seq:?}"));
+            }
+        }
+        match classify_with(seq, ledger) {
+            Structure::Clean => return,
+            Structure::Corrupt => queue += 1,
+            Structure::Inexpressible => permanent += 1,
+        }
+        if is_novel(idx, shorter) {
+            n_novel += 1;
+            if novel.len() < DEEP_SCAN_SAMPLE {
+                novel.push(format!("{seq:?}"));
+            }
+        }
+    });
+
+    // The samples are capped; the counts are not. A caller asserting zero needs
+    // the true total in its message, so the capped vectors are padded with a
+    // tail marker rather than silently under-reporting.
+    if n_text > text_corrupt.len() {
+        text_corrupt.push(format!("... and {} more", n_text - text_corrupt.len()));
+    }
+    if n_novel > novel.len() {
+        novel.push(format!("... and {} more", n_novel - novel.len()));
+    }
+
+    DeepScan {
+        text_corrupt,
+        counts: Counts {
+            queue,
+            permanent,
+            union: queue + permanent,
+        },
+        novel,
+    }
+}
+
+/// Bless or check one counts file.
+///
+/// The counts analogue of [`ratchet`], and deliberately **not** a ratchet: it
+/// asserts equality in both directions, exactly as `ratchet` does for a shape
+/// file. Whether a count may only shrink is `mise run census-ratchet`'s
+/// question, asked across revisions; this one asks only whether the committed
+/// file still describes the writer. Design spec §5 is why the two must not be
+/// merged: the ratchet takes this file's accuracy on trust, which is only
+/// earned once this assertion has run.
+pub fn counts_ratchet(path: &str, found: Counts, header: &str) {
+    let body = format!(
+        "{header}queue {}\npermanent {}\nunion {}\n",
+        found.queue, found.permanent, found.union
+    );
+    if blessing() {
+        std::fs::write(path, body).expect("writing the counts file");
+        return;
+    }
+
+    let known = std::fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("{path} must exist -- bless it with KASANE_CENSUS_BLESS=1"));
+    let strip = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    };
+    assert_eq!(
+        strip(&known),
+        strip(&body),
+        "{path} no longer describes this writer.\n\
+         \n\
+         Committed above, measured below. Every one of these numbers moving is \
+         normal on a change that improves the writer -- re-bless with \
+         `mise run census-bless`. What is NOT normal is `union` going UP: that \
+         is a shape becoming corrupt that was not, and \
+         `mise run census-ratchet` will refuse it against main."
+    );
+}

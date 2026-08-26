@@ -11,8 +11,8 @@
 mod census_support;
 
 use census_support::{
-    alphabet, classify_with, for_each_shape, is_novel, nonclean_bitset, NonClean, Structure,
-    ALPHABET_LEN,
+    alphabet, classify_with, counts_ratchet, deep_scan, for_each_shape, is_novel, nonclean_bitset,
+    text_is_clean, Counts, NonClean, Structure, ALPHABET_LEN,
 };
 use kasane_writer::Ledger;
 
@@ -131,4 +131,101 @@ fn every_deletion_position_is_consulted() {
             "a non-clean deletion at position {i} was not consulted"
         );
     }
+}
+
+/// `deep_scan` at length 2, where the numbers are checkable by a direct walk.
+#[test]
+fn deep_scan_agrees_with_direct_walks_at_length_two() {
+    let shorter = nonclean_bitset(1, Ledger::LICENSED);
+    let scan = deep_scan(2, &shorter, Ledger::LICENSED);
+
+    let (mut queue, mut permanent, mut text_corrupt) = (0usize, 0usize, 0usize);
+    for_each_shape(2, |seq, _| {
+        if !text_is_clean(seq, Ledger::LICENSED) {
+            text_corrupt += 1;
+        }
+        match classify_with(seq, Ledger::LICENSED) {
+            Structure::Clean => {}
+            Structure::Corrupt => queue += 1,
+            Structure::Inexpressible => permanent += 1,
+        }
+    });
+
+    assert_eq!(scan.counts.queue, queue);
+    assert_eq!(scan.counts.permanent, permanent);
+    assert_eq!(scan.counts.union, queue + permanent);
+    assert_eq!(scan.text_corrupt.len(), text_corrupt);
+}
+
+/// A counts file round-trips through a bless and then checks clean.
+#[test]
+fn counts_ratchet_blesses_then_verifies() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("counts.txt");
+    let path = path.to_str().expect("utf-8 path");
+    let found = Counts {
+        queue: 7,
+        permanent: 3,
+        union: 10,
+    };
+
+    temp_env_bless(|| counts_ratchet(path, found, "# header\n"));
+
+    let body = std::fs::read_to_string(path).expect("written");
+    assert!(body.starts_with("# header\n"), "header must lead the file");
+    assert!(body.contains("queue 7"));
+    assert!(body.contains("permanent 3"));
+    assert!(body.contains("union 10"));
+
+    // Checking against the same numbers passes.
+    counts_ratchet(path, found, "# header\n");
+}
+
+/// A counts file that disagrees with reality fails.
+#[test]
+#[should_panic(expected = "census-len")]
+fn counts_ratchet_rejects_a_stale_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("census-len9-counts.txt");
+    let path = path.to_str().expect("utf-8 path");
+    temp_env_bless(|| {
+        counts_ratchet(
+            path,
+            Counts {
+                queue: 7,
+                permanent: 3,
+                union: 10,
+            },
+            "# h\n",
+        )
+    });
+    counts_ratchet(
+        path,
+        Counts {
+            queue: 8,
+            permanent: 3,
+            union: 11,
+        },
+        "# h\n",
+    );
+}
+
+/// Run `f` with `KASANE_CENSUS_BLESS` set, then restore the environment.
+///
+/// Serialized behind a mutex: `std::env::set_var` is process-global and libtest
+/// runs tests on threads, so two blessing tests in flight at once would see
+/// each other's variable.
+///
+/// No `unsafe` block: this workspace is edition 2021 (`Cargo.toml:8`), where
+/// `set_var` is safe. Wrapping it would trip `unused_unsafe` and fail the
+/// `-D warnings` lint gate. If the workspace ever moves to edition 2024 this
+/// needs an `unsafe` block and a SAFETY comment naming the mutex.
+fn temp_env_bless<T>(f: impl FnOnce() -> T) -> T {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("KASANE_CENSUS_BLESS", "1");
+    let out = f();
+    std::env::remove_var("KASANE_CENSUS_BLESS");
+    out
 }
