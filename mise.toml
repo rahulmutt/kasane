@@ -87,12 +87,28 @@ run = "cargo run -p kasane-cli --"
 # length-4 ones: a real but recoverable rough edge, loud (CI fails on the
 # un-blessed tier) with an easy fix -- correct the split constant census.rs
 # expects and re-run this task.
+#
+# Length 5 is here and RELEASE, unlike the two above: a debug bless of that
+# tier costs ~3.3 min for the same file. Length 6 is NOT here and has nothing
+# to bless -- it commits no files at all, because counts on a weekly cadence
+# go stale on main (design spec §3.2).
 [tasks.census-bless]
-description = "Regenerate every census ratchet file, both tiers"
+description = "Regenerate every census ratchet file, every tier"
 run = [
   "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census",
   "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --test census_len4",
+  "KASANE_CENSUS_BLESS=1 cargo test -p kasane-writer --release --test census_len5 -- --include-ignored",
 ]
+
+# The length-5 tier, release profile. `#[ignore]`d in the source so
+# `mise run test` (debug) skips it -- 35s here is 3.3 min there, for the same
+# answer.
+#
+# `--include-ignored` rather than `--ignored`: the latter runs ONLY ignored
+# tests, and this binary is meant to run whole.
+[tasks.census-len5]
+description = "Both census tiers plus the novelty check at length 5"
+run = "cargo test -p kasane-writer --release --test census_len5 -- --include-ignored"
 
 # The other half of the census ratchet. `cargo test` proves the allowlist files
 # match reality (census.rs's `ratchet` fails in both directions); this proves
