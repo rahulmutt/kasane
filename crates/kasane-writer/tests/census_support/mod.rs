@@ -622,3 +622,37 @@ pub fn nonclean_bitset(len: usize, ledger: Ledger) -> NonClean {
     });
     bits
 }
+
+/// Whether a shape is **novel**: non-clean for a reason no shorter shape shows.
+///
+/// `idx` is the shape's base-`ALPHABET_LEN` digits; `shorter` is the non-clean
+/// bitset one length down. The shape is novel when **all** of its
+/// single-deletion sub-shapes are clean. The caller has already established
+/// that the shape itself is non-clean -- this function does not re-classify it.
+///
+/// **Deletion, not contiguous substring**, and that is measured rather than
+/// chosen: of the 1,204,312 non-clean length-5 shapes, all 1,204,312 have a
+/// non-clean single-deletion sub-shape but only 1,204,044 have a non-clean
+/// contiguous one. A substring relation reports 268 false novelties on a clean
+/// tree. `an_interior_deletion_is_enough_to_make_a_shape_derivative` is what
+/// stops someone "simplifying" this into one.
+///
+/// Novelty is **zero at every length measured** -- 4 against <=3, 5 against
+/// <=4, 6 against <=5 -- which is why lengths 5 and 6 assert zero and commit no
+/// per-shape files (design spec §2.2). That zero is a property of this writer
+/// today, not a theorem.
+pub fn is_novel(idx: &[usize], shorter: &NonClean) -> bool {
+    debug_assert_eq!(idx.len(), shorter.shape_len() + 1);
+    for i in 0..idx.len() {
+        let mut sub = 0usize;
+        for (p, &d) in idx.iter().enumerate() {
+            if p != i {
+                sub = sub * ALPHABET_LEN + d;
+            }
+        }
+        if shorter.get(sub) {
+            return false;
+        }
+    }
+    true
+}

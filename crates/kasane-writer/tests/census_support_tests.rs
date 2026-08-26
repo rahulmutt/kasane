@@ -11,7 +11,8 @@
 mod census_support;
 
 use census_support::{
-    alphabet, classify_with, for_each_shape, nonclean_bitset, NonClean, Structure, ALPHABET_LEN,
+    alphabet, classify_with, for_each_shape, is_novel, nonclean_bitset, NonClean, Structure,
+    ALPHABET_LEN,
 };
 use kasane_writer::Ledger;
 
@@ -81,4 +82,53 @@ fn nonclean_bitset_agrees_with_a_direct_walk_at_length_two() {
         }
     });
     assert_eq!(bits.count(), direct);
+}
+
+/// Index of the shape `idx` becomes when position `i` is deleted.
+fn deletion_index(idx: &[usize], i: usize) -> usize {
+    idx.iter()
+        .enumerate()
+        .filter(|(p, _)| *p != i)
+        .fold(0usize, |acc, (_, &d)| acc * ALPHABET_LEN + d)
+}
+
+/// A shape whose every single-deletion sub-shape is clean is novel.
+#[test]
+fn a_shape_with_no_non_clean_deletion_is_novel() {
+    let shorter = NonClean::new(4);
+    assert!(is_novel(&[1, 2, 3, 4, 5], &shorter));
+}
+
+/// A shape with even one non-clean deletion is not novel.
+///
+/// The deletion is at the **interior** position 2, which is the case that
+/// separates this predicate from a contiguous-substring one. Design spec §2.1:
+/// of 1,204,312 non-clean length-5 shapes, all have a non-clean single-deletion
+/// sub-shape but only 1,204,044 have a non-clean contiguous one. A substring
+/// implementation passes every other test in this file and starts reporting
+/// 268 novelties on a clean tree.
+#[test]
+fn an_interior_deletion_is_enough_to_make_a_shape_derivative() {
+    let idx = [1usize, 2, 3, 4, 5];
+    let mut shorter = NonClean::new(4);
+    shorter.set(deletion_index(&idx, 2));
+    assert!(!is_novel(&idx, &shorter));
+}
+
+/// Every position is consulted, not just the first or last.
+///
+/// A predicate that checked only position 0 -- or that broke out of its loop
+/// before the end -- would pass both tests above for some inputs. This one
+/// fails unless all five deletions are asked about.
+#[test]
+fn every_deletion_position_is_consulted() {
+    let idx = [1usize, 2, 3, 4, 5];
+    for i in 0..5 {
+        let mut shorter = NonClean::new(4);
+        shorter.set(deletion_index(&idx, i));
+        assert!(
+            !is_novel(&idx, &shorter),
+            "a non-clean deletion at position {i} was not consulted"
+        );
+    }
 }

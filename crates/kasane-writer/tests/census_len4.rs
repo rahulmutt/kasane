@@ -426,3 +426,37 @@ fn the_length_four_permanent_file_splits_by_its_two_permanence_conditions() {
          same commit."
     );
 }
+
+/// Length-4 corruption is entirely inherited from lengths <= 3.
+///
+/// The cheap end of the measurement lengths 5 and 6 rest on (design spec §2.1):
+/// novelty is zero at every length measured. This one is affordable in the
+/// default test run, so it is the tripwire that fires first if the novelty
+/// relation ever stops holding -- long before the weekly length-6 job speaks.
+#[test]
+fn no_length_four_shape_is_corrupt_for_a_reason_length_three_does_not_show() {
+    let shorter = census_support::nonclean_bitset(3, Ledger::LICENSED);
+    let mut novel = 0usize;
+    let mut first: Vec<String> = Vec::new();
+    for_each_shape(4, |seq, idx| {
+        if classify_with(seq, Ledger::LICENSED) != Structure::Clean
+            && census_support::is_novel(idx, &shorter)
+        {
+            novel += 1;
+            if first.len() < 10 {
+                first.push(format!("{seq:?}"));
+            }
+        }
+    });
+    assert_eq!(
+        novel,
+        0,
+        "{novel} length-4 shape(s) are corrupt for a reason no length-3 shape \
+         shows. Design spec §2.2's case for lengths 5 and 6 committing no \
+         per-shape files rests on this being zero -- if it is not, that \
+         argument is void and the deep tiers need re-designing, not \
+         re-blessing.\nFirst {}:\n  {}",
+        first.len(),
+        first.join("\n  ")
+    );
+}
