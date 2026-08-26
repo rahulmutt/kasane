@@ -200,6 +200,62 @@ pub fn shapes() -> Vec<Vec<Inline>> {
     out
 }
 
+/// The census alphabet's size, and the radix every shape index is written in.
+///
+/// A shape of length `n` is a base-`ALPHABET_LEN` numeral with `n` digits, most
+/// significant first, and that numeral is its index everywhere in this module.
+/// `nonclean_bitset` keys on it and `is_novel` does deletion arithmetic with
+/// it, both of which would be wrong rather than merely slow if this drifted
+/// from `alphabet().len()`. `alphabet_len_matches_the_radix` pins them
+/// together.
+pub const ALPHABET_LEN: usize = 19;
+
+/// `ALPHABET_LEN.pow(k)`, as a `usize`.
+///
+/// Written as a fold rather than `pow` so an overflow at length 7 and up
+/// panics in debug on the multiply rather than wrapping silently: 19^7 fits a
+/// `usize`, but nothing here bounds what a future caller passes.
+pub fn pow19(k: usize) -> usize {
+    (0..k).fold(1usize, |a, _| a * ALPHABET_LEN)
+}
+
+/// Every sequence of `len` elements over the census alphabet, in ascending
+/// base-`ALPHABET_LEN` order, handed to `f` one at a time.
+///
+/// Streamed rather than materialized: a `Vec` of 19^5 shapes held at once is a
+/// cost the odometer does not pay, and at 19^6 it is not payable at all.
+///
+/// `f` receives the digit slice as well as the shape, because the deep tiers
+/// need the shape's index to do `is_novel`'s deletion arithmetic and
+/// recomputing it from the shape would mean a reverse lookup per element.
+/// Callers that do not need it take `|seq, _|`.
+///
+/// This is the **only** carry loop in the census. It lived in `census_len4.rs`
+/// as `for_each_length_four_shape` until lengths 5 and 6 needed one too, and a
+/// second copy there would have been exactly the drift this module exists to
+/// prevent -- the same argument `blessing()`'s doc makes about itself.
+pub fn for_each_shape(len: usize, mut f: impl FnMut(&[Inline], &[usize])) {
+    let a = alphabet();
+    assert_eq!(a.len(), ALPHABET_LEN);
+    let mut idx = vec![0usize; len];
+    loop {
+        let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
+        f(&seq, &idx);
+        let mut k = len;
+        loop {
+            if k == 0 {
+                return;
+            }
+            k -= 1;
+            idx[k] += 1;
+            if idx[k] < ALPHABET_LEN {
+                break;
+            }
+            idx[k] = 0;
+        }
+    }
+}
+
 /// One emphasis container, as it appears on the stack enclosing a character.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Emphasis {

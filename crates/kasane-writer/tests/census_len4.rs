@@ -40,7 +40,7 @@
 mod census_support;
 
 use census_support::{
-    alphabet, blessing, classify_with, permanence_ceiling, ratchet, text_is_clean, Structure,
+    blessing, classify_with, for_each_shape, permanence_ceiling, ratchet, text_is_clean, Structure,
 };
 use kasane_ir::Inline;
 use kasane_writer::Ledger;
@@ -49,32 +49,12 @@ use std::collections::BTreeSet;
 /// Every sequence of length 4 over the census alphabet, handed to `f` one at a
 /// time.
 ///
-/// Both tiers in this file walk the same 19^4 = 130,321 shapes, by odometer
-/// rather than by `shapes()`, which is fixed at lengths 1-3 — and streamed
-/// rather than materialized, since a `Vec` of 130,321 shapes held at once is a
-/// cost the odometer does not pay. One carry loop, called twice: two copies in
-/// one file is the drift `census_support` exists to prevent, one file closer
-/// in.
+/// A thin wrapper over `census_support::for_each_shape`, which is the census's
+/// one carry loop. This function kept its own copy until lengths 5 and 6
+/// needed the same loop; two copies in two files is the drift `census_support`
+/// exists to prevent, and three would have been worse.
 fn for_each_length_four_shape(mut f: impl FnMut(&[Inline])) {
-    let a = alphabet();
-    let n = a.len();
-    let mut idx = [0usize; 4];
-    loop {
-        let seq: Vec<Inline> = idx.iter().map(|&k| a[k].clone()).collect();
-        f(&seq);
-        let mut k = 4;
-        loop {
-            if k == 0 {
-                return;
-            }
-            k -= 1;
-            idx[k] += 1;
-            if idx[k] < n {
-                break;
-            }
-            idx[k] = 0;
-        }
-    }
+    for_each_shape(4, |seq, _| f(seq));
 }
 
 /// The corpus size the odometer must visit.

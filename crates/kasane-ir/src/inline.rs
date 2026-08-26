@@ -1,6 +1,6 @@
 use crate::ids::{BlockId, NoteId};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Inline {
     Text(String),
     Emph(Vec<Inline>),
@@ -14,7 +14,7 @@ pub enum Inline {
     FootnoteRef(NoteId),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RefTarget {
     Internal(BlockId),
     External(String),
