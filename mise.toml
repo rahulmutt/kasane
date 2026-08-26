@@ -149,6 +149,7 @@ ceil="$dir/census-permanent-count.txt"
 q4="$dir/census-len4-known-structure-corrupt.txt"
 p4="$dir/census-len4-inexpressible.txt"
 ceil4="$dir/census-len4-permanent-count.txt"
+counts5="$dir/census-len5-counts.txt"
 
 # The revision to measure against. On a PR this is the merge base with main; on
 # a push to main it resolves to HEAD itself, so every set compares equal and the
@@ -175,6 +176,22 @@ at_base() {
   git show "$base:$1" | awk '!/^#/ && NF' | LC_ALL=C sort -u
 }
 at_head() { awk '!/^#/ && NF' "$1" | LC_ALL=C sort -u; }
+
+# One labelled count out of a counts file, at a revision or at HEAD. Prints
+# nothing and returns 1 when the file or the label is absent, which is how the
+# skip below is detected.
+count_at() { # label path revision-or-empty
+  local body
+  if [ -n "$3" ]; then
+    git cat-file -e "$3:$2" 2>/dev/null || return 1
+    body="$(git show "$3:$2")"
+  else
+    [ -f "$2" ] || return 1
+    body="$(cat "$2")"
+  fi
+  printf '%s\\n' "$body" | awk -v k="$1" '$1 == k { print $2; found = 1 }
+                                          END { exit !found }'
+}
 
 for f in "$text" "$queue" "$perm" "$q4" "$p4"; do
   n="$(basename "$f")"
@@ -302,6 +319,46 @@ fi
 check queue4 "$tmp/base.$tq4"   "$tmp/head.$tq4"   report "$tmp/skip.$tq4"
 check perm4  "$tmp/base.$tp4"   "$tmp/head.$tp4"   report "$tmp/skip.$tp4"
 check union4 "$tmp/base.union4" "$tmp/head.union4" gate   "$tmp/skip.union4"
+
+# The length-5 counts. Three rows, one gate.
+#
+# `union5` is gated and the other two are reported, which is the length-3/4
+# logic reproduced rather than a new rule: there, "the union is what makes the
+# move safe to allow". `perm5` growing while `union5` is flat IS queue ->
+# permanent movement; `perm5` growing while `union5` grows fails on `union5`.
+# So the permanence ceiling has no length-5 form -- there is no set difference
+# to compute "newly permanent" from, and none is needed.
+#
+# Accuracy is inherited from `mise run census-len5`, which asserts this file
+# still describes the writer. That step runs BEFORE this one in ci.yml for the
+# same reason the Test step already does: run first, this could pass on a file
+# the tier was about to reject. A hand-edited `union 1204311` sails through
+# here -- the union shrank -- and only that tier catches the lie.
+count_check() { # label key gate
+  local b h verdict
+  if ! b="$(count_at "$2" "$counts5" "$base")"; then
+    printf '%-8s %8s %8s %8s   %s\\n' "$1" "" "" "" "skipped (no baseline)"
+    return 0
+  fi
+  if ! h="$(count_at "$2" "$counts5" "")"; then
+    echo "FAIL $1: $counts5 is missing its '$2' line at HEAD." >&2
+    fail=1
+    return 0
+  fi
+  verdict="ok"
+  if [ "$h" -gt "$b" ]; then
+    if [ "$3" = gate ]; then
+      verdict="FAIL -- $((h - b)) added"
+      fail=1
+    else
+      verdict="$((h - b)) moved in (not gated)"
+    fi
+  fi
+  printf '%-8s %8s %8s %+8d   %s\\n' "$1" "$b" "$h" "$((h - b))" "$verdict"
+}
+count_check queue5 queue     report
+count_check perm5  permanent report
+count_check union5 union     gate
 
 # A raise is how a human states "these shapes can never be fixed", so it must
 # come with shapes that actually moved in. Without this, the number could drift
