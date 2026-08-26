@@ -426,6 +426,7 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   strong-over-emph-only, none satisfying neither — and **not** by the length-3
   file's flanking-wall-vs-refusal split, which is a distinction by cause that no
   grep over ten thousand entries can make.
+  (`2026-08-23-length-4-structural-tier-design.md`).
   Lengths 5 and 6 are priced and guarded, since 2026-08-26, and **neither
   commits a per-shape file**. Every non-clean shape at 4, 5 and 6 has a
   non-clean single-deletion sub-shape — corruption in this alphabet never
@@ -442,7 +443,6 @@ Pipeline: input file -> detect -> adapter -> IR -> structure() -> write_tree -> 
   for leaving both unpriced was measured against the **debug** profile: the
   length-4 binary is 5.64 s debug and 0.72 s release
   (`2026-08-26-length-5-6-novelty-tier-design.md`).
-  (`2026-08-23-length-4-structural-tier-design.md`).
   Length 4 gets a **second union**, its queue plus its permanent file, gated the
   same way. Two files rather than three, because there is no length-4 text file
   — which is also why the promotion rule has no length-4 form: that rule exists
